@@ -1,0 +1,61 @@
+version: '3'
+method: checksum
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+tasks:
+  setup:
+    desc: Install Python deps via uv
+    cmds: [uv sync]
+    sources:
+      - pyproject.toml
+      - uv.lock
+    generates:
+      - .venv/pyvenv.cfg
+
+  convert:
+    desc: Export annamp PyTorch models to ONNX (idempotent)
+    deps: [setup]
+    cmds: [uv run python convert.py]
+    sources:
+      - convert.py
+      - _lib/**/*.py
+    generates:
+      - output/two-digit/model.onnx
+      - output/four-digit/model.onnx
+      - output/six-digit/model.onnx
+      - output/format_spec.json
+
+  verify:
+    desc: Parity check — ONNX vs PyTorch on synthetic corpus
+    deps: [convert]
+    cmds: [uv run python verify.py]
+    sources:
+      - verify.py
+      - _lib/**/*.py
+      - data/parity_inputs.csv
+      - output/two-digit/model.onnx
+      - output/four-digit/model.onnx
+      - output/six-digit/model.onnx
+
+  validate:
+    desc: 'Validate against panel data (default: 10k sample)'
+    deps: [verify]
+    cmds:
+      - 'uv run python validate.py --size={{.SIZE | default "10k"}} {{.CLI_ARGS}}'
+
+  validate:full:
+    desc: Full-panel validation (slow)
+    deps: [verify]
+    cmds: [uv run python validate.py --size=full]
+
+  all:
+    desc: Convert + verify (no validation, no upload)
+    cmds:
+      - task: convert
+      - task: verify
+
+  clean:
+    desc: Wipe all generated artifacts (output/)
+    cmds: [rm -rf output]

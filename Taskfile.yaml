@@ -1,0 +1,14 @@
+version: '3'
+method: checksum
+
+includes:
+  models:
+    taskfile: ./scripts/models
+    dir: ./scripts/models
+
+tasks:
+  default:
+    desc: List all available tasks
+    cmds:
+      - task --list-all
+    silent: true

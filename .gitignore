@@ -27,6 +27,9 @@ tmp/
 scripts/models/output/
 scripts/models/.venv/
 
+# Task runner checksum cache
+.task/
+
 # Python
 __pycache__/
 *.py[cod]
