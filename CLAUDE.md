@@ -34,6 +34,7 @@ The Rust dependencies in `src-tauri/Cargo.toml` currently only contain Tauri sca
 ## External references
 
 - **Tauri 2 docs (LLM-friendly index):** https://v2.tauri.app/llms.txt — authoritative, up-to-date Tauri reference. Prefer this over training-data recall when answering Tauri questions, writing Tauri-related code, or writing Tauri config/commands.
+- **NuxtUI docs (LLM-friendly index):** https://ui.nuxt.com/llms.txt - authoritative, up-to-date NuxtUI reference. Prefer this over training-data recall when answering NuxtUI questions or writing NuxtUI-related code.
 
 ## Commands
 

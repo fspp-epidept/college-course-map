@@ -47,3 +47,7 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code per-user settings (permission allowlist etc.); shared
+# project settings would live in .claude/settings.json instead.
+.claude/settings.local.json
