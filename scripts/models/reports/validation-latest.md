@@ -1,9 +1,9 @@
 # Validation report
 
-Generated: 2026-05-08T12:30:52Z
+Generated: 2026-05-08T12:40:16Z
 
 - Source CSV: `/home/nick/dev/um/jurgens/course-classifier/data/validation.csv`
-- Sample mode: `10k` (10,000 rows)
+- Sample mode: `full` (1,757,531 rows)
 - Input format: B (model card spec)
 - Execution provider (actual): CUDAExecutionProvider
 - Preferred order: CUDAExecutionProvider, CPUExecutionProvider
@@ -21,9 +21,9 @@ both are converted to floats for equality).
 
 | Model | Unique inputs | Rows compared | Accuracy | p50 (ms) | p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| Two-digit CCM | 9,705 | 10,000 | 77.5% | 0.18 | 0.20 |
-| Four-digit CCM | 9,705 | 10,000 | 57.0% | 0.18 | 0.19 |
-| Six-digit CCM | 9,705 | 10,000 | 36.1% | 0.18 | 0.19 |
+| Two-digit CCM | 209,582 | 1,757,531 | 77.7% | 0.17 | 0.20 |
+| Four-digit CCM | 209,582 | 1,757,531 | 57.5% | 0.18 | 0.19 |
+| Six-digit CCM | 209,582 | 1,757,531 | 36.7% | 0.16 | 0.18 |
 
 Disagreement detail (predicted ≠ panel label) lives in the run's
 `disagreements.csv`. See `output/validation/<run-id>/`.

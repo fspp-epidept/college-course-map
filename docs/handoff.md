@@ -656,7 +656,12 @@ The `literal` option matters: admins often process per-school files where the sc
 
 The models are stateless per input — every forward pass is independent. Combined with the configuration-keyed cache, this gives us two layers of dedup:
 
-**Within-run dedup**: real administrative data has 30–60% content duplication (same intro courses across schools, same standard offerings across years). Compute inference once per unique content hash, broadcast results across all matching courses.
+**Within-run dedup**: real administrative data has substantial content duplication (same intro courses across schools, same standard offerings across years). Compute inference once per unique content hash, broadcast results across all matching courses. The dedup ratio depends heavily on the dataset's shape:
+
+- **Datasets aligned to a unified course-numbering system** dedup very heavily. Measured against `data/validation.csv` (1.76M-row Texas higher-ed transfer panel using TCCNS, the Texas Common Course Numbering System): **~88% dedup, 209K unique inputs from 1.76M rows.** The same `MATH 1314 — College Algebra` literally appears 264 times across schools and years. Cache pays off massively: only 12% of nominal work needs fresh inference.
+- **Datasets without a unified numbering system** dedup much less. When subject codes and catalog numbers vary across institutions ("CSCI 101" vs "CIS 110" vs "CMP 100" for the same intro course), only exact-string repeats — typically the same school's offerings across years — collapse. **Plan for 30–60% dedup as a baseline expectation** for non-aligned data; treat anything more as upside.
+
+The cache-keyed design works either way; it just delivers more value the more aligned the data is. The UI should display cache-hit counts so users can see the saving in real time without needing to know any of this.
 
 **Across-run dedup**: identical model configurations on overlapping datasets share cache entries. A user who runs 4-digit + 6-digit on a dataset, then later wants to add 2-digit, only pays the inference cost for the 2-digit model. A user who imports a corrected version of a previously-classified file gets cache hits for every course whose content didn't change.
 
