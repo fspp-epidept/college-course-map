@@ -43,7 +43,11 @@ class ParityResult:
     passed: bool
 
 
-def verify_one(spec: ModelSpec, inputs: list[str]) -> ParityResult:
+def verify_one(
+    spec: ModelSpec,
+    inputs: list[str],
+    per_input: list[dict],
+) -> ParityResult:
     print(f"\n=== Verifying {spec.display_name} ===")
     onnx_path = OUTPUT_ROOT / spec.output_subdir / "model.onnx"
 
@@ -75,6 +79,16 @@ def verify_one(spec: ModelSpec, inputs: list[str]) -> ParityResult:
         ort_top3 = set(ort_logits.argsort()[-3:].tolist())
         if pt_top3 == ort_top3:
             top3_matches += 1
+
+        # Record per-input ONNX outputs so the Rust spike can assert byte-identical
+        # behaviour from its own ORT session against this fixture.
+        per_input.append({
+            "model_subdir": spec.output_subdir,
+            "input": text,
+            "argmax": int(ort_logits.argmax()),
+            "top3": [int(x) for x in ort_logits.argsort()[-3:][::-1].tolist()],
+            "logit_argmax_value": float(ort_logits.max()),
+        })
 
     n = len(inputs)
     argmax_agree = argmax_matches / n
@@ -120,9 +134,10 @@ def main() -> int:
     REPORTS_ROOT.mkdir(parents=True, exist_ok=True)
 
     results: list[ParityResult] = []
+    per_input: list[dict] = []
     for spec in MODELS:
         try:
-            results.append(verify_one(spec, inputs))
+            results.append(verify_one(spec, inputs, per_input))
         except Exception as e:
             print(f"FAIL: {spec.display_name}: {e}", file=sys.stderr)
             import traceback
@@ -142,11 +157,15 @@ def main() -> int:
     json_path = RESULTS_ROOT / "summary.json"
     json_path.write_text(json.dumps([asdict(r) for r in results], indent=2) + "\n")
 
+    per_input_path = RESULTS_ROOT / "per_input.json"
+    per_input_path.write_text(json.dumps(per_input, indent=2) + "\n")
+
     md_path = REPORTS_ROOT / "parity-latest.md"
     md_path.write_text(render_parity_report([asdict(r) for r in results]))
 
-    print(f"\nResults: {json_path}")
-    print(f"Report:  {md_path}")
+    print(f"\nResults:    {json_path}")
+    print(f"Per-input:  {per_input_path}")
+    print(f"Report:     {md_path}")
 
     failed = [r for r in results if not r.passed]
     if failed:
