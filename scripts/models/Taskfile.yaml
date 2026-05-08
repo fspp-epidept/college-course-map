@@ -62,6 +62,12 @@ tasks:
     deps: [verify]
     cmds: [uv run python validate.py --size=full]
 
+  upload:
+    desc: Push converted ONNX models to your HF namespace (one repo per model)
+    deps: [verify]
+    dotenv: ['.env']
+    cmds: [uv run python upload.py]
+
   all:
     desc: Convert + verify (no validation, no upload)
     cmds:
