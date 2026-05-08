@@ -37,6 +37,14 @@ task models:clean       # wipe output/
 
 `method: checksum` is set globally in `Taskfile.yaml`, so each step is skipped when its inputs and outputs haven't changed.
 
+## CUDA setup
+
+ONNX Runtime's CUDA EP needs the `libcublasLt.so.13`, `libcudnn.so.9`, etc. that ship inside the nvidia-* PyPI wheels. PyTorch finds them on its own; ORT does a lazy dlopen at session creation that doesn't search venv paths. The Taskfile sets `LD_LIBRARY_PATH` to point at `.venv/.../nvidia/cu13/lib` and `.../cudnn/lib` so the dynamic linker can find them — no other config needed.
+
+If you invoke the scripts directly with `uv run python …` (bypassing Task), you'll need to set `LD_LIBRARY_PATH` yourself, or accept the CPU fallback. The Taskfile is the supported path.
+
+The `onnxruntime-gpu` package itself comes from a non-PyPI nightly index because the PyPI build is still CUDA 12 only — see `[tool.uv.sources]` in `pyproject.toml`. CUDA 13 stable on PyPI will eventually replace this.
+
 ## Validation data
 
 `validate.py` looks for the panel CSV in this order:

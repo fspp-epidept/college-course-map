@@ -1,8 +1,20 @@
 version: '3'
 method: checksum
 
+vars:
+  # Discover the venv's site-packages dir at task time — survives Python
+  # version changes (3.14 today, could be 3.15 tomorrow). Empty if .venv
+  # doesn't exist yet, which is fine: setup will create it.
+  NVIDIA_LIB_ROOT:
+    sh: ls -d {{.TASKFILE_DIR}}/.venv/lib/python*/site-packages/nvidia 2>/dev/null || true
+
 env:
   PYTHONUNBUFFERED: "1"
+  # ONNX Runtime's CUDA EP does a lazy dlopen at session creation that doesn't
+  # search the venv's nvidia-* package dirs. Putting them on LD_LIBRARY_PATH
+  # before Python starts gives the dynamic linker the path it needs.
+  # cu13 must come before cudnn (cuDNN depends on cuBLAS).
+  LD_LIBRARY_PATH: '{{.NVIDIA_LIB_ROOT}}/cu13/lib:{{.NVIDIA_LIB_ROOT}}/cudnn/lib:{{.LD_LIBRARY_PATH | default ""}}'
 
 tasks:
   setup:

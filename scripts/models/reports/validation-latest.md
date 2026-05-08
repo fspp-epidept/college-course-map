@@ -1,6 +1,6 @@
 # Validation report
 
-Generated: 2026-05-08T12:26:02Z
+Generated: 2026-05-08T12:30:52Z
 
 - Source CSV: `/home/nick/dev/um/jurgens/course-classifier/data/validation.csv`
 - Sample mode: `10k` (10,000 rows)
@@ -21,9 +21,9 @@ both are converted to floats for equality).
 
 | Model | Unique inputs | Rows compared | Accuracy | p50 (ms) | p95 (ms) |
 |---|---:|---:|---:|---:|---:|
-| Two-digit CCM | 9,705 | 10,000 | 77.5% | 0.17 | 0.18 |
-| Four-digit CCM | 9,705 | 10,000 | 57.0% | 0.17 | 0.18 |
-| Six-digit CCM | 9,705 | 10,000 | 36.1% | 0.17 | 0.19 |
+| Two-digit CCM | 9,705 | 10,000 | 77.5% | 0.18 | 0.20 |
+| Four-digit CCM | 9,705 | 10,000 | 57.0% | 0.18 | 0.19 |
+| Six-digit CCM | 9,705 | 10,000 | 36.1% | 0.18 | 0.19 |
 
 Disagreement detail (predicted ≠ panel label) lives in the run's
 `disagreements.csv`. See `output/validation/<run-id>/`.

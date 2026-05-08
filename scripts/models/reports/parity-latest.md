@@ -1,6 +1,6 @@
 # Parity report
 
-Generated: 2026-05-08T12:26:25Z
+Generated: 2026-05-08T12:30:40Z
 
 Compares ONNX exports against PyTorch sources on a small synthetic corpus.
 Argmax should be ≥99% in most cases (occasional dips on near-tie inputs are
