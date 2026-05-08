@@ -1,0 +1,102 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Repository state
+
+This repo is currently a freshly-scaffolded **Tauri 2 + Vue 3 + Vite + TypeScript** template. The only application code is the default `greet` Hello World command (`src-tauri/src/lib.rs`, `src/App.vue`). Treat the template files as placeholders to replace, not as a pattern to extend.
+
+The substantive content of the project lives in `docs/`:
+
+- **`docs/handoff.md`** — primary architecture and implementation spec. Source of truth for design decisions, schema, IPC contracts, and build order. The "Suggested next steps" section at the bottom is the working backlog.
+- **`docs/keybinds.md`** — companion doc covering the three-layer keyboard-shortcut model (OS global / Tauri menu accelerator / WebView), the decision rule per shortcut, the concrete shortcut table for this app, and the `useNativeMenu` bridging composable.
+
+**Read both before doing any non-trivial work.** New architecture docs go in `docs/`, not the repo root.
+
+## What this app is
+
+A native desktop app for university administrators to bulk-classify courses against CIP codes using the [annamp/classifying-courses-at-scale](https://huggingface.co/collections/annamp/classifying-courses-at-scale) RoBERTa models (2/4/6-digit). Replaces an existing Flask reference app (`davidjurgens/course-classifier-website`). Realistic working datasets are ~2M rows / 200 MB CSV — architecture must assume long-running, interruptible, resumable jobs.
+
+A sample input file lives at `data/panel.csv` (~165 MB). Headers: `sub_pref,course,inventory_approval,inventory_course_title,inventory_credit_hours,inventory_level,Multiple Course?,year,school,academic_year,inventory_cip_six,inventory_cip_four,inventory_cip_two`.
+
+## Locked-in stack (per docs/handoff.md)
+
+- **UI shell:** Tauri 2 (already scaffolded)
+- **Frontend:** Vue 3 + Vite + TypeScript, Vue Router, **Nuxt UI v4** (bundles Reka UI primitives + Tailwind 4 + TanStack Table integration + admin Dashboard scaffold; works in plain Vue 3 via its Vite plugin), TanStack Query (Vue adapter) for IPC fetching, `@vueuse/core` for composables. PrimeVue is fallback-only; shadcn-vue and Naive UI were considered and rejected — don't relitigate.
+- **Inference:** Rust + ONNX Runtime via `ort` crate + `tokenizers` + `hf-hub` + `ndarray`
+- **Storage:** DuckDB via the `duckdb` crate (single store; SQLite+DuckDB-attach is the documented fallback if write contention bites)
+- **Models:** fetched at runtime from HF Hub, cached under platform `data_dir()`; not bundled
+
+The Rust dependencies in `src-tauri/Cargo.toml` currently only contain Tauri scaffolding — `ort`, `tokenizers`, `duckdb`, `hf-hub`, `blake3`, `dirs`, `tokio`, `ndarray` will need to be added as features land.
+
+## External references
+
+- **Tauri 2 docs (LLM-friendly index):** https://v2.tauri.app/llms.txt — authoritative, up-to-date Tauri reference. Prefer this over training-data recall when answering Tauri questions, writing Tauri-related code, or writing Tauri config/commands.
+
+## Commands
+
+Primary command runner is **[Task](https://taskfile.dev)** (`go-task`). All build/dev/test/lint commands should be wrapped as Task tasks; invoke them as `task <name>` and add new ones to `Taskfile.yaml` rather than proliferating raw `pnpm` / `cargo` lines in docs and READMEs.
+
+**Use `method: checksum` as the global default in `Taskfile.yaml`.** Default mtime-based caching produces spurious cache misses (and stale-cache hits) after `git checkout`, fresh clones, or any operation that bumps mtime without changing content. Checksum hashes the source files instead — slower per check, but correct.
+
+```yaml
+# Taskfile.yaml — set at the top level so every task inherits it
+version: '3'
+method: checksum
+tasks:
+  # ...
+```
+
+There is no `Taskfile.yaml` yet. Write one as soon as the first non-trivial command lands; don't let a "we'll wrap it later" period accumulate raw invocations across docs.
+
+**Underlying tools** (referenced by Task tasks; useful to know for direct invocation when bypassing Task or debugging a task definition):
+
+- **pnpm** — JS package manager; referenced by `tauri.conf.json` `beforeDevCommand` / `beforeBuildCommand`. Common raw forms: `pnpm install`, `pnpm dev` (Vite only, port 1420 strict), `pnpm build` (`vue-tsc --noEmit && vite build`), `pnpm tauri dev` (full app), `pnpm tauri build` (signed/notarized bundle).
+- **cargo** — run from inside `src-tauri/`. `cargo check` (fast typecheck), `cargo build`, `cargo test` (no tests yet).
+
+There is currently no test runner, linter, or formatter wired up. Don't invent commands that don't exist; when one is added (Vitest, Biome, `cargo test`, etc.), wrap it as a Task task and reference it here.
+
+## Architectural ground rules (from docs/handoff.md)
+
+These are decisions to respect, not re-litigate:
+
+- **Keep Rust's IPC surface narrow.** Rust handles ONNX inference, tokenization, DuckDB I/O, HF Hub downloads, CSV streaming, file I/O, hashing. Everything else (UI state, small-set filtering, chart config, form validation) lives in TypeScript. Every `#[tauri::command]` is a contract you must maintain.
+- **CSV import split:** the column-mapping configurator UI lives in Vue; all parsing/hashing/validation/ingestion happens in Rust. Frontend never reads the file directly. Three commands: `preview_csv` (headers + ~5 rows), `validate_import` (full-file dry run, no writes), `import_csv` (full ingestion, persists mapping on `source_files`).
+- **Never ship 2M rows across the IPC boundary.** Tauri commands return slices. TanStack Table runs in server-side mode. Dashboard aggregations execute in DuckDB and return summary rows. Exports stream from DuckDB to disk; frontend gets a path.
+- **Cache by `(model_id, content_hash)`, not by run.** `inference_results` is a global cache keyed by inference configuration; it is intentionally *not* foreign-keyed to courses, datasets, or runs. Classifications survive dataset changes/deletions and reuse across runs by construction. This is what makes the planned Phase 2 cross-dataset matching trivial.
+- **Model input format matters.** The annamp models expect `"{SUBJECT CODE} {CATALOG NUMBER} --- {COURSE TITLE}"`. The reference Flask app gets this wrong. Don't make the frontend responsible for assembling this — Rust assembles the model input from structured fields, and that assembled string is what gets hashed into `content_hash`.
+- **Write-batching during inference:** flush ~1000 results or 30 seconds, whichever comes first. Run progress fields are updated in the same transaction as the cache insert, so crash recovery is consistent by construction.
+- **Separate read-write and read-only DuckDB connections.** Inference pipeline holds the read-write conn; dashboard queries open their own read-only conns. Periodic `CHECKPOINT` during long runs.
+- **Schema:** `source_files`, `datasets` (with `source_kind`, `parent_dataset_id`, `filter_spec`, `supersedes_id`), `courses` (no uniqueness on `(dataset_id, content_hash)` — legitimate duplicates are preserved), `models` (normalized, surrogate key referenced by cache), `runs` (lifecycle states: `pending|running|paused|completed|failed|interrupted|cancelled`), `inference_results` (PK `(model_id, content_hash)`). Full DDL in `docs/handoff.md` "Schema" section.
+- **Native OS chrome and menu bar are part of the design.** Keep `decorations: true`; build a native application menu via `tauri::menu::MenuBuilder` (File / Edit / Run / View / Window / Help). Menu clicks fire Rust events that re-emit as Tauri events to the frontend, bridged into the app via a single `useNativeMenu` composable (see `docs/keybinds.md`). The Nuxt UI `DashboardSidebar` is in-app navigation; the OS menu is *additional*, not a replacement.
+- **Keyboard shortcuts: see `docs/keybinds.md`.** Three layers (OS global / Tauri menu accelerator / WebView composables); never duplicate a binding across layers — menu accelerators are intercepted before the WebView sees them. Default to menu accelerators for any action that belongs in a menu; reserve frontend layer for component-scoped behavior (`Esc`, `↑/↓` in dropdowns, `/` to focus search).
+
+## Security baseline
+
+This is a local-only desktop app, so most web threats (auth, CSRF, network hardening) don't apply. The relevant attack surface is **untrusted CSVs** and the **model supply chain**. Keep this list short by handling each item once, in the right layer.
+
+- **Treat every CSV as hostile input.** Bound field size and column count during parsing. Never use a CSV value as a filesystem path. Validate column indexes and literal values from the mapping spec against the file's actual structure (handoff.md already specifies this).
+- **CSV export must escape formula injection.** Prefix-escape any cell starting with `=`, `+`, `-`, `@`, tab, or CR (OWASP "CSV injection") so admins opening exports in Excel don't get formulas executed.
+- **Never use `v-html` with model output, course data, or anything else from the DB.** Vue's `{{ }}` / `:attr` auto-escape — rely on that. Validate URL schemes (`http`, `https` only — block `javascript:` and `data:`) before binding to `href`/`src`.
+- **Parameterized SQL only.** Use `?` placeholders via the `duckdb` crate. Identifiers (column names, table names) must come from a hardcoded allowlist, never from user input or the mapping spec.
+- **Pin model revisions on HF Hub.** Always download by commit hash, not `main`. Verify file hashes when the API returns them. A tampered ONNX graph is effectively RCE through ONNX Runtime — don't accept "latest."
+- **Keep the Tauri capabilities file minimal.** `src-tauri/capabilities/default.json` currently allows only `core:default` + `opener:default` — keep it that tight. Use scoped FS permissions (read on user-selected paths via the dialog plugin, read-write only on the app data dir). Don't enable `shell:allow-execute`.
+- **Set a real CSP before first release.** `tauri.conf.json` currently has `"csp": null`. Reasonable starting policy: `default-src 'self'; img-src 'self' data: https://huggingface.co; connect-src 'self' https://huggingface.co; style-src 'self' 'unsafe-inline'` (Tailwind needs inline styles).
+- **Code signing & notarization** is a hard requirement for distribution to non-technical users — covered in handoff.md and listed under "Things explicitly deferred" below; don't ship release binaries unsigned.
+
+Skip preemptively: auth, rate limiting, secrets management, IPC fuzzing (serde-typed `invoke_handler` already enforces shape).
+
+## Style preferences for this repo
+
+User's global rules (from `~/.claude/CLAUDE.md`) apply: simple over complex, no fallbacks, surgical changes, fix root causes. Specifically relevant here:
+
+- No emojis in code, READMEs, or commit messages unless asked. Functional indicators (✓, ✗, ⚠) acceptable in UI when needed.
+- Scratch/handoff files go in `tmp/` at repo root. **Verify `tmp` is in `.gitignore` before writing there; add it if missing** (`.gitignore` does not currently list it).
+- Don't write a long README until there's something real to document. The current README is still the default Tauri template.
+
+## Things explicitly deferred (do not solve preemptively)
+
+- Quantization (F16/int8) — collaborator decision; ship F32 first.
+- Whether to bundle models or fetch at runtime — leaning runtime fetch, but not final.
+- Whether converted ONNX models go under our HF account or annamp's — needs a conversation.
+- Code signing certificates — flagged as the highest-priority *non-technical* blocker but not something to act on without user direction.
