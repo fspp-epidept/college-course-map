@@ -1,6 +1,8 @@
 # scripts/models — ONNX conversion pipeline
 
-Build-time tooling. Converts annamp's PyTorch CIP classifiers to ONNX, verifies parity, validates accuracy on labeled data, and (eventually) uploads converted models to Hugging Face. The Tauri app never runs Python — it only consumes the ONNX artifacts this pipeline produces.
+Build-time tooling. Converts annamp's PyTorch CCM classifiers to ONNX, verifies parity, validates accuracy on labeled data, and (eventually) uploads converted models to Hugging Face. The Tauri app never runs Python — it only consumes the ONNX artifacts this pipeline produces.
+
+> Note: the panel CSV columns are named `inventory_cip_two/four/six` for historical reasons, but the values are CCM codes, not federal CIP codes. The code uses `ccm_*` naming throughout; the column names are preserved as-is because they reference the actual data.
 
 ## Layout
 

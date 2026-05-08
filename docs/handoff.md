@@ -2,7 +2,7 @@
 
 ## Context
 
-We're building a native desktop app that wraps the [annamp/classifying-courses-at-scale](https://huggingface.co/collections/annamp/classifying-courses-at-scale) RoBERTa-base models (2-digit, 4-digit, and 6-digit CIP/CCM classification). The reference implementation is a Flask web app at [davidjurgens/course-classifier-website](https://github.com/davidjurgens/course-classifier-website).
+We're building a native desktop app that wraps the [annamp/classifying-courses-at-scale](https://huggingface.co/collections/annamp/classifying-courses-at-scale) RoBERTa-base models (2-digit, 4-digit, and 6-digit CCM classification). The reference implementation is a Flask web app at [davidjurgens/course-classifier-website](https://github.com/davidjurgens/course-classifier-website).
 
 **Decisions locked in:**
 - Native desktop app is the primary deliverable. Hosted web app is a secondary "try before you install" target. Container deployment falls out of the web app.
@@ -28,7 +28,7 @@ This tool exists to help university curricula and admissions administrators hand
 - Administrators need to make these comparisons for inbound and outbound transfer students, often in bulk during admissions cycles.
 - Authoring blanket transfer credit policies is hard without a systematic way to compare curricula across institutions.
 
-The annamp RoBERTa classifiers solve a piece of this by mapping arbitrary course titles/descriptions to standardized CIP codes (Classification of Instructional Programs). Two courses that classify to the same 6-digit CIP are presumptively equivalent for credit purposes; matching at 4-digit indicates related fields; 2-digit indicates the same general area of study.
+The annamp RoBERTa classifiers solve a piece of this by mapping arbitrary course titles/descriptions to standardized CCM codes. Two courses that classify to the same 6-digit CCM are presumptively equivalent for credit purposes; matching at 4-digit indicates related fields; 2-digit indicates the same general area of study.
 
 The tool's job is to make this classification accessible to administrators who currently rely on Excel and manual review, without requiring them to manage Python environments, GPU drivers, or cloud infrastructure. It's not a research tool — though the underlying models are an academic project — it's a workhorse for office workflows.
 
@@ -40,7 +40,7 @@ The tool will develop over multiple phases. This document is mostly Phase 1, but
 
 **Phase 1 (current planning)**: Import CSV → classify → browse results → export CSV. Basic but functional. Replaces the manual workflow with a faster, model-assisted one. Datasets sidebar, paginated results table, simple dashboard, export to CSV. This is what the rest of this document covers.
 
-**Phase 2: Cross-dataset course matching.** "I have this course; what courses across my other imported datasets share its CIP classification?" Naturally supported by the cache-keyed schema — classifications are globally addressable by `(model_id, content_hash)`, joinable across all imported data without restructuring. The UI would surface this as an "equivalent courses" view per course, ranked by match strictness (6-digit exact > 4-digit related > 2-digit general field), with the source dataset/institution shown for each match.
+**Phase 2: Cross-dataset course matching.** "I have this course; what courses across my other imported datasets share its CCM classification?" Naturally supported by the cache-keyed schema — classifications are globally addressable by `(model_id, content_hash)`, joinable across all imported data without restructuring. The UI would surface this as an "equivalent courses" view per course, ranked by match strictness (6-digit exact > 4-digit related > 2-digit general field), with the source dataset/institution shown for each match.
 
 **Phase 3+**: Additional metadata (institutional accreditation, credit hour normalization, transfer agreement registries), course augmentation (description enrichment, embedding-based similarity for non-classification matching), workflow tooling (saved searches, batch decisions, audit trails for transfer credit decisions).
 

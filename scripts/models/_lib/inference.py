@@ -1,10 +1,53 @@
 """Shared ONNX Runtime helpers."""
 from __future__ import annotations
 
+import ctypes
+import sys
 from pathlib import Path
 
 import numpy as np
 import onnxruntime as ort
+
+
+def _preload_cuda_libs() -> None:
+    """Make the venv's nvidia-* CUDA libs visible to ONNX Runtime's CUDA EP.
+
+    The nvidia-* PyPI packages (nvidia-cublas, nvidia-cudnn-cu13, etc.) drop
+    .so files into `.venv/.../site-packages/nvidia/<pkg>/lib/`. PyTorch
+    preloads them via its own import-time mechanism, but ONNX Runtime's CUDA
+    provider opens them lazily at session-creation time using the system
+    dynamic linker, which doesn't search those venv paths. Calling
+    ctypes.CDLL with RTLD_GLOBAL pulls each lib into the process and adds
+    its symbols to the global symbol table, so ORT's later dlopen finds them.
+
+    Idempotent and safe: failures are silently swallowed (libs may not be
+    present on every platform; ORT will fall back to CPU automatically).
+    """
+    try:
+        import nvidia  # type: ignore[import-untyped]
+    except ImportError:
+        return
+
+    # `nvidia` is a namespace package — no __file__, but __path__ lists
+    # every directory that contributes to it (one per nvidia-* wheel).
+    lib_subdirs = ("cu13/lib", "cudnn/lib")
+    seen: set[Path] = set()
+    for root in map(Path, nvidia.__path__):
+        for sub in lib_subdirs:
+            d = root / sub
+            if d in seen or not d.is_dir():
+                continue
+            seen.add(d)
+            for so in sorted(d.glob("*.so*")):
+                try:
+                    ctypes.CDLL(str(so), mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+
+
+# Preload at import time so any subsequent ort.InferenceSession with CUDA EP works.
+if sys.platform == "linux":
+    _preload_cuda_libs()
 
 
 def select_providers() -> list[str]:

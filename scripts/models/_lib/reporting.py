@@ -53,7 +53,7 @@ def render_validation_report(results: list[dict[str, Any]], meta: dict[str, Any]
         "didn't break the model.",
         "",
         "Accuracy compares predictions to `inventory_cip_*` after canonicalizing both",
-        "to a common numeric form (panel uses bare digits, models use dotted CIP form;",
+        "to a common numeric form (panel uses bare digits, models use dotted CCM form;",
         "both are converted to floats for equality).",
         "",
         "| Model | Unique inputs | Rows compared | Accuracy | p50 (ms) | p95 (ms) |",

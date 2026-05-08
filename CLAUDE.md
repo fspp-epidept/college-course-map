@@ -15,7 +15,9 @@ The substantive content of the project lives in `docs/`:
 
 ## What this app is
 
-A native desktop app for university administrators to bulk-classify courses against CIP codes using the [annamp/classifying-courses-at-scale](https://huggingface.co/collections/annamp/classifying-courses-at-scale) RoBERTa models (2/4/6-digit). Replaces an existing Flask reference app (`davidjurgens/course-classifier-website`). Realistic working datasets are ~2M rows / 200 MB CSV — architecture must assume long-running, interruptible, resumable jobs.
+A native desktop app for university administrators to bulk-classify courses against CCM codes using the [annamp/classifying-courses-at-scale](https://huggingface.co/collections/annamp/classifying-courses-at-scale) RoBERTa models (2/4/6-digit). Replaces an existing Flask reference app (`davidjurgens/course-classifier-website`). Realistic working datasets are ~2M rows / 200 MB CSV — architecture must assume long-running, interruptible, resumable jobs.
+
+> Naming note: the panel CSV columns are named `inventory_cip_*` for historical reasons, but the values are CCM codes, not federal CIP codes. Code uses `ccm_*` naming throughout; column names are preserved as-is because they reference the actual data.
 
 A sample input file lives at `data/panel.csv` (~165 MB). Headers: `sub_pref,course,inventory_approval,inventory_course_title,inventory_credit_hours,inventory_level,Multiple Course?,year,school,academic_year,inventory_cip_six,inventory_cip_four,inventory_cip_two`.
 

@@ -6,7 +6,7 @@ The Python in this project is **build-time tooling, not runtime infrastructure**
 
 ## Source models (annamp)
 
-Three RoBERTa-base CIP classifiers, all on Hugging Face:
+Three RoBERTa-base CCM classifiers, all on Hugging Face:
 
 - `annamp/classifying-courses-at-scale-two-digit-roberta-base`
 - `annamp/classifying-courses-at-scale-four-digit-roberta-base`  *(verify exact name)*
@@ -35,7 +35,7 @@ End state: three new HF repos under your namespace, each containing `model.onnx`
 - A Hugging Face account with write access. Generate a token at huggingface.co/settings/tokens (Type: Write). Export as `HF_TOKEN` in your shell, or use `huggingface-cli login` once.
 - Disk space: ~3 GB free for the three F32 models + their PyTorch sources + scratch space during conversion.
 - Time: each model takes 2-5 minutes to convert, 1-2 minutes to verify, ~1-2 minutes to upload depending on connection. Plan for an hour end-to-end.
-- Optional: a labeled test set of course inputs with known CIP codes, for accuracy verification beyond parity. If unavailable, parity verification on diverse but unlabeled inputs is sufficient for Phase 1.
+- Optional: a labeled test set of course inputs with known CCM codes, for accuracy verification beyond parity. If unavailable, parity verification on diverse but unlabeled inputs is sufficient for Phase 1.
 
 ## Project layout
 
@@ -127,17 +127,17 @@ MODELS = [
     ModelSpec(
         source_repo="annamp/classifying-courses-at-scale-two-digit-roberta-base",
         output_subdir="two-digit",
-        display_name="Two-digit CIP classifier",
+        display_name="Two-digit CCM classifier",
     ),
     ModelSpec(
         source_repo="annamp/classifying-courses-at-scale-four-digit-roberta-base",
         output_subdir="four-digit",
-        display_name="Four-digit CIP classifier",
+        display_name="Four-digit CCM classifier",
     ),
     ModelSpec(
         source_repo="annamp/classifying-courses-at-scale-six-digit-roberta-base",
         output_subdir="six-digit",
-        display_name="Six-digit CIP classifier",
+        display_name="Six-digit CCM classifier",
     ),
 ]
 
@@ -393,9 +393,9 @@ Run with `uv run python verify.py`. This should produce output like:
 ```
 Model                          Argmax    Top-3    MaxDiff    MeanDiff
 ----------------------------------------------------------------------
-Two-digit CIP classifier        100.0%   100.0%   3.42e-05   8.71e-06
-Four-digit CIP classifier       100.0%   100.0%   4.18e-05   1.02e-05
-Six-digit CIP classifier         95.0%   100.0%   8.93e-05   1.85e-05
+Two-digit CCM classifier        100.0%   100.0%   3.42e-05   8.71e-06
+Four-digit CCM classifier       100.0%   100.0%   4.18e-05   1.02e-05
+Six-digit CCM classifier         95.0%   100.0%   8.93e-05   1.85e-05
 ```
 
 **What numbers to expect**:
@@ -446,7 +446,7 @@ tags:
   - onnx
   - text-classification
   - course-classification
-  - cip-codes
+  - ccm-codes
 base_model: {spec.source_repo}
 pipeline_tag: text-classification
 ---

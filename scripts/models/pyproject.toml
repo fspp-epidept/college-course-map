@@ -18,3 +18,12 @@ dependencies = [
 
 [tool.uv]
 package = false
+prerelease = "allow"
+
+[[tool.uv.index]]
+name = "ort-cuda13-nightly"
+url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ort-cuda-13-nightly/pypi/simple/"
+explicit = true
+
+[tool.uv.sources]
+onnxruntime-gpu = { index = "ort-cuda13-nightly" }

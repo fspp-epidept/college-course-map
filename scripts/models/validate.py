@@ -110,13 +110,16 @@ def hash_input(text: str) -> str:
     return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
 
 
-def normalize_cip(code: str, digit_level: int) -> float | None:
-    """Canonicalize a CIP code (panel digits-only or model dotted form) as a float.
+def normalize_ccm(code: str, digit_level: int) -> float | None:
+    """Canonicalize a CCM code (panel digits-only or model dotted form) as a float.
+
+    Note: panel CSV columns are named `inventory_cip_*` for historical reasons,
+    but the values they contain are CCM codes, not federal CIP codes.
 
     Panel format: bare digits, no period, optional leading zero stripped
-        e.g., '52', '5210', '521005', '105' (= CIP 01.05)
+        e.g., '52', '5210', '521005', '105' (= CCM 01.05)
     Model format: dotted, leading and trailing zeros sometimes stripped
-        e.g., '52', '52.1', '52.1005', '1.0' (= CIP 01.00)
+        e.g., '52', '52.1', '52.1005', '1.0' (= CCM 01.00)
 
     Returns None for empty / NaN / unparseable.
     """
@@ -137,9 +140,9 @@ def normalize_cip(code: str, digit_level: int) -> float | None:
     return n / (10 ** suffix_width) if suffix_width > 0 else float(n)
 
 
-def cip_equal(a: str, b: str, digit_level: int) -> bool:
-    fa = normalize_cip(a, digit_level)
-    fb = normalize_cip(b, digit_level)
+def ccm_equal(a: str, b: str, digit_level: int) -> bool:
+    fa = normalize_ccm(a, digit_level)
+    fb = normalize_ccm(b, digit_level)
     if fa is None or fb is None:
         return False
     return math.isclose(fa, fb, abs_tol=1e-9)
@@ -212,7 +215,7 @@ def validate_one(
             n_skipped += 1
             continue
         pred = pred_by_hash[h]
-        if cip_equal(pred, truth, spec.digit_level):
+        if ccm_equal(pred, truth, spec.digit_level):
             correct += 1
         else:
             disagreements.append({
@@ -223,8 +226,8 @@ def validate_one(
                 "course_title": df.iloc[row_i][COL_TITLE],
                 "predicted": pred,
                 "ground_truth": truth,
-                "predicted_normalized": normalize_cip(pred, spec.digit_level),
-                "ground_truth_normalized": normalize_cip(truth, spec.digit_level),
+                "predicted_normalized": normalize_ccm(pred, spec.digit_level),
+                "ground_truth_normalized": normalize_ccm(truth, spec.digit_level),
             })
 
     n_compared = len(df) - n_skipped
