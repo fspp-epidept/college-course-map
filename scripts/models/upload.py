@@ -36,10 +36,11 @@ EXPECTED_FILES = {
 }
 
 COLLECTION_TITLE = "Course classifiers (ONNX)"
+# HF caps the description at <150 chars. Markdown link to annamp's collection
+# fits, but only just; if you edit, count carefully.
 COLLECTION_DESCRIPTION = (
-    "ONNX exports of [annamp's course classifiers]"
-    "(https://huggingface.co/collections/annamp/classifying-courses-at-scale) "
-    "for non-Python inference environments."
+    "ONNX exports of [annamp/classifying-courses-at-scale]"
+    "(https://huggingface.co/collections/annamp/classifying-courses-at-scale)."
 )
 
 
