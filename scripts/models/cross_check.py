@@ -1,6 +1,7 @@
 """Cross-check: run an HF source PyTorch model directly on the same panel
-sample validate.py uses, to confirm whether observed accuracy is intrinsic
-to the source model on this data or an artifact of our pipeline.
+sample validate.py uses, to confirm whether the observed CIP/CCM overlap
+rate is intrinsic to the source PyTorch model or an artifact of our ONNX
+pipeline. (Confirmed: PyTorch and ONNX argmax-agree.)
 
 Default: six-digit model, 10k sample, same seed as validate.py defaults.
 PyTorch will use CUDA if available — much faster than ONNX-on-CPU here.
@@ -21,7 +22,7 @@ from validate import (
     COL_SUBJECT,
     COL_TITLE,
     SAMPLE_SIZES,
-    ccm_equal,
+    codes_match,
     load_and_filter,
     maybe_sample,
     resolve_csv_path,
@@ -63,7 +64,7 @@ def main() -> int:
     config = AutoConfig.from_pretrained(spec.source_repo)
     id2label = {int(k): str(v).strip() for k, v in config.id2label.items()}
 
-    correct = 0
+    matched = 0
     n_compared = 0
     t0 = time.perf_counter()
 
@@ -85,19 +86,19 @@ def main() -> int:
                 if not truth or truth.lower() in {"nan", "none", ""}:
                     continue
                 pred = id2label[int(idx)]
-                if ccm_equal(pred, truth, args.digit):
-                    correct += 1
+                if codes_match(pred, truth, args.digit):
+                    matched += 1
                 n_compared += 1
             if (i // args.batch_size) % 100 == 0 and i > 0:
                 print(f"  {i:,}/{len(inputs):,}")
 
     elapsed = time.perf_counter() - t0
-    acc = correct / n_compared if n_compared else 0.0
+    overlap = matched / n_compared if n_compared else 0.0
     print()
     print(f"=== {spec.display_name} (PyTorch / {device}) ===")
-    print(f"  rows compared: {n_compared:,} / {len(df):,}")
-    print(f"  accuracy:      {acc:.1%}")
-    print(f"  elapsed:       {elapsed:.1f}s")
+    print(f"  rows compared:   {n_compared:,} / {len(df):,}")
+    print(f"  CIP/CCM overlap: {overlap:.1%}")
+    print(f"  elapsed:         {elapsed:.1f}s")
     return 0
 
 

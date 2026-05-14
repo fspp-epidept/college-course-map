@@ -1,8 +1,8 @@
 # scripts/models — ONNX conversion pipeline
 
-Build-time tooling. Converts annamp's PyTorch CCM classifiers to ONNX, verifies parity, validates accuracy on labeled data, and (eventually) uploads converted models to Hugging Face. The Tauri app never runs Python — it only consumes the ONNX artifacts this pipeline produces.
+Build-time tooling. Converts annamp's PyTorch CCM classifiers to ONNX, verifies ONNX↔PyTorch parity, measures CIP/CCM taxonomy overlap on the labeled panel, and uploads converted models to Hugging Face. The Tauri app never runs Python — it only consumes the ONNX artifacts this pipeline produces.
 
-> Note: the panel CSV columns are named `inventory_cip_two/four/six` for historical reasons, but the values are CCM codes, not federal CIP codes. The code uses `ccm_*` naming throughout; the column names are preserved as-is because they reference the actual data.
+> Note: the panel CSV (`data/validation.csv`) `inventory_cip_*` columns contain federal **CIP codes** (Classification of Instructional Programs). The annamp models output **CCM codes** — a distinct hierarchical 2/4/6-digit taxonomy. CIP and CCM overlap heavily at the broad 2-digit level but diverge at 4/6-digit. `validate.py`'s overlap rate is *not* model accuracy; it's a CIP/CCM agreement measure. The meaningful correctness check is parity (Rust ONNX == Python ONNX == annamp PyTorch). In code, `ccm_*` names refer to model-output identifiers; panel column names are preserved as-is.
 
 ## Layout
 
@@ -13,7 +13,7 @@ scripts/models/
 ├── _lib/                  shared module (model specs, format, inference, reporting)
 ├── convert.py             optimum-cli export, idempotent
 ├── verify.py              ONNX vs PyTorch parity on a synthetic corpus
-├── validate.py            real-world accuracy on labeled panel data
+├── validate.py            CIP/CCM overlap rate on labeled panel data
 ├── upload.py              push to HF (TODO — placeholder until env-check is added)
 ├── data/
 │   └── parity_inputs.csv  20-row synthetic corpus, committed
@@ -69,6 +69,6 @@ This matches annamp's model card. The Tauri Rust app must produce byte-identical
 
 ## Open questions
 
-- Train/test split status of `data/validation.csv` — unconfirmed. Until annamp confirms, treat validation accuracy as preliminary (may be inflated by training-set memorization).
+- Train/test split status of `data/validation.csv` — unconfirmed. Mostly moot now that we know the panel is CIP and the models are CCM (so memorization can't inflate the *overlap* rate the way it would inflate accuracy on same-taxonomy labels), but worth confirming if annamp ever publishes a CCM-labeled holdout.
 - HF namespace for converted-ONNX repos — TBD. `upload.py` will read `HF_USERNAME` from `.env` (loaded automatically by uv).
 - Quantization (F16 / int8) — deferred. F32 only for now.

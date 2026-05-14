@@ -1,9 +1,16 @@
-"""Validate ONNX models against labeled panel data.
+"""Measure CIP/CCM taxonomy overlap on labeled panel data.
 
 Loads validation.csv, filters to clean rows, optionally samples, dedups by
 content hash, runs each model on the unique inputs, broadcasts predictions
-back to original rows, compares against the corresponding `inventory_cip_*`
-column for accuracy.
+back to original rows, and reports the rate at which model output (CCM)
+agrees with the panel's `inventory_cip_*` columns (federal CIP).
+
+CIP and CCM are *distinct taxonomies* that overlap heavily at the broad
+2-digit level and diverge as specificity increases. The reported rate is
+not model accuracy — it's a taxonomy-overlap measurement, useful for
+sanity-checking the pipeline end-to-end. The meaningful correctness check
+is parity (Rust ONNX == Python ONNX == annamp PyTorch), covered by
+verify.py.
 
 Defaults to a 10K random sample. Use `--size=full` for the whole panel.
 GPU is used automatically when available; CPU is the documented fallback.
@@ -53,8 +60,8 @@ class ValidationResult:
     n_unique: int
     n_rows: int
     n_skipped: int
-    correct: int
-    accuracy: float
+    matched: int            # rows where panel CIP matched model CCM at this digit level
+    overlap_rate: float     # matched / n_rows
     latency_p50_ms: float
     latency_p95_ms: float
     label_column: str
@@ -111,15 +118,18 @@ def hash_input(text: str) -> str:
 
 
 def normalize_ccm(code: str, digit_level: int) -> float | None:
-    """Canonicalize a CCM code (panel digits-only or model dotted form) as a float.
+    """Canonicalize a hierarchical code (CIP or CCM) as a float for comparison.
 
-    Note: panel CSV columns are named `inventory_cip_*` for historical reasons,
-    but the values they contain are CCM codes, not federal CIP codes.
+    Used to compare panel CIP labels against model CCM predictions on a
+    common numeric scale. CIP and CCM share the 2/4/6-digit hierarchical
+    encoding even though they're distinct taxonomies — the float form is
+    equality-comparable when (and only when) the two systems happen to
+    agree at that level of specificity.
 
-    Panel format: bare digits, no period, optional leading zero stripped
-        e.g., '52', '5210', '521005', '105' (= CCM 01.05)
-    Model format: dotted, leading and trailing zeros sometimes stripped
-        e.g., '52', '52.1', '52.1005', '1.0' (= CCM 01.00)
+    Panel CIP format: bare digits, no period, leading zeros sometimes stripped
+        e.g., '52', '5210', '521005', '105' (= 01.05)
+    Model CCM format: dotted, leading and trailing zeros sometimes stripped
+        e.g., '52', '52.1', '52.1005', '1.0' (= 01.00)
 
     Returns None for empty / NaN / unparseable.
     """
@@ -140,7 +150,8 @@ def normalize_ccm(code: str, digit_level: int) -> float | None:
     return n / (10 ** suffix_width) if suffix_width > 0 else float(n)
 
 
-def ccm_equal(a: str, b: str, digit_level: int) -> bool:
+def codes_match(a: str, b: str, digit_level: int) -> bool:
+    """True if the two codes (one CIP, one CCM, or any pair) agree numerically."""
     fa = normalize_ccm(a, digit_level)
     fb = normalize_ccm(b, digit_level)
     if fa is None or fb is None:
@@ -203,7 +214,7 @@ def validate_one(
         if (i // batch_size) % 50 == 0 and i > 0:
             print(f"  {i:,}/{len(unique_hashes):,}")
 
-    correct = 0
+    matched = 0
     n_skipped = 0
     disagreements: list[dict[str, Any]] = []
     label_col = spec.panel_label_column
@@ -215,8 +226,8 @@ def validate_one(
             n_skipped += 1
             continue
         pred = pred_by_hash[h]
-        if ccm_equal(pred, truth, spec.digit_level):
-            correct += 1
+        if codes_match(pred, truth, spec.digit_level):
+            matched += 1
         else:
             disagreements.append({
                 "model": spec.display_name,
@@ -224,14 +235,14 @@ def validate_one(
                 "subject_code": df.iloc[row_i][COL_SUBJECT],
                 "catalog_number": df.iloc[row_i][COL_CATALOG],
                 "course_title": df.iloc[row_i][COL_TITLE],
-                "predicted": pred,
-                "ground_truth": truth,
+                "predicted_ccm": pred,
+                "panel_cip": truth,
                 "predicted_normalized": normalize_ccm(pred, spec.digit_level),
-                "ground_truth_normalized": normalize_ccm(truth, spec.digit_level),
+                "panel_normalized": normalize_ccm(truth, spec.digit_level),
             })
 
     n_compared = len(df) - n_skipped
-    acc = correct / n_compared if n_compared > 0 else 0.0
+    overlap = matched / n_compared if n_compared > 0 else 0.0
 
     return ValidationResult(
         display_name=spec.display_name,
@@ -239,8 +250,8 @@ def validate_one(
         n_unique=len(unique_hashes),
         n_rows=n_compared,
         n_skipped=n_skipped,
-        correct=correct,
-        accuracy=acc,
+        matched=matched,
+        overlap_rate=overlap,
         latency_p50_ms=float(np.percentile(latencies, 50)),
         latency_p95_ms=float(np.percentile(latencies, 95)),
         label_column=label_col,
@@ -291,16 +302,16 @@ def main() -> int:
         results.append(result)
         all_disagreements.extend(disagreements)
 
-    print("\n=== Validation Summary ===")
+    print("\n=== CIP/CCM Overlap Summary (not model accuracy) ===")
     print(
-        f"{'Model':<25} {'Unique':>10} {'Rows':>10} {'Acc':>8} "
+        f"{'Model':<25} {'Unique':>10} {'Rows':>10} {'Overlap':>9} "
         f"{'p50 ms':>10} {'p95 ms':>10}"
     )
     print("-" * 80)
     for r in results:
         print(
             f"{r.display_name:<25} {r.n_unique:>10,} {r.n_rows:>10,} "
-            f"{r.accuracy:>7.1%} {r.latency_p50_ms:>10.2f} {r.latency_p95_ms:>10.2f}"
+            f"{r.overlap_rate:>8.1%} {r.latency_p50_ms:>10.2f} {r.latency_p95_ms:>10.2f}"
         )
 
     actual_providers = sorted({r.actual_provider for r in results})

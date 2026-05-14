@@ -46,26 +46,29 @@ def render_validation_report(results: list[dict[str, Any]], meta: dict[str, Any]
         f"- Preferred order: {preferred}",
         f"- Filter: {meta['filter']}",
         "",
-        "**Train/test split status: unknown.** Until annamp confirms whether this",
-        "panel was held out from training, treat the accuracy numbers as preliminary.",
-        "If the panel overlaps with the training set, accuracy will be inflated by",
-        "memorization. The numbers are still useful as a sanity check that conversion",
-        "didn't break the model.",
+        "**This is a CIP/CCM overlap measurement, not a model-accuracy measurement.**",
+        "The panel's `inventory_cip_*` columns contain federal **CIP codes**; the",
+        "models output **CCM codes** — a distinct hierarchical taxonomy. The two",
+        "overlap heavily at the broad 2-digit level (subject area) but diverge as",
+        "specificity increases. The descending overlap rate across digit levels is",
+        "the *expected* taxonomy divergence, not a regression. The meaningful",
+        "correctness check is parity (Rust ONNX == Python ONNX == annamp PyTorch),",
+        "covered by `verify.py` and the Rust integration tests.",
         "",
-        "Accuracy compares predictions to `inventory_cip_*` after canonicalizing both",
-        "to a common numeric form (panel uses bare digits, models use dotted CCM form;",
-        "both are converted to floats for equality).",
+        "The columns below compare predictions to `inventory_cip_*` after",
+        "canonicalizing both to a common numeric form (panel uses bare digits,",
+        "models use dotted form; both converted to floats for equality).",
         "",
-        "| Model | Unique inputs | Rows compared | Accuracy | p50 (ms) | p95 (ms) |",
+        "| Model | Unique inputs | Rows compared | CIP/CCM overlap | p50 (ms) | p95 (ms) |",
         "|---|---:|---:|---:|---:|---:|",
     ]
     for r in results:
         lines.append(
             f"| {r['display_name']} | {r['n_unique']:,} | {r['n_rows']:,} "
-            f"| {r['accuracy']:.1%} "
+            f"| {r['overlap_rate']:.1%} "
             f"| {r['latency_p50_ms']:.2f} | {r['latency_p95_ms']:.2f} |"
         )
     lines.append("")
-    lines.append("Disagreement detail (predicted ≠ panel label) lives in the run's")
+    lines.append("Per-row mismatches (predicted ≠ panel label) live in the run's")
     lines.append("`disagreements.csv`. See `output/validation/<run-id>/`.")
     return "\n".join(lines) + "\n"
