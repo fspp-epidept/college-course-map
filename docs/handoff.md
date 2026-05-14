@@ -1,5 +1,9 @@
 # Course Classifier Native App — Handoff
 
+> **Retired.** This doc was the original architecture spec and the source we used to seed the repo's GitHub Project. Once Project items are populated, treat this file as **historical reference only**. The working backlog lives in the GitHub Project; durable conventions live in `CLAUDE.md`; keyboard/menu design lives in `docs/keybinds.md`. Don't add new content here — promote it into a Project item or `CLAUDE.md` instead.
+>
+> Specific updates since freeze: **DuckDB is the single store, no SQLite fallback.** The original concurrency-fork discussion below is preserved for the reasoning it contains but is no longer the active plan.
+
 ## Context
 
 We're building a native desktop app that wraps the [annamp/classifying-courses-at-scale](https://huggingface.co/collections/annamp/classifying-courses-at-scale) RoBERTa-base models (2-digit, 4-digit, and 6-digit CCM classification). The reference implementation is a Flask web app at [davidjurgens/course-classifier-website](https://github.com/davidjurgens/course-classifier-website).
@@ -9,7 +13,7 @@ We're building a native desktop app that wraps the [annamp/classifying-courses-a
 - Backend: Rust + ONNX Runtime (via the `ort` crate) for inference.
 - UI shell: Tauri 2.
 - Frontend: **Vue 3** + Vite + TypeScript, with **Nuxt UI** (which bundles Reka UI primitives + Tailwind 4 + TanStack Table integration), Vue Router, and TanStack Query (Vue adapter).
-- Embedded database: **DuckDB** (via the `duckdb` crate) as single source of truth. Speed-optimal for the mixed OLTP/OLAP workload at our scale. SQLite + DuckDB attach is the documented fallback if write contention under interactive load becomes a problem.
+- Embedded database: **DuckDB** (via the `duckdb` crate) as single source of truth, no fallback. Speed-optimal for the mixed OLTP/OLAP workload at our scale; concurrency behavior under sustained mixed reads/writes is validated by a stress-test Project item rather than hedged against architecturally.
 - Scale: realistic working datasets are **up to ~2M rows / 200MB CSV**. Architecture must assume long-running, interruptible, resumable jobs.
 - Target user: non-technical administrators who currently use Excel for this work.
 
@@ -348,7 +352,7 @@ The model card notes the input format is `"{SUBJECT CODE} {CATALOG NUMBER} --- {
 
 ### Storage: DuckDB
 
-**Use DuckDB as the single store.** Speed-optimal for our mixed workload, single dependency, single mental model. Recommended over the SQLite + DuckDB attach pattern because the user has explicitly prioritized speed over weight, and DuckDB's row-level write penalty is irrelevant in absolute terms at our scale.
+**Use DuckDB as the single store, no fallback.** Speed-optimal for our mixed workload, single dependency, single mental model. The user has explicitly prioritized speed over weight, and DuckDB's row-level write penalty is irrelevant in absolute terms at our scale. (The original draft also discussed a SQLite + DuckDB attach pattern as a fallback; that has been **dropped** — see retirement banner at top of file.)
 
 Rough performance comparison at 2M rows. These are order-of-magnitude estimates, not benchmarks — actual numbers depend on hardware, indexes, and query specifics:
 
@@ -367,7 +371,7 @@ Rough performance comparison at 2M rows. These are order-of-magnitude estimates,
 
 **Why DuckDB-only over SQLite-only:** Dashboard `GROUP BY` queries on 2M rows are 10–50x faster in DuckDB. For an exploratory tool where users click between aggregations, this matters more than the slower point-write cost (which is invisible against a multi-hour inference job).
 
-**Where DuckDB's slower writes might bite:** Sustained mixed workloads (heavy concurrent writes during interactive reads) are less battle-tested in DuckDB than in SQLite WAL mode. Worth verifying with a stress test once the pipeline is working — run a large classification job and click around the dashboard simultaneously to confirm no pathological lag. If problems emerge, the SQLite+DuckDB attach pattern is the documented fallback, and the SQL dialects are similar enough that migration is straightforward.
+**Where DuckDB's slower writes might bite:** Sustained mixed workloads (heavy concurrent writes during interactive reads) are less battle-tested in DuckDB than in SQLite WAL mode. Worth verifying with a stress test once the pipeline is working — run a large classification job and click around the dashboard simultaneously to confirm no pathological lag. The stress test is now a Project item; if it surfaces problems, we tune DuckDB (memory limits, threads, CHECKPOINT cadence, transaction shapes) rather than retreat to a different store.
 
 DuckDB tunings (less critical than SQLite's PRAGMA list — defaults are already good):
 
@@ -723,7 +727,7 @@ COMMIT;
 
 After any crash, the run's progress fields reflect exactly what's in the cache. The resume query (find content hashes still missing) and the displayed progress agree by construction. If a chunk's transaction fails mid-flight, DuckDB rolls back both halves — no inconsistency, the next attempt just recomputes that chunk. State transitions (`pending → running`, `running → paused`, etc.) are separate small `UPDATE` statements outside the chunk path. A nice side effect: a freshly-opened progress view never starts blank, since it reads current state from the run row directly.
 
-The combination of write-batching + separate read/write connections + read-only connection mode for dashboard queries should give DuckDB enough breathing room that interactive reads stay responsive during long inference jobs. The stress test in the next-steps list verifies this; if it fails, the SQLite + DuckDB attach pattern is the documented retreat.
+The combination of write-batching + separate read/write connections + read-only connection mode for dashboard queries should give DuckDB enough breathing room that interactive reads stay responsive during long inference jobs. The stress test (a Project item) validates this; the response to problems is DuckDB tuning, not a store swap.
 
 
 ### Reruns and partial work
@@ -768,7 +772,7 @@ Mitigations baked into the design:
 - **Periodic explicit CHECKPOINT during long-running inference**, every few minutes, keeps WAL size bounded so checkpointing pauses don't accumulate.
 - **Short transactions on the read side.** Dashboard queries should commit quickly; don't keep transactions open for exploration.
 
-If under stress test the UI feels laggy during long inference jobs, the documented retreat is the SQLite + DuckDB attach pattern: writes to SQLite via `rusqlite` (extremely well-tested under concurrent reader/writer load via WAL mode), reads through DuckDB via `ATTACH 'library.sqlite' AS lib (TYPE SQLITE)`. Schema doesn't change; the SQL dialects are nearly identical for our queries. Treat the stress test as a real go/no-go gate, not a nice-to-have.
+If the stress test surfaces concurrency lag, the response is to tune DuckDB — memory limits, thread count, CHECKPOINT cadence, transaction shape, batch size, separating long-running reads from short interactive ones — rather than swap stores. (Earlier drafts of this doc documented a SQLite + DuckDB-attach fallback; that has been dropped.)
 
 ### IPC strategy: never ship 2M rows across the boundary
 
@@ -817,7 +821,7 @@ Two pieces of community wisdom worth absorbing into the design:
 4. **Input format** — confirm the reference app's accuracy issue around `course_title` vs `{SUBJECT} {NUMBER} --- {TITLE}`. Worth a quick benchmark on a labeled subset. Note: this affects what gets hashed into `content_hash`, so changing the format mid-project would invalidate existing cache entries (a bigger deal than the model-precision question).
 5. **Hosted web app priority** — is this a "ship after the native app is solid" thing, or do you want it parallel? At 2M-row scale, the hosted web app is mostly a demo target — anyone with real data should run locally, both for speed and for keeping transcript data off shared infrastructure.
 6. **Run history retention** — should runs be retained indefinitely, or auto-pruned after N days? Distinct from `inference_results`, which is the cache and should be retained as long as it's useful (small storage cost vs significant compute savings on rerun).
-7. **DuckDB write contention under interactive use** — verify with a stress test once the pipeline works. Run a full classification job in the background and click around the dashboard simultaneously. If the UI feels laggy, fall back to the SQLite + DuckDB attach pattern. Worth confirming early before shipping.
+7. **DuckDB write contention under interactive use** — verify with a stress test once the pipeline works. Run a full classification job in the background and click around the dashboard simultaneously. Response to problems is DuckDB tuning, not a store swap (see updated Storage section).
 
 ---
 
@@ -827,7 +831,7 @@ Two pieces of community wisdom worth absorbing into the design:
 2. **Inference spike**: stand up the Rust inference module with `ort` + `tokenizers` + `hf-hub`. Convert one annamp model to ONNX manually, hardcode-load it, and verify end-to-end inference matches the Python reference output bit-for-bit on a small labeled test set. **Verify the input-format question at this step** (raw title vs `{SUBJECT} {NUMBER} --- {TITLE}`) — get accuracy numbers before building UI on top of either.
 3. **Database layer**: stand up DuckDB with the full schema (`source_files`, `datasets`, `courses`, `models`, `runs`, `inference_results`). Apply the recommended tunings. Write the dataset-import path: CSV streaming → blake3 file-hash → match-existing-or-create flow → source_file row → dataset row → batched inserts of courses with content_hash computed per row → progress events. Test on a 2M-row file end-to-end.
 4. **Pipeline**: implement the cache-aware inference pipeline (missing-cache-key reader → batcher → tokenizer → inference → in-memory accumulator → chunked DB writer). Use separate read-write and read-only DuckDB connections. Implement `tokio` channels with graceful interruption. Persist progress and cache_hits to the runs table. Test resume-from-interruption by deliberately killing the process mid-run and verifying the next run picks up cleanly with no duplicate work and no missing rows. Also verify cache reuse: run the same model configuration twice on overlapping datasets and confirm the second run is mostly cache hits.
-5. **Stress-test write/read concurrency**: run a long inference job in the background while issuing many dashboard-style aggregation queries from a separate read-only connection. Confirm the UI stays responsive. **Treat this as a real go/no-go gate.** If it fails, document the failure mode and switch to the SQLite + DuckDB attach pattern (writes to SQLite, reads through DuckDB attached). Schema doesn't change.
+5. **Stress-test write/read concurrency**: run a long inference job in the background while issuing many dashboard-style aggregation queries from a separate read-only connection. Confirm the UI stays responsive. If problems appear, the response is DuckDB tuning (memory, threads, CHECKPOINT cadence, batch shape) — no store swap.
 6. **Model management UI**: download/cache/select active models, with `models` table tracking each one. This is what the user sees first on a clean install.
 7. **Import flow with column mapping**: Three Rust commands — `preview_csv` (returns headers + ~5 data rows), `validate_import` (full-file dry run, returns stats), `import_csv` (full ingestion, writes to DB and persists mapping on source_files). Vue frontend handles only the mapping configurator UI: alias-dictionary pre-selection, multi-column combination, literal-value fields, live synthetic preview from the small slice Rust returned. All parsing, hashing, and validation logic in Rust; frontend never reads the file directly. Test on a 200MB CSV with a non-trivial mapping (combined subject+number, literal school_name).
 8. **Import → classify → browse loop**: minimum viable end-to-end UX. Datasets sidebar (use Nuxt UI's `DashboardSidebar` for the scaffold; show `source_file` lineage), import dialog wired to step 7's mapping flow, run configuration (model selections + optional course filter), progress view with cache-hit display, paginated results table using Nuxt UI's Table in server-side mode (it wraps TanStack Table, so server-side pagination follows the standard pattern).
