@@ -18,11 +18,14 @@ pub struct CourseInput {
     pub course_title: String,
 }
 
+#[must_use]
 pub fn format_input(course: &CourseInput) -> String {
-    format!(
-        "{} {} --- {}",
-        course.subject_code, course.catalog_number, course.course_title
-    )
+    let CourseInput {
+        subject_code,
+        catalog_number,
+        course_title,
+    } = course;
+    format!("{subject_code} {catalog_number} --- {course_title}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,31 +36,21 @@ struct FormatSpec {
 }
 
 pub fn assert_matches_spec(spec_path: &Path) -> anyhow::Result<()> {
-    let bytes = std::fs::read(spec_path)
-        .map_err(|e| anyhow::anyhow!("read {}: {}", spec_path.display(), e))?;
+    let display = spec_path.display();
+    let bytes = std::fs::read(spec_path).map_err(|e| anyhow::anyhow!("read {display}: {e}"))?;
     let spec: FormatSpec = serde_json::from_slice(&bytes)?;
 
     if spec.version != FORMAT_VERSION {
-        anyhow::bail!(
-            "format version mismatch: spec={} rust={}",
-            spec.version,
-            FORMAT_VERSION
-        );
+        let spec_version = &spec.version;
+        anyhow::bail!("format version mismatch: spec={spec_version} rust={FORMAT_VERSION}");
     }
     if spec.template != TEMPLATE {
-        anyhow::bail!(
-            "format template mismatch:\n  spec: {:?}\n  rust: {:?}",
-            spec.template,
-            TEMPLATE
-        );
+        let spec_template = &spec.template;
+        anyhow::bail!("format template mismatch:\n  spec: {spec_template:?}\n  rust: {TEMPLATE:?}");
     }
     let spec_fields: Vec<&str> = spec.fields.iter().map(String::as_str).collect();
     if spec_fields.as_slice() != FIELDS {
-        anyhow::bail!(
-            "format fields mismatch: spec={:?} rust={:?}",
-            spec_fields,
-            FIELDS
-        );
+        anyhow::bail!("format fields mismatch: spec={spec_fields:?} rust={FIELDS:?}");
     }
     Ok(())
 }

@@ -57,7 +57,14 @@ There is no `Taskfile.yaml` yet. Write one as soon as the first non-trivial comm
 - **pnpm** — JS package manager; referenced by `tauri.conf.json` `beforeDevCommand` / `beforeBuildCommand`. Common raw forms: `pnpm install`, `pnpm dev` (Vite only, port 1420 strict), `pnpm build` (`vue-tsc --noEmit && vite build`), `pnpm tauri dev` (full app), `pnpm tauri build` (signed/notarized bundle).
 - **cargo** — run from inside `src-tauri/`. `cargo check` (fast typecheck), `cargo build`, `cargo test` (no tests yet).
 
-There is currently no test runner, linter, or formatter wired up. Don't invent commands that don't exist; when one is added (Vitest, Biome, `cargo test`, etc.), wrap it as a Task task and reference it here.
+**Formatting / linting / typechecking** (all wrapped as Task tasks; see `Taskfile.yaml`):
+
+- **Biome 2.x** handles JS/TS/JSON/CSS and the `<script>`+`<style>` blocks of Vue SFCs. Config in `biome.json`. Scope is intentionally narrow — `src/**` plus root web configs (`package.json`, `tsconfig*.json`, `vite.config.ts`). Biome does **not** lint Vue `<template>` blocks, so `noUnusedVariables`/`noUnusedImports` are disabled for `.vue` files; rely on `vue-tsc` (which understands templates) for unused-binding detection. Run via `task fmt:js` / `task lint:js` / `task check:js`.
+- **rustfmt + clippy** in `src-tauri/`. Edition 2024, lints configured in `[lints]` table of `src-tauri/Cargo.toml`: `unsafe_code = deny`, `clippy::pedantic` as warn, plus selected `restriction` lints (`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`, `dbg_macro`, `todo`, `unimplemented`) to enforce Result-based error handling. Toolchain pinned via `rust-toolchain.toml`. Run via `task fmt:rust` / `task lint:rust` / `task check:rust`.
+- **`task check`** runs the whole pipeline (fmt:check + lint + typecheck both sides) and is what CI should call.
+- When suppression of a configured clippy lint is genuinely needed, prefer `#[expect(lint, reason = "...")]` over `#[allow]` — `expect` errors back out when the suppression is no longer needed, which keeps allows from accumulating. Example: top-level `tauri::Builder::run()` panics on startup failure (canonical Tauri pattern), so it carries `#[expect(clippy::expect_used, reason = "...")]`.
+
+No test runner is wired up yet (`cargo test` runs but there are no tests). When one is added (Vitest, etc.), wrap it as a Task task and reference it here.
 
 ## Architectural ground rules (from docs/handoff.md)
 

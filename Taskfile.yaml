@@ -12,3 +12,84 @@ tasks:
     cmds:
       - task --list-all
     silent: true
+
+  fmt:
+    desc: Format all code (Biome + rustfmt)
+    cmds:
+      - task: fmt:js
+      - task: fmt:rust
+
+  fmt:check:
+    desc: Check formatting without writing (Biome + rustfmt)
+    cmds:
+      - task: fmt:js:check
+      - task: fmt:rust:check
+
+  lint:
+    desc: Lint all code (Biome + clippy)
+    cmds:
+      - task: lint:js
+      - task: lint:rust
+
+  check:
+    desc: Full check — fmt + lint + typecheck for both stacks
+    cmds:
+      - task: fmt:check
+      - task: lint
+      - task: check:rust
+      - task: check:js
+
+  fmt:js:
+    desc: Format JS/TS/Vue/JSON/CSS with Biome
+    cmds:
+      - pnpm exec biome format --write .
+
+  fmt:js:check:
+    desc: Check JS/TS/Vue/JSON/CSS formatting
+    cmds:
+      - pnpm exec biome format .
+
+  lint:js:
+    desc: Lint JS/TS/Vue with Biome
+    cmds:
+      - pnpm exec biome lint .
+
+  lint:js:fix:
+    desc: Lint JS/TS/Vue with Biome and apply safe fixes
+    cmds:
+      - pnpm exec biome lint --write .
+
+  check:js:
+    desc: Vue/TS typecheck (vue-tsc, no emit)
+    cmds:
+      - pnpm exec vue-tsc --noEmit
+
+  fmt:rust:
+    desc: Format Rust with rustfmt
+    dir: src-tauri
+    cmds:
+      - cargo fmt --all
+
+  fmt:rust:check:
+    desc: Check Rust formatting (no writes)
+    dir: src-tauri
+    cmds:
+      - cargo fmt --all -- --check
+
+  lint:rust:
+    desc: Lint Rust with clippy (warnings as errors)
+    dir: src-tauri
+    cmds:
+      - cargo clippy --all-targets --all-features -- -D warnings
+
+  lint:rust:fix:
+    desc: Apply clippy auto-fixes (rerun with --allow-dirty if needed)
+    dir: src-tauri
+    cmds:
+      - cargo clippy --fix --all-targets --all-features
+
+  check:rust:
+    desc: Fast Rust typecheck
+    dir: src-tauri
+    cmds:
+      - cargo check --all-targets --all-features
