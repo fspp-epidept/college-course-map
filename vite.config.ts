@@ -1,11 +1,10 @@
 import vue from "@vitejs/plugin-vue";
 import { defineConfig } from "vite";
 
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig({
   plugins: [vue()],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
@@ -29,4 +28,16 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
-}));
+
+  // 4. expose Tauri-injected env vars (TAURI_ENV_PLATFORM, TAURI_ENV_DEBUG, ...) to import.meta.env
+  envPrefix: ["VITE_", "TAURI_ENV_*"],
+
+  build: {
+    // 5. Tauri ships into the system webview — pin the floor target accordingly
+    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
+    // 6. don't minify debug builds (readable stack traces in `tauri dev` / `tauri build --debug`)
+    minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
+    // 7. produce sourcemaps for debug builds
+    sourcemap: !!process.env.TAURI_ENV_DEBUG,
+  },
+});
