@@ -1,4 +1,5 @@
 pub mod format;
+mod menu;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -13,6 +14,8 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .menu(menu::build)
+        .on_menu_event(|app, event| menu::handle_event(app, &event))
         .invoke_handler(tauri::generate_handler![greet])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
