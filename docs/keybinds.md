@@ -2,6 +2,8 @@
 
 Companion doc to the main handoff doc. Covers how to split keyboard-shortcut handling across the three layers available in a Tauri + Vue app, with the goal of avoiding the "why doesn't my shortcut fire" debugging session that comes from accidental layering conflicts.
 
+> **Update — hybrid chrome (#102).** The app now uses custom chrome on Windows/Linux and native chrome on macOS. **Layer 2 (native menu accelerators) only exists on macOS.** On Windows/Linux there is no native menu, so every shortcut the macOS menu would carry is bound instead at **Layer 3 (WebView)** alongside the custom in-WebView menu. The "menu home" column in the tables below describes the macOS native menu and the custom menu's structure equally; the *binding layer* differs by platform. Read "menu accelerator" as "Layer 2 on macOS, Layer 3 on Windows/Linux" throughout this doc.
+
 ## The three layers, in order of priority
 
 Three layers can intercept a keypress, each running before the next can see it. Designing this deliberately upfront avoids surprises later.
