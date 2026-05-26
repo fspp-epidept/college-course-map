@@ -30,6 +30,11 @@ scripts/models/.venv/
 # Task runner checksum cache
 .task/
 
+# Nuxt UI Vite plugin generated declarations + virtual module cache
+auto-imports.d.ts
+components.d.ts
+.nuxt-ui/
+
 # Python
 __pycache__/
 *.py[cod]

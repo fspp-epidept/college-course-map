@@ -13,6 +13,28 @@ tasks:
       - task --list-all
     silent: true
 
+  dev:
+    desc: Run the full Tauri app (Vite + native webview, IPC live)
+    interactive: true
+    # WebKitGTK's DMABUF renderer crashes the webview under Wayland on NVIDIA
+    # ("Gdk Error 71 Protocol error"); disabling it falls back to a stable path.
+    # No-op on macOS/Windows. See also #97.
+    env:
+      WEBKIT_DISABLE_DMABUF_RENDERER: 1
+    cmds:
+      - pnpm tauri dev
+
+  dev:ui:
+    desc: Run the Vite dev server only (browser, no IPC backend)
+    interactive: true
+    cmds:
+      - pnpm dev
+
+  build:
+    desc: Build the Tauri app bundle
+    cmds:
+      - pnpm tauri build
+
   fmt:
     desc: Format all code (Biome + rustfmt)
     cmds:
