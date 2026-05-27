@@ -87,6 +87,10 @@
           }
         }
       }
+    },
+    {
+      "includes": ["src/bindings.ts"],
+      "linter": { "enabled": false }
     }
   ]
 }
