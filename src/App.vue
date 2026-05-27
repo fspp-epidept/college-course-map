@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { RouterLink, RouterView } from "vue-router";
+import TheTitleBar from "./components/TheTitleBar.vue";
+
+// macOS keeps native chrome (decorations + global menu); Windows/Linux get the
+// custom titlebar. See decision #102.
+const isMacOS = import.meta.env.TAURI_ENV_PLATFORM === "macos";
 
 const routes = [
   { to: "/datasets", label: "Datasets" },
@@ -12,6 +17,7 @@ const routes = [
 <template>
   <UApp>
     <div class="min-h-screen flex flex-col">
+      <TheTitleBar v-if="!isMacOS" />
       <nav class="border-b border-(--ui-border) px-6 py-3 flex gap-4">
         <RouterLink
           v-for="route in routes"
