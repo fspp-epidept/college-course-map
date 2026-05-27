@@ -16,7 +16,7 @@
     "check:fix": "biome check --write"
   },
   "dependencies": {
-    "@nuxt/ui": "^4.7.1",
+    "@nuxt/ui": "^4.8.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
     "tailwindcss": "^4.3.0",
