@@ -30,6 +30,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.2.4
         version: 2.4.15
+      '@iconify-json/lucide':
+        specifier: ^1.2.109
+        version: 1.2.109
       '@tauri-apps/cli':
         specifier: ^2
         version: 2.11.1
@@ -480,6 +483,9 @@ packages:
 
   '@floating-ui/vue@1.1.11':
     resolution: {integrity: sha512-HzHKCNVxnGS35r9fCHBc3+uCnjw9IWIlCPL683cGgM9Kgj2BiAl8x1mS7vtvP6F9S/e/q4O6MApwSHj8hNLGfw==}
+
+  '@iconify-json/lucide@1.2.109':
+    resolution: {integrity: sha512-O5arvTVcu95soP3dGWJp/Nl5L5FYmFu2z75sSrQmGzrgrnsCU49t8+ZB7HPq//GRNXpWUoNfDRcs5yR7XMa+zw==}
 
   '@iconify/collections@1.0.683':
     resolution: {integrity: sha512-ZfrFEuExsdpcO2PCkbHBMja26eyPRZ+Bh7Af/lGAk5C8t740H9bYPyrJVQzQrxnPFcRwNq1Ehs+Q8aQJRYn/Iw==}
@@ -2474,6 +2480,10 @@ snapshots:
     transitivePeerDependencies:
       - '@vue/composition-api'
       - vue
+
+  '@iconify-json/lucide@1.2.109':
+    dependencies:
+      '@iconify/types': 2.0.0
 
   '@iconify/collections@1.0.683':
     dependencies:
