@@ -1,5 +1,5 @@
 pub mod format;
-mod store;
+mod config;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
 mod menu;
@@ -11,10 +11,10 @@ use tauri_specta::{Builder, collect_commands};
 /// (see #58); the `export_bindings` test renders the bindings from this same builder.
 fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
-        store::list_themes,
-        store::read_theme,
-        store::read_settings,
-        store::write_settings,
+        config::list_themes,
+        config::read_theme,
+        config::read_settings,
+        config::write_settings,
     ])
 }
 

@@ -1,4 +1,4 @@
-//! Theme + general-settings store (theming decision #106).
+//! Theme + general-settings persistence (theming decision #106).
 //!
 //! All config file I/O lives here; the frontend never touches disk. Files live
 //! under the product-named config dir `college-course-map` (via `dirs::config_dir`,
@@ -211,7 +211,7 @@ fn validate_id(id: &str) -> Result<(), String> {
 /// breaking out of the property context.
 fn validate_value(value: &str) -> Result<(), String> {
     const MAX_LEN: usize = 128;
-    const FORBIDDEN: &[&str] = &["url(", "expression", "javascript:", "@import", "/*", "*/"];
+    const FORBIDDEN: [&str; 6] = ["url(", "expression", "javascript:", "@import", "/*", "*/"];
 
     if value.len() > MAX_LEN {
         return Err(format!("token value too long (>{MAX_LEN} chars)"));
