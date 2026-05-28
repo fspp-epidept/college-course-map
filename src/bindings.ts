@@ -51,9 +51,83 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async listCoursesWithResults(req: ListCoursesRequest): Promise<Result<CoursePage, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_courses_with_results", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Convenience IPC: return the seeded `models.id` for a given digit level so
+   * the frontend can request joined results without owning the surrogate id
+   * space. Returns `None` if no row matches.
+   */
+  async modelIdForDigitLevel(digitLevel: number): Promise<Result<number | null, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("model_id_for_digit_level", { digitLevel }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Read up to [`SAMPLE_ROW_LIMIT`] rows from the CSV at `path`, returning the
+   * headers + sample rows + file metadata. Never persists anything — the only
+   * side effect is opening the file for reading.
+   */
+  async previewCsv(path: string): Promise<Result<CsvPreview, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("preview_csv", { path }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   async listDatasets(): Promise<Result<DatasetSummary[], string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("list_datasets") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async importCsv(req: ImportRequest): Promise<Result<ImportStarted, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listMetrics(): Promise<Result<AppMetrics, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_metrics") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async getRun(id: string): Promise<Result<RunDetail, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("get_run", { id }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listRuns(): Promise<Result<RunSummary[], string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_runs") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async startRun(req: StartRunRequest): Promise<Result<StartRunResponse, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
     } catch (e) {
       if (e instanceof Error) throw e;
       else return { status: "error", error: e as any };
@@ -67,6 +141,22 @@ export const commands = {
 
 /** user-defined types **/
 
+export type AppMetrics = {
+  datasets: number;
+  courses: number;
+  runs: number;
+  completedRuns: number;
+  /**
+   * Distinct `(model_id, content_hash)` rows in `inference_results`.
+   */
+  classifications: number;
+  /**
+   * Sum of `runs.cache_hits` divided by sum of `runs.rows_processed`, both
+   * across all runs. `None` when no rows have been processed yet (avoids a
+   * noisy 0% on a fresh DB).
+   */
+  cacheHitRate: number | null;
+};
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.
@@ -100,6 +190,27 @@ export type ColorRamps = {
  * `light` / `dark` — drives `VueUse` `useColorMode().preference` on the frontend.
  */
 export type ColorScheme = "light" | "dark";
+export type CoursePage = { rows: CourseRow[]; total: number };
+export type CourseRow = {
+  id: number;
+  rowIndex: number;
+  subjectCode: string | null;
+  catalogNumber: string | null;
+  courseTitle: string | null;
+  contentHash: string;
+  /**
+   * Classification label from `inference_results` for the requested model;
+   * `None` when there's no result yet (or no `model_id` was requested).
+   */
+  classification: string | null;
+  probability: number | null;
+};
+export type CsvPreview = {
+  headers: string[];
+  sampleRows: string[][];
+  totalColumns: number;
+  sizeBytes: number;
+};
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -111,10 +222,92 @@ export type DatasetSummary = {
   sourceKind: string;
   importedAt: string;
   /**
-   * `COUNT(*)` from `courses` for this dataset — recomputed each call so the
-   * `datasets.row_count` cached column staying in sync isn't load-bearing.
+   * Read straight from `datasets.row_count`, which the import worker keeps
+   * up to date (live ticks during streaming, finalized in `mark_ready`).
+   * Datasets are otherwise immutable, so there's no fallback `COUNT(*)`.
    */
   rowCount: number;
+  /**
+   * `importing` while the background worker is still streaming rows in,
+   * `ready` when complete, `failed` when the worker errored.
+   */
+  importState: string;
+  importError: string | null;
+};
+export type ImportRequest = {
+  path: string;
+  /**
+   * Falls back to the filename when null/blank.
+   */
+  displayName: string | null;
+  /**
+   * Optional row cap; `None` means import every row.
+   */
+  limit: number | null;
+};
+/**
+ * Response from `import_csv`: the dataset has been queued and is already
+ * streaming rows in. The frontend polls `list_datasets` from here.
+ */
+export type ImportStarted = { datasetId: string; sourceFileId: number };
+export type ListCoursesRequest = {
+  datasetId: string;
+  /**
+   * Optional model id for the joined classification + probability columns.
+   * `None` means the joined columns come back as `null`.
+   */
+  modelId: number | null;
+  /**
+   * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
+   * mean "from the start". The frontend hands back the row index of the
+   * last row of a page + 1 to advance. Replaces OFFSET because DuckDB's
+   * TopN plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
+   * `(dataset_id, row_index)` index and scans the whole partition;
+   * the range predicate lets the index drive the scan.
+   */
+  cursor: number | null;
+  limit: number;
+};
+/**
+ * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
+ * model digit level (resolved from the JSON `model_ids` array) and the
+ * `unique_inputs_done` + `error_message` fields the summary view drops.
+ */
+export type RunDetail = {
+  id: string;
+  datasetId: string;
+  datasetTitle: string;
+  description: string | null;
+  state: string;
+  digitLevel: number | null;
+  rowsTotal: number | null;
+  rowsProcessed: number | null;
+  uniqueInputsDone: number | null;
+  cacheHits: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastProgressAt: string | null;
+  errorMessage: string | null;
+  executionProvider: string | null;
+};
+/**
+ * One row in the Runs sidebar list. Joined with the dataset title so the UI
+ * doesn't need a second IPC call to render a meaningful label.
+ */
+export type RunSummary = {
+  id: string;
+  datasetId: string;
+  datasetTitle: string;
+  description: string | null;
+  state: string;
+  rowsTotal: number | null;
+  rowsProcessed: number | null;
+  cacheHits: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastProgressAt: string | null;
 };
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
@@ -149,6 +342,20 @@ export type SemanticTokens = {
  * tokens themselves live in `themes/*.json`, not here.
  */
 export type Settings = { activeTheme: string };
+export type StartRunRequest = {
+  datasetId: string;
+  /**
+   * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
+   * spike avoids forcing the frontend to know surrogate model ids.
+   */
+  digitLevel: number;
+  limit: number | null;
+};
+/**
+ * Response from `start_run`: the run has been queued and is already updating
+ * its own row. The frontend polls `get_run(run_id)` from here.
+ */
+export type StartRunResponse = { runId: string; rowsTotal: number };
 /**
  * A full theme. `id` is the filename stem (set after load), never read from the
  * file body — `deny_unknown_fields` rejects an `id` key in the JSON.

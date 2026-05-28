@@ -1,0 +1,330 @@
+//! Rust ONNX inference, mirror of `scripts/models/_lib/inference.py`. Parity
+//! against the Python pipeline is asserted by `examples/check_parity.rs` over
+//! the fixture in `scripts/models/output/parity/per_input.json`.
+//!
+//! One [`LoadedModel`] per digit level. Models hold their own session +
+//! tokenizer + id->label table; they are not Send-shared at this stage because
+//! the spike run pipeline drives them synchronously from the IPC thread.
+
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+use ort::{
+    inputs,
+    session::{Session, builder::GraphOptimizationLevel},
+    value::TensorRef,
+};
+use serde::Deserialize;
+use tokenizers::{
+    PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection,
+    TruncationParams,
+};
+
+/// Matches `max_length=512` in `scripts/models/_lib/inference.py::predict_batch`.
+const MAX_SEQ_LEN: usize = 512;
+
+/// A model loaded into ONNX Runtime with its tokenizer + class label table.
+pub struct LoadedModel {
+    pub digit_level: u8,
+    /// The session needs `&mut self` to run; wrap so we can hold it behind an
+    /// `Arc` shared from the inference registry.
+    session: Mutex<Session>,
+    tokenizer: Tokenizer,
+    /// Index → CCM code string, e.g. `id2label[14] == "27"` for the 2-digit
+    /// model.
+    id2label: Vec<String>,
+}
+
+impl std::fmt::Debug for LoadedModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedModel")
+            .field("digit_level", &self.digit_level)
+            .field("num_labels", &self.id2label.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One classification: argmax label, its index, the top-3 indices (sorted
+/// descending by logit), and the raw logit value at argmax.
+#[derive(Debug, Clone)]
+pub struct Classification {
+    pub label: String,
+    pub label_index: usize,
+    pub top3: [usize; 3],
+    pub logit_argmax: f32,
+}
+
+/// Build a [`LoadedModel`] from a directory containing `model.onnx`,
+/// `tokenizer.json`, and `config.json`.
+pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedModel> {
+    let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
+        .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
+    // Match the Python pipeline: `truncation=True, max_length=512`.
+    tokenizer
+        .with_truncation(Some(TruncationParams {
+            max_length: MAX_SEQ_LEN,
+            direction: TruncationDirection::Right,
+            ..Default::default()
+        }))
+        .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
+    // BatchLongest = pad to the longest sequence in each batch. For a single
+    // input (the `classify` path and the parity fixture), the "batch" has one
+    // entry so this is a no-op — outputs stay byte-identical to the un-padded
+    // path. For real batches (the run worker), this gives encode_batch uniform
+    // [n, max_len] shapes ready to flatten into a tensor. pad_id/pad_token
+    // match the RoBERTa base tokenizer the annamp models are derived from.
+    tokenizer.with_padding(Some(PaddingParams {
+        strategy: PaddingStrategy::BatchLongest,
+        direction: PaddingDirection::Right,
+        pad_to_multiple_of: None,
+        pad_id: 1,
+        pad_type_id: 0,
+        pad_token: "<pad>".to_owned(),
+    }));
+
+    let id2label = load_id2label(&model_dir.join("config.json"))?;
+
+    // ort's `Error` carries a builder phantom that's not `Send + Sync`, so we
+    // can't `?` it into `anyhow::Error`; stringify at the boundary.
+    let session = Session::builder()
+        .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| anyhow::anyhow!("set opt level: {e}"))?
+        .commit_from_file(model_dir.join("model.onnx"))
+        .map_err(|e| anyhow::anyhow!("commit_from_file: {e}"))?;
+
+    Ok(LoadedModel {
+        digit_level,
+        session: Mutex::new(session),
+        tokenizer,
+        id2label,
+    })
+}
+
+/// Run one input through the model. Thin wrapper over [`classify_batch`] so
+/// the parity fixture exercises the same code path as the batched run worker.
+pub fn classify(model: &LoadedModel, input: &str) -> anyhow::Result<Classification> {
+    classify_batch(model, &[input])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("classify_batch returned no rows for single input"))
+}
+
+/// Batched inference. Tokenizes the whole batch with `encode_batch` so the
+/// tokenizer's `BatchLongest` padding produces uniform `[n, max_len]` shapes,
+/// then runs a single ONNX session call. Empty input returns an empty Vec.
+pub fn classify_batch(model: &LoadedModel, inputs: &[&str]) -> anyhow::Result<Vec<Classification>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let encodings = model
+        .tokenizer
+        .encode_batch(inputs.to_vec(), true)
+        .map_err(|e| anyhow::anyhow!("encode_batch: {e}"))?;
+    let n = encodings.len();
+    let max_len = encodings
+        .iter()
+        .map(|e| e.get_ids().len())
+        .max()
+        .unwrap_or(0);
+    if max_len == 0 {
+        anyhow::bail!("encode_batch produced empty encodings");
+    }
+
+    let mut ids: Vec<i64> = Vec::with_capacity(n * max_len);
+    let mut mask: Vec<i64> = Vec::with_capacity(n * max_len);
+    for enc in &encodings {
+        let row_ids = enc.get_ids();
+        let row_mask = enc.get_attention_mask();
+        // BatchLongest pads every row to max_len, so this is a length check we
+        // expect to always pass — but if the tokenizer config ever changes,
+        // failing here is far better than feeding ONNX a ragged tensor.
+        if row_ids.len() != max_len || row_mask.len() != max_len {
+            anyhow::bail!(
+                "ragged encoding: ids={}, mask={}, expected {max_len}",
+                row_ids.len(),
+                row_mask.len()
+            );
+        }
+        ids.extend(row_ids.iter().map(|&i| i64::from(i)));
+        mask.extend(row_mask.iter().map(|&m| i64::from(m)));
+    }
+
+    let n_i64 = i64::try_from(n).map_err(|_| anyhow::anyhow!("batch size overflows i64"))?;
+    let max_len_i64 =
+        i64::try_from(max_len).map_err(|_| anyhow::anyhow!("seq len overflows i64"))?;
+    let shape = vec![n_i64, max_len_i64];
+    let ids_tensor = TensorRef::from_array_view((shape.clone(), ids.as_slice()))
+        .map_err(|e| anyhow::anyhow!("ids tensor: {e}"))?;
+    let mask_tensor = TensorRef::from_array_view((shape, mask.as_slice()))
+        .map_err(|e| anyhow::anyhow!("attention_mask tensor: {e}"))?;
+
+    let mut session = model
+        .session
+        .lock()
+        .map_err(|_| anyhow::anyhow!("session mutex poisoned"))?;
+    let outputs = session
+        .run(inputs![
+            "input_ids" => ids_tensor,
+            "attention_mask" => mask_tensor,
+        ])
+        .map_err(|e| anyhow::anyhow!("session.run: {e}"))?;
+
+    let logits_value = outputs
+        .get("logits")
+        .ok_or_else(|| anyhow::anyhow!("model output has no `logits` tensor"))?;
+    let logits_view = logits_value
+        .try_extract_array::<f32>()
+        .map_err(|e| anyhow::anyhow!("extract logits: {e}"))?;
+    let logits_flat = logits_view
+        .as_slice()
+        .ok_or_else(|| anyhow::anyhow!("logits not contiguous"))?;
+    let total = logits_flat.len();
+    if total == 0 || total % n != 0 {
+        anyhow::bail!("logits has unexpected length {total} for batch size {n}");
+    }
+    let num_classes = total / n;
+
+    let mut out: Vec<Classification> = Vec::with_capacity(n);
+    for row_logits in logits_flat.chunks(num_classes) {
+        let (argmax, &argmax_val) = row_logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow::anyhow!("argmax: empty logits row"))?;
+        let top3 = top3_indices(row_logits);
+        let label = model
+            .id2label
+            .get(argmax)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("argmax {argmax} out of id2label bounds"))?;
+        out.push(Classification {
+            label,
+            label_index: argmax,
+            top3,
+            logit_argmax: argmax_val,
+        });
+    }
+    Ok(out)
+}
+
+/// Top-3 indices, sorted descending by logit value. Ties broken by index order
+/// (deterministic across runs), which matches `NumPy`'s stable-sort behavior in
+/// `np.argsort`/`np.argpartition` for equal values.
+fn top3_indices(logits: &[f32]) -> [usize; 3] {
+    let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    indexed.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    [
+        indexed.first().map_or(0, |x| x.0),
+        indexed.get(1).map_or(0, |x| x.0),
+        indexed.get(2).map_or(0, |x| x.0),
+    ]
+}
+
+#[derive(Deserialize)]
+struct HfConfig {
+    id2label: HashMap<String, String>,
+}
+
+/// Parse `config.json` `id2label` (string-keyed JSON object) into a Vec where
+/// the index is the class id. Indices missing from the map error loudly rather
+/// than silently leaving empty slots.
+fn load_id2label(config_path: &Path) -> anyhow::Result<Vec<String>> {
+    let raw = std::fs::read_to_string(config_path)
+        .map_err(|e| anyhow::anyhow!("read {}: {e}", config_path.display()))?;
+    let cfg: HfConfig = serde_json::from_str(&raw)?;
+    let n = cfg.id2label.len();
+    let mut out = vec![String::new(); n];
+    for (k, v) in &cfg.id2label {
+        let i: usize = k
+            .parse()
+            .map_err(|e| anyhow::anyhow!("non-integer id2label key {k:?}: {e}"))?;
+        if i >= n {
+            anyhow::bail!("id2label index {i} out of bounds (have {n} entries)");
+        }
+        if let Some(slot) = out.get_mut(i) {
+            slot.clone_from(v);
+        }
+    }
+    if out.iter().any(String::is_empty) {
+        anyhow::bail!("id2label has gaps");
+    }
+    Ok(out)
+}
+
+/// Holder for the three digit-level models, loaded once at app startup.
+#[derive(Debug)]
+pub struct InferenceRegistry {
+    pub two_digit: LoadedModel,
+    pub four_digit: LoadedModel,
+    pub six_digit: LoadedModel,
+}
+
+impl InferenceRegistry {
+    /// Pick a loaded model by digit level (2/4/6). Returns `None` for any other
+    /// value.
+    #[must_use]
+    pub fn by_digit_level(&self, level: u8) -> Option<&LoadedModel> {
+        match level {
+            2 => Some(&self.two_digit),
+            4 => Some(&self.four_digit),
+            6 => Some(&self.six_digit),
+            _ => None,
+        }
+    }
+}
+
+/// Same product dir convention as `db.rs::PRODUCT_DIR` and `config.rs` —
+/// kept duplicated rather than hoisted into a shared module while only two
+/// callers exist; promote when a third lands.
+const PRODUCT_DIR: &str = "college-course-map";
+const MODELS_SUBDIR: &str = "models";
+
+/// Resolve the on-disk model directory.
+///
+/// Resolution order:
+/// 1. `COURSE_CLASSIFIER_MODELS_DIR` env var if set — explicit override for
+///    CI and one-off dev tweaks (e.g. pointing at a freshly converted
+///    `scripts/models/output/` without copying).
+/// 2. `<data>/college-course-map/models/` — the standard location, portable
+///    across machines via a copy of the data dir. This is what
+///    `task models:install` populates.
+///
+/// The bundled-resource lookup from `tauri::resource_dir()` lands when #52
+/// wires up the build-time model embed; until then this is the only path.
+pub fn models_root() -> Result<PathBuf, String> {
+    if let Ok(env) = std::env::var("COURSE_CLASSIFIER_MODELS_DIR") {
+        return Ok(PathBuf::from(env));
+    }
+    dirs::data_dir()
+        .map(|dir| dir.join(PRODUCT_DIR).join(MODELS_SUBDIR))
+        .ok_or_else(|| "no platform data directory available".to_owned())
+}
+
+/// Load all three digit-level models from the resolved model dir. Slow (each
+/// model is ~500 MB); call once at startup. Surfaces an actionable error if
+/// the directory is missing — `task models:install` is the install path.
+pub fn load_all_models() -> anyhow::Result<InferenceRegistry> {
+    let root = models_root().map_err(|e| anyhow::anyhow!(e))?;
+    if !root.exists() {
+        anyhow::bail!(
+            "models directory missing: {} — run `task models:install` to copy \
+             from scripts/models/output, or set COURSE_CLASSIFIER_MODELS_DIR \
+             to point at an existing directory",
+            root.display()
+        );
+    }
+    Ok(InferenceRegistry {
+        two_digit: load_model(&root.join("two-digit"), 2)?,
+        four_digit: load_model(&root.join("four-digit"), 4)?,
+        six_digit: load_model(&root.join("six-digit"), 6)?,
+    })
+}

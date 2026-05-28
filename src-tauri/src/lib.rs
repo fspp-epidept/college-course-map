@@ -1,7 +1,13 @@
 mod config;
+mod courses;
+mod csv_io;
 mod datasets;
 pub mod db;
 pub mod format;
+mod import;
+pub mod inference;
+mod metrics;
+mod runs;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
@@ -18,7 +24,15 @@ fn specta_builder() -> Builder<tauri::Wry> {
         config::read_theme,
         config::read_settings,
         config::write_settings,
+        courses::list_courses_with_results,
+        courses::model_id_for_digit_level,
+        csv_io::preview_csv,
         datasets::list_datasets,
+        import::import_csv,
+        metrics::list_metrics,
+        runs::get_run,
+        runs::list_runs,
+        runs::start_run,
     ])
 }
 
@@ -30,7 +44,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
 pub fn run() {
     let specta = specta_builder();
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
 
     // macOS keeps native chrome: the base window config is frameless (for the custom
     // Windows/Linux titlebar), so re-enable decorations at startup and attach the
@@ -50,6 +66,12 @@ pub fn run() {
             // surface the error and let Tauri short-circuit setup.
             let db = db::AppDb::open().map_err(|e| format!("open database: {e}"))?;
             app.manage(db);
+            // Load all three digit-level models at startup. Slow (~5-15 s on
+            // CPU for ~1.5 GB total) but unavoidable for the spike: the
+            // synchronous `start_run` IPC expects the registry to be ready.
+            let registry =
+                inference::load_all_models().map_err(|e| format!("load inference models: {e}"))?;
+            app.manage(registry);
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_webview_window("main") {

@@ -8,6 +8,10 @@ import { type DatasetSummary, commands } from "../bindings";
  *
  * Cache invalidation: import flows that mutate `datasets` should call
  * `queryClient.invalidateQueries({ queryKey: ["datasets"] })` after success.
+ *
+ * Polling: while any dataset is `importing`, refetch every 500 ms so the
+ * row-count column tick is visible without a manual refresh. Stops polling
+ * once every dataset is in a terminal state (`ready` / `failed`).
  */
 export function useDatasets() {
   return useQuery({
@@ -16,6 +20,13 @@ export function useDatasets() {
       const result = await commands.listDatasets();
       if (result.status === "error") throw new Error(result.error);
       return result.data;
+    },
+    refetchInterval: (query) => {
+      const data = query.state.data as DatasetSummary[] | undefined;
+      if (!data) return false;
+      // 1 s keeps the progress meter live without piling IPC calls against a
+      // DB that the Appender is hammering with bulk writes.
+      return data.some((d) => d.importState === "importing") ? 1000 : false;
     },
   });
 }

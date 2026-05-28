@@ -135,3 +135,26 @@ tasks:
     desc: Truncate and reinsert fixture data so the UI has something to render in dev
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example seed_demo
+
+  db:clear-data:
+    desc: Wipe user data (datasets / courses / runs / results) but keep the models table populated
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example clear_user_data
+
+  db:checkpoint:
+    desc: Compact the DuckDB WAL into the main file (speeds up first read after a big import)
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example checkpoint
+
+  models:install:
+    desc: Copy converted ONNX models from scripts/models/output into the data dir (skips entries that already exist)
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example models_install
+
+  check:parity:
+    desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match
+    cmds:
+      # Release-only: debug FP behavior can flip near-tied argmaxes vs the
+      # Python reference (which was captured with the same opt level as Rust
+      # release). See examples/check_parity.rs.
+      - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity
