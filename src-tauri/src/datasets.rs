@@ -18,8 +18,9 @@ pub(crate) struct DatasetSummary {
     pub(crate) title: String,
     pub(crate) source_kind: String,
     pub(crate) imported_at: String,
-    /// `COUNT(*)` from `courses` for this dataset — recomputed each call so the
-    /// `datasets.row_count` cached column staying in sync isn't load-bearing.
+    /// Read straight from `datasets.row_count`, which the import worker keeps
+    /// up to date (live ticks during streaming, finalized in `mark_ready`).
+    /// Datasets are otherwise immutable, so there's no fallback `COUNT(*)`.
     pub(crate) row_count: i64,
     /// `importing` while the background worker is still streaming rows in,
     /// `ready` when complete, `failed` when the worker errored.
@@ -41,13 +42,10 @@ pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>,
                     d.title,
                     d.source_kind,
                     strftime(d.imported_at, '%Y-%m-%dT%H:%M:%SZ') AS imported_at,
-                    COALESCE(COUNT(c.id), 0)                      AS row_count,
+                    COALESCE(d.row_count, 0)                      AS row_count,
                     COALESCE(d.import_state, 'ready')             AS import_state,
                     d.import_error
              FROM datasets d
-             LEFT JOIN courses c ON c.dataset_id = d.id
-             GROUP BY d.id, d.title, d.source_kind, d.imported_at,
-                      d.import_state, d.import_error
              ORDER BY d.imported_at DESC",
         )
         .map_err(|e| e.to_string())?;
