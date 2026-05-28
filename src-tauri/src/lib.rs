@@ -5,6 +5,7 @@ pub mod db;
 pub mod format;
 mod import;
 pub mod inference;
+mod runs;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
@@ -24,6 +25,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         csv_io::preview_csv,
         datasets::list_datasets,
         import::import_csv,
+        runs::start_run,
     ])
 }
 
@@ -57,6 +59,12 @@ pub fn run() {
             // surface the error and let Tauri short-circuit setup.
             let db = db::AppDb::open().map_err(|e| format!("open database: {e}"))?;
             app.manage(db);
+            // Load all three digit-level models at startup. Slow (~5-15 s on
+            // CPU for ~1.5 GB total) but unavoidable for the spike: the
+            // synchronous `start_run` IPC expects the registry to be ready.
+            let registry =
+                inference::load_all_models().map_err(|e| format!("load inference models: {e}"))?;
+            app.manage(registry);
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_webview_window("main") {

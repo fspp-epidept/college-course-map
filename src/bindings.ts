@@ -80,6 +80,14 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async startRun(req: StartRunRequest): Promise<Result<RunResult, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
 };
 
 /** user-defined events **/
@@ -160,6 +168,13 @@ export type ImportResult = {
   rowsImported: number;
   rowsSkipped: number;
 };
+export type RunResult = {
+  runId: string;
+  rowsProcessed: number;
+  uniqueInputsDone: number;
+  cacheHits: number;
+  durationMs: number;
+};
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).
@@ -193,6 +208,15 @@ export type SemanticTokens = {
  * tokens themselves live in `themes/*.json`, not here.
  */
 export type Settings = { activeTheme: string };
+export type StartRunRequest = {
+  datasetId: string;
+  /**
+   * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
+   * spike avoids forcing the frontend to know surrogate model ids.
+   */
+  digitLevel: number;
+  limit: number | null;
+};
 /**
  * A full theme. `id` is the filename stem (set after load), never read from the
  * file body — `deny_unknown_fields` rejects an `id` key in the JSON.
