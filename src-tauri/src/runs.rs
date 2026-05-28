@@ -1,25 +1,24 @@
-//! Synchronous run pipeline. The spike-grade IPC entry point classifies every
-//! course in a dataset against one model, exercising the `(model_id,
-//! content_hash)` cache so a re-run on the same dataset is mostly free.
+//! Async run pipeline. `start_run` inserts a runs row in `running` state,
+//! returns the run id immediately, and offloads the per-row inference loop to
+//! a blocking task that ticks `runs.rows_processed` after each row so the
+//! frontend can poll progress via `get_run` (see `useRun`).
 //!
-//! Deliberately simple: no progress events, no cancellation, no batching.
-//! The real run engine (#37–#47) replaces this with a background task that
-//! streams Tauri events; this command is here so the spike demo has a single
-//! synchronous "Classify" button that produces real CCM codes end-to-end.
-
-use std::time::Instant;
+//! Polling-based progress is intentional: `TanStack` Query already drives
+//! everything else, and the same data flow that powers the static run detail
+//! tab also feeds the live progress meter. Tauri-events for run progress are
+//! deferred until the broader async-pipeline pass (#124).
 
 use chrono::Utc;
 use duckdb::params;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
     db::AppDb,
     format::{CourseInput, format_input},
-    inference::{self, InferenceRegistry, classify},
+    inference::{InferenceRegistry, classify},
 };
 
 /// One row in the Runs sidebar list. Joined with the dataset title so the UI
@@ -227,9 +226,9 @@ fn resolve_digit_level(
     Ok(model_type.and_then(|s| s.parse::<u8>().ok()))
 }
 
-/// 50 keeps the synchronous loop under ~10 s on CPU; the dialog default. The
-/// caller may override.
-const DEFAULT_LIMIT: u32 = 50;
+/// 500 makes the progress bar move visibly without taking forever; the dialog
+/// default. The caller may override.
+const DEFAULT_LIMIT: u32 = 500;
 
 #[derive(Type, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -241,14 +240,13 @@ pub(crate) struct StartRunRequest {
     pub limit: Option<u32>,
 }
 
+/// Response from `start_run`: the run has been queued and is already updating
+/// its own row. The frontend polls `get_run(run_id)` from here.
 #[derive(Type, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct RunResult {
+pub(crate) struct StartRunResponse {
     pub run_id: String,
-    pub rows_processed: u64,
-    pub unique_inputs_done: u64,
-    pub cache_hits: u64,
-    pub duration_ms: u64,
+    pub rows_total: i64,
 }
 
 #[tauri::command]
@@ -259,19 +257,21 @@ pub(crate) struct RunResult {
 )]
 pub(crate) fn start_run(
     req: StartRunRequest,
+    app: AppHandle,
     db: State<'_, AppDb>,
     registry: State<'_, InferenceRegistry>,
-) -> Result<RunResult, String> {
+) -> Result<StartRunResponse, String> {
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
-    let model = registry
-        .by_digit_level(req.digit_level)
-        .ok_or_else(|| format!("no model loaded for digit_level={}", req.digit_level))?;
+    // Fail fast if the requested digit level isn't loaded — caller gets a
+    // synchronous error rather than a "queued then mysteriously failed" run.
+    if registry.by_digit_level(req.digit_level).is_none() {
+        return Err(format!(
+            "no model loaded for digit_level={}",
+            req.digit_level
+        ));
+    }
 
     let conn = db.rw()?;
-
-    // Resolve which models row we'll attribute results to. The seed inserts
-    // one row per digit level with `model_type` "2"/"4"/"6"; pick the first
-    // (deterministic ORDER BY id) so re-runs accrete to the same row.
     let model_id: i64 = conn
         .query_row(
             "SELECT id FROM models WHERE model_type = ? ORDER BY id LIMIT 1",
@@ -280,8 +280,19 @@ pub(crate) fn start_run(
         )
         .map_err(|e| format!("lookup model row for digit_level {}: {e}", req.digit_level))?;
 
+    // Cap the planned row count by what the dataset actually contains; the
+    // progress meter's denominator is therefore honest even when limit
+    // exceeds the dataset size.
+    let course_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
+            params![req.dataset_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("count courses for dataset {}: {e}", req.dataset_id))?;
+    let rows_total = std::cmp::min(course_count, i64::from(limit));
+
     let run_id = Uuid::new_v4().to_string();
-    let started = Instant::now();
     let now = Utc::now().to_rfc3339();
 
     conn.execute(
@@ -289,152 +300,219 @@ pub(crate) fn start_run(
             (id, dataset_id, description, state, model_ids,
              rows_total, rows_processed,
              unique_inputs_total, unique_inputs_done, cache_hits,
-             created_at, started_at, execution_provider)
+             created_at, started_at, last_progress_at, execution_provider)
          VALUES (?, ?, ?, 'running', ?,
-                 NULL, 0,
-                 NULL, 0, 0,
-                 ?, ?, 'cpu')",
+                 ?, 0,
+                 ?, 0, 0,
+                 ?, ?, ?, 'cpu')",
         params![
             run_id,
             req.dataset_id,
             format!("Spike run: {}-digit", req.digit_level),
             serde_json::to_string(&[model_id]).map_err(|e| e.to_string())?,
+            rows_total,
+            rows_total,
+            now,
             now,
             now,
         ],
     )
     .map_err(|e| format!("insert runs: {e}"))?;
 
-    let outcome = run_inner(
-        &conn,
-        &req.dataset_id,
-        limit,
+    // Release the RW lock before spawning so the background task can re-acquire
+    // it without blocking on `db.rw()` inside the closure.
+    drop(conn);
+
+    let task = RunTask {
+        app: app.clone(),
+        dataset_id: req.dataset_id,
+        run_id: run_id.clone(),
         model_id,
-        &run_id,
-        model,
-        &now,
-    );
+        digit_level: req.digit_level,
+        limit,
+        now,
+    };
+    // spawn_blocking owns the synchronous ORT calls. tauri::async_runtime
+    // dispatches the closure onto the runtime's blocking pool, which doesn't
+    // starve the async executor that handles other IPC calls (notably the
+    // polling `get_run`).
+    tauri::async_runtime::spawn_blocking(move || task.run());
 
-    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let completed_at = Utc::now().to_rfc3339();
-
-    match outcome {
-        Ok((processed, unique_done, cache_hits)) => {
-            conn.execute(
-                "UPDATE runs SET state='completed',
-                    rows_total=?, rows_processed=?,
-                    unique_inputs_total=?, unique_inputs_done=?, cache_hits=?,
-                    completed_at=?, last_progress_at=?
-                 WHERE id=?",
-                params![
-                    i64::try_from(processed).unwrap_or(i64::MAX),
-                    i64::try_from(processed).unwrap_or(i64::MAX),
-                    i64::try_from(unique_done + cache_hits).unwrap_or(i64::MAX),
-                    i64::try_from(unique_done).unwrap_or(i64::MAX),
-                    i64::try_from(cache_hits).unwrap_or(i64::MAX),
-                    completed_at,
-                    completed_at,
-                    run_id,
-                ],
-            )
-            .map_err(|e| format!("finalize runs: {e}"))?;
-
-            Ok(RunResult {
-                run_id,
-                rows_processed: processed,
-                unique_inputs_done: unique_done,
-                cache_hits,
-                duration_ms,
-            })
-        }
-        Err(err) => {
-            let _ = conn.execute(
-                "UPDATE runs SET state='failed', error_message=?, completed_at=? WHERE id=?",
-                params![&err, completed_at, run_id],
-            );
-            Err(err)
-        }
-    }
+    Ok(StartRunResponse { run_id, rows_total })
 }
 
-/// Inner loop: select courses, classify, write results. Returns
-/// `(rows_processed, unique_inputs_done, cache_hits)`.
-fn run_inner(
-    conn: &duckdb::Connection,
-    dataset_id: &str,
-    limit: u32,
+/// All the inputs the background task needs. Owned values only so the spawned
+/// closure has no borrowed state to outlive.
+struct RunTask {
+    app: AppHandle,
+    dataset_id: String,
+    run_id: String,
     model_id: i64,
-    run_id: &str,
-    model: &inference::LoadedModel,
-    now: &str,
-) -> Result<(u64, u64, u64), String> {
-    let mut select = conn
-        .prepare(
-            "SELECT content_hash, subject_code, catalog_number, course_title
-             FROM courses
-             WHERE dataset_id = ?
-             ORDER BY row_index
-             LIMIT ?",
-        )
-        .map_err(|e| format!("prepare select courses: {e}"))?;
-    let rows: Vec<(String, String, String, String)> = select
-        .query_map(params![dataset_id, i64::from(limit)], |row| {
+    digit_level: u8,
+    limit: u32,
+    now: String,
+}
+
+impl RunTask {
+    /// Top-level entry. Catches the inner Result so we always finalize the
+    /// runs row, even on a mid-loop error.
+    fn run(self) {
+        let outcome = self.run_inner();
+        let completed_at = Utc::now().to_rfc3339();
+
+        let db = self.app.state::<AppDb>();
+        let Ok(conn) = db.rw() else {
+            // Mutex poisoning is unrecoverable; the run row stays in
+            // 'running' which is technically wrong, but the alternative
+            // (panic in a worker thread) is worse.
+            eprintln!("run {}: rw mutex poisoned", self.run_id);
+            return;
+        };
+        match outcome {
+            Ok((processed, unique_done, cache_hits)) => {
+                if let Err(e) = conn.execute(
+                    "UPDATE runs SET state='completed',
+                        rows_processed=?,
+                        unique_inputs_total=?, unique_inputs_done=?, cache_hits=?,
+                        completed_at=?, last_progress_at=?
+                     WHERE id=?",
+                    params![
+                        i64::try_from(processed).unwrap_or(i64::MAX),
+                        i64::try_from(unique_done + cache_hits).unwrap_or(i64::MAX),
+                        i64::try_from(unique_done).unwrap_or(i64::MAX),
+                        i64::try_from(cache_hits).unwrap_or(i64::MAX),
+                        &completed_at,
+                        &completed_at,
+                        &self.run_id,
+                    ],
+                ) {
+                    eprintln!("run {}: finalize: {e}", self.run_id);
+                }
+            }
+            Err(err) => {
+                let _ = conn.execute(
+                    "UPDATE runs SET state='failed', error_message=?, completed_at=? WHERE id=?",
+                    params![&err, &completed_at, &self.run_id],
+                );
+            }
+        }
+    }
+
+    fn run_inner(&self) -> Result<(u64, u64, u64), String> {
+        // Re-acquire the registry inside the worker so we don't have to send
+        // a State across threads (it would carry a borrow). Fresh State<T> is
+        // cheap; manage() puts T inside an Arc.
+        let registry = self.app.state::<InferenceRegistry>();
+        let model = registry.by_digit_level(self.digit_level).ok_or_else(|| {
+            format!(
+                "no model loaded for digit_level={} (worker)",
+                self.digit_level
+            )
+        })?;
+
+        let rows = self.select_courses()?;
+        let mut processed = 0_u64;
+        let mut unique_done = 0_u64;
+        let mut cache_hits = 0_u64;
+        for (content_hash, subject_code, catalog_number, course_title) in rows {
+            let hit = self.cache_hit(&content_hash)?;
+            if hit {
+                cache_hits += 1;
+            } else {
+                let input = format_input(&CourseInput {
+                    subject_code,
+                    catalog_number,
+                    course_title,
+                });
+                let classification =
+                    classify(model, &input).map_err(|e| format!("classify {content_hash}: {e}"))?;
+                self.insert_result(
+                    &content_hash,
+                    &classification.label,
+                    classification.logit_argmax,
+                )?;
+                unique_done += 1;
+            }
+            processed += 1;
+            self.tick_progress(processed, cache_hits)?;
+        }
+        Ok((processed, unique_done, cache_hits))
+    }
+
+    fn select_courses(&self) -> Result<Vec<(String, String, String, String)>, String> {
+        let db = self.app.state::<AppDb>();
+        let conn = db.rw()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT content_hash, subject_code, catalog_number, course_title
+                 FROM courses
+                 WHERE dataset_id = ?
+                 ORDER BY row_index
+                 LIMIT ?",
+            )
+            .map_err(|e| format!("prepare select courses: {e}"))?;
+        stmt.query_map(params![&self.dataset_id, i64::from(self.limit)], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .map_err(|e| format!("query courses: {e}"))?
         .collect::<Result<_, _>>()
-        .map_err(|e| format!("collect courses: {e}"))?;
+        .map_err(|e| format!("collect courses: {e}"))
+    }
 
-    let mut processed = 0_u64;
-    let mut unique_done = 0_u64;
-    let mut cache_hits = 0_u64;
+    fn cache_hit(&self, content_hash: &str) -> Result<bool, String> {
+        let db = self.app.state::<AppDb>();
+        let conn = db.ro()?;
+        let hit: Option<i32> = conn
+            .query_row(
+                "SELECT 1 FROM inference_results
+                 WHERE model_id = ? AND content_hash = ? LIMIT 1",
+                params![self.model_id, content_hash],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(hit.is_some())
+    }
 
-    let mut hit_check = conn
-        .prepare(
-            "SELECT 1 FROM inference_results
-             WHERE model_id = ? AND content_hash = ? LIMIT 1",
-        )
-        .map_err(|e| format!("prepare cache check: {e}"))?;
-    let mut insert_result = conn
-        .prepare(
+    fn insert_result(
+        &self,
+        content_hash: &str,
+        label: &str,
+        logit_argmax: f32,
+    ) -> Result<(), String> {
+        let db = self.app.state::<AppDb>();
+        let conn = db.rw()?;
+        conn.execute(
             "INSERT INTO inference_results
                 (model_id, content_hash, classification, probability,
                  computed_at, computed_by_run)
              VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                self.model_id,
+                content_hash,
+                label,
+                f64::from(logit_argmax),
+                &self.now,
+                &self.run_id,
+            ],
         )
-        .map_err(|e| format!("prepare insert: {e}"))?;
-
-    for (content_hash, subject_code, catalog_number, course_title) in rows {
-        processed += 1;
-
-        let is_hit: Option<i32> = hit_check
-            .query_row(params![model_id, &content_hash], |row| row.get(0))
-            .ok();
-        if is_hit.is_some() {
-            cache_hits += 1;
-            continue;
-        }
-
-        let input = format_input(&CourseInput {
-            subject_code,
-            catalog_number,
-            course_title,
-        });
-        let classification =
-            classify(model, &input).map_err(|e| format!("classify {content_hash}: {e}"))?;
-
-        insert_result
-            .execute(params![
-                model_id,
-                &content_hash,
-                &classification.label,
-                f64::from(classification.logit_argmax),
-                now,
-                run_id,
-            ])
-            .map_err(|e| format!("insert inference_results: {e}"))?;
-        unique_done += 1;
+        .map_err(|e| format!("insert inference_results: {e}"))?;
+        Ok(())
     }
 
-    Ok((processed, unique_done, cache_hits))
+    fn tick_progress(&self, processed: u64, cache_hits: u64) -> Result<(), String> {
+        let db = self.app.state::<AppDb>();
+        let conn = db.rw()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE runs SET rows_processed=?, cache_hits=?, last_progress_at=? WHERE id=?",
+            params![
+                i64::try_from(processed).unwrap_or(i64::MAX),
+                i64::try_from(cache_hits).unwrap_or(i64::MAX),
+                &now,
+                &self.run_id,
+            ],
+        )
+        .map_err(|e| format!("update progress: {e}"))?;
+        Ok(())
+    }
 }

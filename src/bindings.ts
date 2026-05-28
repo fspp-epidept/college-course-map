@@ -104,7 +104,7 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
-  async startRun(req: StartRunRequest): Promise<Result<RunResult, string>> {
+  async startRun(req: StartRunRequest): Promise<Result<StartRunResponse, string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
     } catch (e) {
@@ -231,13 +231,6 @@ export type RunDetail = {
   errorMessage: string | null;
   executionProvider: string | null;
 };
-export type RunResult = {
-  runId: string;
-  rowsProcessed: number;
-  uniqueInputsDone: number;
-  cacheHits: number;
-  durationMs: number;
-};
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
@@ -298,6 +291,11 @@ export type StartRunRequest = {
   digitLevel: number;
   limit: number | null;
 };
+/**
+ * Response from `start_run`: the run has been queued and is already updating
+ * its own row. The frontend polls `get_run(run_id)` from here.
+ */
+export type StartRunResponse = { runId: string; rowsTotal: number };
 /**
  * A full theme. `id` is the filename stem (set after load), never read from the
  * file body — `deny_unknown_fields` rejects an `id` key in the JSON.

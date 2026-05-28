@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { useMutation, useQueryClient } from "@tanstack/vue-query";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
+import { useRun } from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -11,14 +12,10 @@ const props = defineProps<{ tab: OpenTab }>();
 const datasetId = computed(() => props.tab.id.replace(/^dataset:/, ""));
 
 const digitLevel = ref<2 | 4 | 6>(6);
-const lastResult = ref<{
-  rowsProcessed: number;
-  uniqueInputsDone: number;
-  cacheHits: number;
-  durationMs: number;
-  digitLevel: number;
-} | null>(null);
-const errorMessage = ref<string | null>(null);
+// Run id of the most-recently-started run on this dataset tab. The live
+// progress meter polls this id; when null nothing renders.
+const activeRunId = ref<string | null>(null);
+const startError = ref<string | null>(null);
 
 const queryClient = useQueryClient();
 
@@ -27,25 +24,52 @@ const classify = useMutation({
     const result = await commands.startRun({
       datasetId: datasetId.value,
       digitLevel: level,
-      limit: 50,
+      limit: 500,
     });
     if (result.status === "error") throw new Error(result.error);
     return { ...result.data, digitLevel: level };
   },
   onSuccess: (data) => {
-    lastResult.value = data;
-    errorMessage.value = null;
-    // Refresh datasets so any new row_count / run state surfaces in the sidebar.
+    activeRunId.value = data.runId;
+    startError.value = null;
     queryClient.invalidateQueries({ queryKey: ["datasets"] });
     queryClient.invalidateQueries({ queryKey: ["metrics"] });
     queryClient.invalidateQueries({ queryKey: ["runs"] });
   },
   onError: (err: Error) => {
-    errorMessage.value = err.message;
+    startError.value = err.message;
   },
 });
 
+// `useRun` polls every 250 ms while state === 'running'. When the run we
+// kicked off completes, also nudge the global query caches so the sidebar /
+// metrics surfaces refresh exactly once.
+const runQueryId = computed(() => activeRunId.value ?? "");
+const { data: activeRun } = useRun(runQueryId);
+
+watch(
+  () => activeRun.value?.state,
+  (state) => {
+    if (state === "completed" || state === "failed") {
+      queryClient.invalidateQueries({ queryKey: ["datasets"] });
+      queryClient.invalidateQueries({ queryKey: ["metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    }
+  },
+);
+
+const progressPct = computed(() => {
+  const r = activeRun.value;
+  if (!r?.rowsTotal || r.rowsProcessed === null || r.rowsProcessed === undefined) {
+    return null;
+  }
+  return Math.round((r.rowsProcessed / r.rowsTotal) * 100);
+});
+
+const isRunning = computed(() => activeRun.value?.state === "running");
+
 function runFor(level: 2 | 4 | 6): void {
+  digitLevel.value = level;
   classify.mutate(level);
 }
 </script>
@@ -60,9 +84,9 @@ function runFor(level: 2 | 4 | 6): void {
     <section class="flex flex-col gap-3">
       <h3 class="text-sm font-medium text-(--ui-text)">Classify</h3>
       <p class="text-sm text-(--ui-text-muted)">
-        Run real Rust ONNX inference against the first 50 courses in this dataset.
-        Results are cached by (model, content_hash) — re-running the same digit
-        level will hit the cache instead of computing again.
+        Run real Rust ONNX inference against the first 500 courses in this dataset.
+        Results are cached by (model, content hash) — re-running the same digit
+        level will mostly hit the cache instead of recomputing.
       </p>
       <div class="flex items-center gap-2">
         <UButton
@@ -71,37 +95,69 @@ function runFor(level: 2 | 4 | 6): void {
           :color="digitLevel === level ? 'primary' : 'neutral'"
           :variant="digitLevel === level ? 'solid' : 'outline'"
           :loading="classify.isPending.value && digitLevel === level"
-          :disabled="classify.isPending.value"
-          @click="digitLevel = level; runFor(level)"
+          :disabled="classify.isPending.value || isRunning"
+          @click="runFor(level)"
         >
           Classify ({{ level }}-digit)
         </UButton>
       </div>
 
       <div
-        v-if="errorMessage"
+        v-if="startError"
         class="rounded-lg border border-(--ui-color-error-500)/40 bg-(--ui-color-error-500)/10 px-3 py-2 text-sm text-(--ui-color-error-500)"
       >
-        {{ errorMessage }}
+        {{ startError }}
       </div>
 
       <div
-        v-if="lastResult"
-        class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-1"
+        v-if="activeRun"
+        class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
       >
-        <div class="text-(--ui-text) font-medium">
-          {{ lastResult.digitLevel }}-digit run complete
+        <div class="flex items-center justify-between">
+          <span class="text-(--ui-text) font-medium">
+            <template v-if="activeRun.state === 'running'">
+              Classifying ({{ activeRun.digitLevel }}-digit)…
+            </template>
+            <template v-else-if="activeRun.state === 'completed'">
+              {{ activeRun.digitLevel }}-digit run complete
+            </template>
+            <template v-else-if="activeRun.state === 'failed'">
+              {{ activeRun.digitLevel }}-digit run failed
+            </template>
+            <template v-else>
+              {{ activeRun.state }}
+            </template>
+          </span>
+          <span v-if="progressPct !== null" class="tabular-nums text-(--ui-text-muted)">
+            {{ progressPct }}%
+          </span>
         </div>
+
+        <UProgress
+          v-if="progressPct !== null"
+          :model-value="progressPct"
+          :max="100"
+          :color="activeRun.state === 'failed' ? 'error' : 'primary'"
+          size="sm"
+        />
+
         <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-(--ui-text-muted)">
           <span>Rows processed</span>
-          <span class="text-(--ui-text)">{{ lastResult.rowsProcessed }}</span>
+          <span class="text-(--ui-text) tabular-nums">
+            {{ activeRun.rowsProcessed ?? 0 }} / {{ activeRun.rowsTotal ?? 0 }}
+          </span>
           <span>New classifications</span>
-          <span class="text-(--ui-text)">{{ lastResult.uniqueInputsDone }}</span>
+          <span class="text-(--ui-text) tabular-nums">{{ activeRun.uniqueInputsDone ?? 0 }}</span>
           <span>Cache hits</span>
-          <span class="text-(--ui-text)">{{ lastResult.cacheHits }}</span>
-          <span>Duration</span>
-          <span class="text-(--ui-text)">{{ lastResult.durationMs }} ms</span>
+          <span class="text-(--ui-text) tabular-nums">{{ activeRun.cacheHits ?? 0 }}</span>
         </div>
+
+        <p
+          v-if="activeRun.errorMessage"
+          class="text-(--ui-color-error-500) text-xs"
+        >
+          {{ activeRun.errorMessage }}
+        </p>
       </div>
     </section>
 
