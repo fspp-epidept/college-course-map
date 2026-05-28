@@ -1,8 +1,14 @@
 //! `DuckDB` connection management + migration runner.
 //!
-//! One read-write [`Connection`] lives behind a `Mutex` in Tauri state; read-only
-//! connections are opened ad-hoc for list/dashboard queries (per the architectural
-//! ground rule in `CLAUDE.md`). `DuckDB` connection-open is cheap, so we don't pool.
+//! One read-write [`Connection`] and one read-only [`Connection`] live behind
+//! `Mutex`es in Tauri state. The RW is held briefly per write; the RO is
+//! shared across list/dashboard reads. This diverges from the original
+//! `CLAUDE.md` ground rule of "ad-hoc RO connections" because `DuckDB`'s
+//! connection-open is **not** free under writer load — it parses schema and
+//! inspects WAL state, costing tens to hundreds of ms during an active import
+//! or run. Sharing a single RO mutex is uncontended in single-user flows; if
+//! reads ever serialize badly under heavy concurrency, switch to a small RO
+//! pool, not back to per-call open.
 //!
 //! Migrations are hand-rolled: ordered SQL files embedded via `include_str!`,
 //! applied in transactions, tracked by a `schema_version` table. This is fine
@@ -30,10 +36,12 @@ const MIGRATIONS: &[(u32, &str)] = &[
     ),
 ];
 
-/// Owned read-write connection plus the resolved on-disk path, so read-only
-/// consumers can re-open the same database without re-resolving the path.
+/// Owned read-write and read-only connections plus the resolved on-disk path.
+/// The path is kept for diagnostics and for tools that need to open their own
+/// connection (e.g. examples that bypass `AppDb`).
 pub struct AppDb {
     rw: Mutex<Connection>,
+    ro: Mutex<Connection>,
     path: PathBuf,
 }
 
@@ -49,16 +57,23 @@ impl std::fmt::Debug for AppDb {
 
 impl AppDb {
     /// Resolve the on-disk path, create the parent directory, open the RW
-    /// connection, and apply any pending migrations.
+    /// connection, apply any pending migrations, then open the shared RO
+    /// connection. RO is opened **after** migrations so its schema cache is
+    /// in sync with what callers will query.
     pub fn open() -> Result<Self, String> {
         let path = db_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        let conn = Connection::open(&path).map_err(|e| e.to_string())?;
-        migrate(&conn)?;
+        let rw = Connection::open(&path).map_err(|e| e.to_string())?;
+        migrate(&rw)?;
+        let ro_cfg = Config::default()
+            .access_mode(AccessMode::ReadOnly)
+            .map_err(|e| e.to_string())?;
+        let ro = Connection::open_with_flags(&path, ro_cfg).map_err(|e| e.to_string())?;
         Ok(Self {
-            rw: Mutex::new(conn),
+            rw: Mutex::new(rw),
+            ro: Mutex::new(ro),
             path,
         })
     }
@@ -70,12 +85,12 @@ impl AppDb {
         self.rw.lock().map_err(|_| "rw mutex poisoned".to_owned())
     }
 
-    /// Open a fresh read-only connection. Cheap; callers open and drop per query.
-    pub(crate) fn ro(&self) -> Result<Connection, String> {
-        let cfg = Config::default()
-            .access_mode(AccessMode::ReadOnly)
-            .map_err(|e| e.to_string())?;
-        Connection::open_with_flags(&self.path, cfg).map_err(|e| e.to_string())
+    /// Borrow the shared read-only connection. Cheap (no open cost), but
+    /// serializes reads — fine while the only reader callers are the IPC
+    /// list/dashboard queries. The `MutexGuard` derefs to `Connection` so
+    /// existing `conn.prepare(...)` call sites are unchanged.
+    pub(crate) fn ro(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        self.ro.lock().map_err(|_| "ro mutex poisoned".to_owned())
     }
 }
 
