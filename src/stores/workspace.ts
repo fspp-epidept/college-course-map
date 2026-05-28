@@ -1,4 +1,4 @@
-import { defineStore } from "pinia";
+import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { ActivityId, TabKind } from "../config/activities";
 
@@ -128,3 +128,9 @@ export const useWorkspace = defineStore(
     },
   },
 );
+
+// Vite HMR: accept module updates so adding/changing actions doesn't leave
+// components holding a stale store reference (the "is not a function" bite).
+if (import.meta.hot) {
+  import.meta.hot.accept(acceptHMRUpdate(useWorkspace, import.meta.hot));
+}
