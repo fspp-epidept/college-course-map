@@ -125,3 +125,13 @@ tasks:
     dir: src-tauri
     cmds:
       - cargo check --all-targets --all-features
+
+  db:reset:
+    desc: Delete the local DuckDB file (re-created with a fresh schema on next launch)
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example db_reset
+
+  seed:demo:
+    desc: Truncate and reinsert fixture data so the UI has something to render in dev
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example seed_demo

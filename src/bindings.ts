@@ -51,6 +51,14 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async listDatasets(): Promise<Result<DatasetSummary[], string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_datasets") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
 };
 
 /** user-defined events **/
@@ -89,9 +97,25 @@ export type ColorRamps = {
   neutral?: ColorRamp | null;
 };
 /**
- * `light` / `dark` — drives VueUse `useColorMode().preference` on the frontend.
+ * `light` / `dark` — drives `VueUse` `useColorMode().preference` on the frontend.
  */
 export type ColorScheme = "light" | "dark";
+/**
+ * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
+ * strings rather than `chrono::DateTime` so we don't need a specta-chrono
+ * integration just yet — the frontend treats them as opaque sortable strings.
+ */
+export type DatasetSummary = {
+  id: string;
+  title: string;
+  sourceKind: string;
+  importedAt: string;
+  /**
+   * `COUNT(*)` from `courses` for this dataset — recomputed each call so the
+   * `datasets.row_count` cached column staying in sync isn't load-bearing.
+   */
+  rowCount: number;
+};
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).
