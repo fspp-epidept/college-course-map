@@ -5,6 +5,17 @@ import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
 
+// Bind UDashboardSearch's open state to the workspace store so other surfaces
+// (e.g. the centered search button in the titlebar) can toggle the same modal.
+// UDashboardSearch's defineShortcuts handler mutates `open.value`, which writes
+// through to the store ref — keyboard and button stay in sync.
+const open = computed({
+  get: () => workspace.commandPaletteOpen,
+  set: (value) => {
+    workspace.commandPaletteOpen = value;
+  },
+});
+
 interface OpenTabRow {
   activityId: ActivityId;
   tabId: string;
@@ -72,6 +83,7 @@ const groups = computed(() => [
        group; theming is driven by settings.json + the registry (#106), not by
        VueUse's useColorMode preference. -->
   <UDashboardSearch
+    v-model:open="open"
     :groups="groups"
     :color-mode="false"
     placeholder="Jump to activity or open tab"

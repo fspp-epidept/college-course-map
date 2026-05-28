@@ -15,6 +15,13 @@ export interface OpenTab {
   icon?: string;
 }
 
+// Primary sidebar width is in rem so it respects the user's font-size scale.
+// Bounds keep the sidebar usable: too narrow and labels truncate to nothing;
+// too wide and the main panel disappears.
+export const SIDEBAR_WIDTH_MIN_REM = 12;
+export const SIDEBAR_WIDTH_MAX_REM = 36;
+const SIDEBAR_WIDTH_DEFAULT_REM = 16;
+
 /**
  * Workspace state — the VS-Code-style "what is currently open" model. Tabs are
  * kept per-activity so switching from Datasets to Settings and back restores
@@ -32,6 +39,11 @@ export const useWorkspace = defineStore(
     // Primary sidebar visibility. Per-session for now (not persisted) so a
     // demo opens with the sidebar showing every time.
     const sidebarOpen = ref(true);
+    const sidebarWidthRem = ref(SIDEBAR_WIDTH_DEFAULT_REM);
+
+    // Command palette open state, lifted into the store so non-keyboard surfaces
+    // (the titlebar search button) can toggle the same UDashboardSearch instance.
+    const commandPaletteOpen = ref(false);
 
     function setActiveActivity(id: ActivityId): void {
       activeActivityId.value = id;
@@ -70,6 +82,14 @@ export const useWorkspace = defineStore(
       sidebarOpen.value = !sidebarOpen.value;
     }
 
+    function setSidebarWidth(rem: number): void {
+      sidebarWidthRem.value = Math.max(SIDEBAR_WIDTH_MIN_REM, Math.min(SIDEBAR_WIDTH_MAX_REM, rem));
+    }
+
+    function toggleCommandPalette(): void {
+      commandPaletteOpen.value = !commandPaletteOpen.value;
+    }
+
     // Convenience views over the active activity.
     const activeTabs = computed<OpenTab[]>(
       () => tabsByActivity.value[activeActivityId.value] ?? [],
@@ -86,6 +106,8 @@ export const useWorkspace = defineStore(
       tabsByActivity,
       activeTabIdByActivity,
       sidebarOpen,
+      sidebarWidthRem,
+      commandPaletteOpen,
       activeTabs,
       activeTabId,
       activeTab,
@@ -94,12 +116,15 @@ export const useWorkspace = defineStore(
       closeTab,
       setActiveTab,
       toggleSidebar,
+      setSidebarWidth,
+      toggleCommandPalette,
     };
   },
   {
-    // Persist only what should restore across reloads. sidebarOpen is per-session.
+    // Persist what should survive reload. sidebarOpen + commandPaletteOpen are
+    // per-session (a demo opens with the sidebar showing and the palette closed).
     persist: {
-      pick: ["activeActivityId", "tabsByActivity", "activeTabIdByActivity"],
+      pick: ["activeActivityId", "tabsByActivity", "activeTabIdByActivity", "sidebarWidthRem"],
     },
   },
 );

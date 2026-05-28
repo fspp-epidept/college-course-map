@@ -4,6 +4,10 @@ import ActivityBar from "./components/workbench/ActivityBar.vue";
 import CommandPalette from "./components/workbench/CommandPalette.vue";
 import MainPanel from "./components/workbench/MainPanel.vue";
 import PrimarySidebar from "./components/workbench/PrimarySidebar.vue";
+import ResizeHandle from "./components/workbench/ResizeHandle.vue";
+import { useWorkspace } from "./stores/workspace";
+
+const workspace = useWorkspace();
 
 // macOS keeps native chrome (decorations + global menu); Windows/Linux get the
 // custom titlebar. See decision #102.
@@ -26,6 +30,7 @@ const isMacOS = import.meta.env.TAURI_ENV_PLATFORM === "macos";
       <div class="flex flex-1 min-h-0">
         <ActivityBar />
         <PrimarySidebar />
+        <ResizeHandle v-if="workspace.sidebarOpen" />
         <MainPanel />
       </div>
     </div>

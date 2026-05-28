@@ -5,16 +5,18 @@ import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
 
-// The activity bar drives which activity (and therefore which sidebar
-// component) is visible. Width is fixed for now; a resizable handle + per-user
-// width persisted in the workspace store is a polish follow-up.
 const active = computed(() => activityById(workspace.activeActivityId));
+
+// Inline style: width is per-user (drag-resizable, persisted in the workspace
+// store as rem). A static Tailwind class can't carry a dynamic value.
+const widthStyle = computed(() => ({ width: `${workspace.sidebarWidthRem}rem` }));
 </script>
 
 <template>
   <aside
     v-if="workspace.sidebarOpen"
-    class="w-64 shrink-0 flex flex-col border-r border-(--ui-border) bg-(--ui-bg-elevated) overflow-hidden"
+    :style="widthStyle"
+    class="shrink-0 flex flex-col bg-(--ui-bg-muted) overflow-hidden"
     aria-label="Primary sidebar"
   >
     <header
