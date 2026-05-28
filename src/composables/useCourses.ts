@@ -5,7 +5,11 @@ import { type CoursePage, commands } from "../bindings";
 interface UseCoursesArgs {
   datasetId: MaybeRefOrGetter<string>;
   modelId: MaybeRefOrGetter<number | null>;
-  page: MaybeRefOrGetter<number>;
+  /**
+   * Key-set cursor — the next page begins at the first row with
+   * `row_index >= cursor`. `null` (and 0) load the first page.
+   */
+  cursor: MaybeRefOrGetter<number | null>;
   pageSize: MaybeRefOrGetter<number>;
   /**
    * When false, the query is disabled — useful while a dataset is still
@@ -29,18 +33,16 @@ export function useCourses(args: UseCoursesArgs) {
           "courses",
           toValue(args.datasetId),
           toValue(args.modelId),
-          toValue(args.page),
+          toValue(args.cursor),
           toValue(args.pageSize),
         ] as const,
     ),
     queryFn: async (): Promise<CoursePage> => {
-      const pageSize = toValue(args.pageSize);
-      const page = toValue(args.page);
       const result = await commands.listCoursesWithResults({
         datasetId: toValue(args.datasetId),
         modelId: toValue(args.modelId),
-        offset: page * pageSize,
-        limit: pageSize,
+        cursor: toValue(args.cursor),
+        limit: toValue(args.pageSize),
       });
       if (result.status === "error") throw new Error(result.error);
       return result.data;

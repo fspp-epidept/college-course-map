@@ -114,12 +114,19 @@ function runFor(level: 2 | 4 | 6): void {
 // --- Courses table ---
 
 const PAGE_SIZE = 50;
-const page = ref(0);
+// Key-set pagination: `cursor` is the row_index of the first row in the
+// current page (null = first page). `cursorStack` records the cursors of
+// prior pages so Previous can pop back without recomputing — there's no
+// way to derive "the page before cursor X" from a key-set scan, so we
+// remember it explicitly.
+const cursor = ref<number | null>(null);
+const cursorStack = ref<number[]>([]);
 
-// Reset to page 0 whenever the user switches digit level (the joined column
+// Reset pagination whenever the user switches digit level (the joined column
 // changes underneath them).
 watch(digitLevel, () => {
-  page.value = 0;
+  cursor.value = null;
+  cursorStack.value = [];
 });
 
 const { data: modelId } = useModelIdForDigitLevel(digitLevel);
@@ -131,27 +138,36 @@ const {
 } = useCourses({
   datasetId,
   modelId: computed(() => modelId.value ?? null),
-  page,
+  cursor,
   pageSize: PAGE_SIZE,
   // Pause this query entirely while the import is still streaming rows. The
-  // page is dynamic (offset/limit) so each query is a real read against a
+  // page is dynamic (cursor/limit) so each query is a real read against a
   // file that's getting hammered by the Appender; skipping while
   // importing keeps the UI responsive.
   enabled: computed(() => !isImporting.value),
 });
 
 const totalRows = computed(() => coursePage.value?.total ?? 0);
-const totalPages = computed(() =>
-  totalRows.value === 0 ? 0 : Math.ceil(totalRows.value / PAGE_SIZE),
-);
-const pageStart = computed(() => (totalRows.value === 0 ? 0 : page.value * PAGE_SIZE + 1));
-const pageEnd = computed(() => Math.min((page.value + 1) * PAGE_SIZE, totalRows.value));
+const pageRows = computed(() => coursePage.value?.rows ?? []);
+// More pages exist iff we got a full page back — proxy for "the SQL would
+// have returned more if we'd asked for it." Edge case: a dataset whose row
+// count is an exact multiple of PAGE_SIZE will offer a Next click that lands
+// on an empty page; Previous gets the user back. Worth living with for now.
+const hasMore = computed(() => pageRows.value.length === PAGE_SIZE);
+const hasPrev = computed(() => cursorStack.value.length > 0);
 
 function gotoPrev(): void {
-  if (page.value > 0) page.value -= 1;
+  const prev = cursorStack.value.pop();
+  if (prev === undefined) return;
+  // A popped value of 0 means "back to the first page" — represented as null
+  // so the cursor IPC arg matches the initial state.
+  cursor.value = prev === 0 ? null : prev;
 }
 function gotoNext(): void {
-  if (page.value + 1 < totalPages.value) page.value += 1;
+  const last = pageRows.value[pageRows.value.length - 1];
+  if (!last) return;
+  cursorStack.value.push(cursor.value ?? 0);
+  cursor.value = last.rowIndex + 1;
 }
 </script>
 
@@ -280,8 +296,7 @@ function gotoNext(): void {
         <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
         <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
           <template v-if="totalRows > 0">
-            {{ pageStart.toLocaleString() }}–{{ pageEnd.toLocaleString() }}
-            of {{ totalRows.toLocaleString() }}
+            {{ pageRows.length.toLocaleString() }} of {{ totalRows.toLocaleString() }}
           </template>
         </span>
       </div>
@@ -350,20 +365,17 @@ function gotoNext(): void {
           color="neutral"
           icon="i-lucide-chevron-left"
           size="xs"
-          :disabled="page === 0"
+          :disabled="!hasPrev"
           @click="gotoPrev"
         >
           Previous
         </UButton>
-        <span class="text-xs text-(--ui-text-muted) tabular-nums px-2">
-          Page {{ page + 1 }} of {{ Math.max(totalPages, 1) }}
-        </span>
         <UButton
           variant="ghost"
           color="neutral"
           trailing-icon="i-lucide-chevron-right"
           size="xs"
-          :disabled="page + 1 >= totalPages"
+          :disabled="!hasMore"
           @click="gotoNext"
         >
           Next

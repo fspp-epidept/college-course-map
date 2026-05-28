@@ -19,7 +19,13 @@ pub(crate) struct ListCoursesRequest {
     /// Optional model id for the joined classification + probability columns.
     /// `None` means the joined columns come back as `null`.
     pub model_id: Option<i64>,
-    pub offset: u32,
+    /// Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
+    /// mean "from the start". The frontend hands back the row index of the
+    /// last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
+    /// `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
+    /// `(dataset_id, row_index)` index and scans the whole partition;
+    /// the range predicate lets the index drive the scan.
+    pub cursor: Option<i64>,
     pub limit: u32,
 }
 
@@ -81,25 +87,25 @@ pub(crate) fn list_courses_with_results(
             .map_err(|e| format!("count courses: {e}"))?,
     };
 
-    // Step 1: page the courses table on its own. The (dataset_id, row_index)
-    // index supports the filter + ordering; the LIMIT keeps the work bounded
-    // to PAGE_SIZE rows regardless of dataset size. Doing the JOIN here
-    // instead used to push DuckDB into a 2M-row scan + hash-join plan on
-    // freshly imported data, which is what was hanging the tab.
+    // Step 1: page the courses table on its own via key-set cursor. The
+    // (dataset_id, row_index) index drives the WHERE + ORDER BY directly,
+    // so the scan reads exactly LIMIT rows starting at the cursor — no
+    // 2M-row TopN like OFFSET would force, even for the first page.
+    let cursor = req.cursor.unwrap_or(0);
     let mut stmt = conn
         .prepare(
             "SELECT id, row_index, subject_code, catalog_number,
                     course_title, content_hash
              FROM courses
-             WHERE dataset_id = ?
+             WHERE dataset_id = ? AND row_index >= ?
              ORDER BY row_index
-             LIMIT ? OFFSET ?",
+             LIMIT ?",
         )
         .map_err(|e| format!("prepare list courses: {e}"))?;
 
     let rows = stmt
         .query_map(
-            duckdb::params![req.dataset_id, i64::from(limit), i64::from(req.offset)],
+            duckdb::params![req.dataset_id, cursor, i64::from(limit)],
             |row| {
                 Ok(CourseRow {
                     id: row.get(0)?,

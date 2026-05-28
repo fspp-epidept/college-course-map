@@ -222,8 +222,9 @@ export type DatasetSummary = {
   sourceKind: string;
   importedAt: string;
   /**
-   * `COUNT(*)` from `courses` for this dataset — recomputed each call so the
-   * `datasets.row_count` cached column staying in sync isn't load-bearing.
+   * Read straight from `datasets.row_count`, which the import worker keeps
+   * up to date (live ticks during streaming, finalized in `mark_ready`).
+   * Datasets are otherwise immutable, so there's no fallback `COUNT(*)`.
    */
   rowCount: number;
   /**
@@ -256,7 +257,15 @@ export type ListCoursesRequest = {
    * `None` means the joined columns come back as `null`.
    */
   modelId: number | null;
-  offset: number;
+  /**
+   * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
+   * mean "from the start". The frontend hands back the row index of the
+   * last row of a page + 1 to advance. Replaces OFFSET because DuckDB's
+   * TopN plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
+   * `(dataset_id, row_index)` index and scans the whole partition;
+   * the range predicate lets the index drive the scan.
+   */
+  cursor: number | null;
   limit: number;
 };
 /**
