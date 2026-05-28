@@ -29,6 +29,7 @@ const importMutation = useMutation({
   },
   onSuccess: (data) => {
     queryClient.invalidateQueries({ queryKey: ["datasets"] });
+    queryClient.invalidateQueries({ queryKey: ["metrics"] });
     importSummary.value = `Imported ${data.rowsImported} rows (${data.rowsSkipped} skipped).`;
     importError.value = null;
   },

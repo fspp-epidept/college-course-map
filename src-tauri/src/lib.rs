@@ -5,6 +5,7 @@ pub mod db;
 pub mod format;
 mod import;
 pub mod inference;
+mod metrics;
 mod runs;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
@@ -25,6 +26,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         csv_io::preview_csv,
         datasets::list_datasets,
         import::import_csv,
+        metrics::list_metrics,
         runs::start_run,
     ])
 }

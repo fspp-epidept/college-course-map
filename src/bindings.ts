@@ -80,6 +80,14 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async listMetrics(): Promise<Result<AppMetrics, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_metrics") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   async startRun(req: StartRunRequest): Promise<Result<RunResult, string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
@@ -96,6 +104,22 @@ export const commands = {
 
 /** user-defined types **/
 
+export type AppMetrics = {
+  datasets: number;
+  courses: number;
+  runs: number;
+  completedRuns: number;
+  /**
+   * Distinct `(model_id, content_hash)` rows in `inference_results`.
+   */
+  classifications: number;
+  /**
+   * Sum of `runs.cache_hits` divided by sum of `runs.rows_processed`, both
+   * across all runs. `None` when no rows have been processed yet (avoids a
+   * noisy 0% on a fresh DB).
+   */
+  cacheHitRate: number | null;
+};
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.
