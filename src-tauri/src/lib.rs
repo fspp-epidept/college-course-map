@@ -1,5 +1,5 @@
-pub mod format;
 mod config;
+pub mod format;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
 mod menu;

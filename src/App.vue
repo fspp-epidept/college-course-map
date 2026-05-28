@@ -1,37 +1,42 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from "vue-router";
 import AppTitleBar from "./components/AppTitleBar.vue";
+import ActivityBar from "./components/workbench/ActivityBar.vue";
+import CommandPalette from "./components/workbench/CommandPalette.vue";
+import MainPanel from "./components/workbench/MainPanel.vue";
+import PrimarySidebar from "./components/workbench/PrimarySidebar.vue";
+import ResizeHandle from "./components/workbench/ResizeHandle.vue";
+import { useWorkspace } from "./stores/workspace";
+
+const workspace = useWorkspace();
 
 // macOS keeps native chrome (decorations + global menu); Windows/Linux get the
 // custom titlebar. See decision #102.
 const isMacOS = import.meta.env.TAURI_ENV_PLATFORM === "macos";
-
-const routes = [
-  { to: "/datasets", label: "Datasets" },
-  { to: "/runs", label: "Runs" },
-  { to: "/models", label: "Models" },
-  { to: "/settings", label: "Settings" },
-];
 </script>
 
 <template>
   <UApp>
-    <div class="min-h-screen flex flex-col">
+    <!--
+      Workbench shell: AppTitleBar (Win/Linux) above a flex row of
+      ActivityBar | PrimarySidebar | MainPanel. We don't use UDashboardGroup —
+      its base class is `fixed inset-0`, which would pop the workbench out of
+      this normal flow and overlay the titlebar + activity bar. UDashboardSidebar
+      is similarly out (responsive `hidden lg:flex` collapses it under 1024px,
+      always mounts a mobile slideover overlay). A plain <aside> works.
+    -->
+    <div class="h-screen flex flex-col overflow-hidden">
       <AppTitleBar v-if="!isMacOS" />
-      <nav class="border-b border-(--ui-border) px-6 py-3 flex gap-4">
-        <RouterLink
-          v-for="route in routes"
-          :key="route.to"
-          :to="route.to"
-          class="text-sm text-(--ui-text-muted) hover:text-(--ui-text)"
-          active-class="text-(--ui-primary) font-medium"
-        >
-          {{ route.label }}
-        </RouterLink>
-      </nav>
-      <main class="flex-1">
-        <RouterView />
-      </main>
+
+      <div class="flex flex-1 min-h-0">
+        <ActivityBar />
+        <PrimarySidebar />
+        <ResizeHandle v-if="workspace.sidebarOpen" />
+        <MainPanel />
+      </div>
     </div>
+
+    <!-- Cmd/Ctrl-K opens the palette via UDashboardSearch's own defineShortcuts
+         binding (works standalone, no UDashboardGroup needed). -->
+    <CommandPalette />
   </UApp>
 </template>

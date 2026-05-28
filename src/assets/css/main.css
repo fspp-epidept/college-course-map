@@ -1,2 +1,12 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
+
+/* Tailwind v4's preflight sets `cursor: default` on every <button>. Restore the
+   pointer cursor on interactive buttons app-wide so CTAs (activity bar, tabs,
+   sidebar items, titlebar controls, palette trigger, future ones) all feel
+   clickable without per-button bookkeeping. Disabled buttons stay default. */
+@layer base {
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+}
