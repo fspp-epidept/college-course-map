@@ -6,7 +6,12 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [vue(), ui()],
+  // colorMode: false — disable Nuxt UI's bundled color-mode plugin (which would
+  // install VueUse's `useDark()` and independently toggle `.dark` on <html>
+  // from localStorage + prefers-color-scheme). Our theming engine (#106) owns
+  // that class via `applyTheme`; letting both run causes a race where one
+  // clobbers the other on reload. See `stores/theme.ts`.
+  plugins: [vue(), ui({ colorMode: false })],
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
