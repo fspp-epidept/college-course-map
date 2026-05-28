@@ -136,6 +136,11 @@ tasks:
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example seed_demo
 
+  db:clear-data:
+    desc: Wipe user data (datasets / courses / runs / results) but keep the models table populated
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example clear_user_data
+
   check:parity:
     desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match
     cmds:
