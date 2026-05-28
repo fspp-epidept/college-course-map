@@ -4,6 +4,7 @@ mod datasets;
 pub mod db;
 pub mod format;
 mod import;
+pub mod inference;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]

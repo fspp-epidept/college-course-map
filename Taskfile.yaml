@@ -135,3 +135,11 @@ tasks:
     desc: Truncate and reinsert fixture data so the UI has something to render in dev
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example seed_demo
+
+  check:parity:
+    desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match
+    cmds:
+      # Release-only: debug FP behavior can flip near-tied argmaxes vs the
+      # Python reference (which was captured with the same opt level as Rust
+      # release). See examples/check_parity.rs.
+      - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity

@@ -33,6 +33,9 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tauri-plugin-dialog = "2"
 csv = "1"
+ort = "2.0.0-rc.12"
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+ndarray = "0.17"
 
 [lints.rust]
 unsafe_code = "deny"
