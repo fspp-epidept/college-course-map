@@ -42,7 +42,7 @@ pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>,
                     d.source_kind,
                     strftime(d.imported_at, '%Y-%m-%dT%H:%M:%SZ') AS imported_at,
                     COALESCE(COUNT(c.id), 0)                      AS row_count,
-                    d.import_state,
+                    COALESCE(d.import_state, 'ready')             AS import_state,
                     d.import_error
              FROM datasets d
              LEFT JOIN courses c ON c.dataset_id = d.id
