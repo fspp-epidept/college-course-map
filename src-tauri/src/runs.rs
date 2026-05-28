@@ -18,8 +18,15 @@ use uuid::Uuid;
 use crate::{
     db::AppDb,
     format::{CourseInput, format_input},
-    inference::{InferenceRegistry, classify},
+    inference::{InferenceRegistry, classify_batch},
 };
+
+/// Inputs are batched through the model in chunks of this size. Matches the
+/// Python pipeline's `predict_batch` default. Two effects: one ONNX call per
+/// chunk (amortizes graph + thread-pool overhead) and one progress
+/// `UPDATE runs` per chunk (per-row updates were the dominant RW-mutex
+/// contention against the polling UI).
+const BATCH_SIZE: usize = 32;
 
 /// One row in the Runs sidebar list. Joined with the dataset title so the UI
 /// doesn't need a second IPC call to render a meaningful label.
@@ -439,27 +446,44 @@ impl RunTask {
         let mut processed = 0_u64;
         let mut unique_done = 0_u64;
         let mut cache_hits = 0_u64;
-        for (content_hash, subject_code, catalog_number, course_title) in rows {
-            let hit = self.cache_hit(&content_hash)?;
-            if hit {
-                cache_hits += 1;
-            } else {
-                let input = format_input(&CourseInput {
-                    subject_code,
-                    catalog_number,
-                    course_title,
-                });
-                let classification =
-                    classify(model, &input).map_err(|e| format!("classify {content_hash}: {e}"))?;
-                self.insert_result(
-                    &content_hash,
-                    &classification.label,
-                    classification.logit_argmax,
-                )?;
-                unique_done += 1;
-            }
-            processed += 1;
-            self.tick_progress(processed, cache_hits)?;
+
+        for chunk in rows.chunks(BATCH_SIZE) {
+            // 1. Bulk cache check — one IN-list query per chunk replaces N
+            //    single-row probes.
+            let cached = self.cache_hit_batch(chunk)?;
+
+            // 2. Format only the misses. `Miss` borrows `content_hash` from
+            //    `chunk` so flush_batch can pair it with its classification
+            //    without indexing back into the chunk later.
+            let misses: Vec<Miss<'_>> = chunk
+                .iter()
+                .zip(cached.iter())
+                .filter(|&(_, &hit)| !hit)
+                .map(|((content_hash, subject, catalog, title), _)| Miss {
+                    content_hash: content_hash.as_str(),
+                    input: format_input(&CourseInput {
+                        subject_code: subject.clone(),
+                        catalog_number: catalog.clone(),
+                        course_title: title.clone(),
+                    }),
+                })
+                .collect();
+            let miss_refs: Vec<&str> = misses.iter().map(|m| m.input.as_str()).collect();
+
+            // 3. One ONNX session call for the whole batch of misses.
+            let classifications =
+                classify_batch(model, &miss_refs).map_err(|e| format!("classify_batch: {e}"))?;
+
+            // 4. Bulk insert via Appender + single progress UPDATE, both under
+            //    one RW-mutex acquire instead of 2*N per chunk.
+            let chunk_hits = cached.iter().filter(|h| **h).count();
+            let processed_after = processed + chunk.len() as u64;
+            let cache_hits_after = cache_hits + chunk_hits as u64;
+            self.flush_batch(&misses, &classifications, processed_after, cache_hits_after)?;
+
+            processed = processed_after;
+            cache_hits = cache_hits_after;
+            unique_done += classifications.len() as u64;
         }
         Ok((processed, unique_done, cache_hits))
     }
@@ -484,55 +508,97 @@ impl RunTask {
         .map_err(|e| format!("collect courses: {e}"))
     }
 
-    fn cache_hit(&self, content_hash: &str) -> Result<bool, String> {
+    /// Returns a `Vec<bool>` aligned with `chunk`: true if the
+    /// `(model_id, content_hash)` pair is already in `inference_results`.
+    fn cache_hit_batch(
+        &self,
+        chunk: &[(String, String, String, String)],
+    ) -> Result<Vec<bool>, String> {
+        if chunk.is_empty() {
+            return Ok(Vec::new());
+        }
         let db = self.app.state::<AppDb>();
         let conn = db.ro()?;
-        let hit: Option<i32> = conn
-            .query_row(
-                "SELECT 1 FROM inference_results
-                 WHERE model_id = ? AND content_hash = ? LIMIT 1",
-                params![self.model_id, content_hash],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok(hit.is_some())
+        let mut placeholders = String::with_capacity(chunk.len() * 2);
+        for i in 0..chunk.len() {
+            if i > 0 {
+                placeholders.push(',');
+            }
+            placeholders.push('?');
+        }
+        let sql = format!(
+            "SELECT content_hash FROM inference_results
+             WHERE model_id = ? AND content_hash IN ({placeholders})"
+        );
+        let mut sql_params: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(chunk.len() + 1);
+        sql_params.push(&self.model_id);
+        for (h, ..) in chunk {
+            sql_params.push(h);
+        }
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare cache_hit_batch: {e}"))?;
+        let hits: std::collections::HashSet<String> = stmt
+            .query_map(duckdb::params_from_iter(sql_params), |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(|e| format!("query cache_hit_batch: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("collect cache_hit_batch: {e}"))?;
+        Ok(chunk.iter().map(|(h, ..)| hits.contains(h)).collect())
     }
 
-    fn insert_result(
+    /// Single RW-mutex acquire per batch: insert all miss classifications via
+    /// the Appender, then tick run progress. `processed_after` /
+    /// `cache_hits_after` are the post-batch running totals, written verbatim
+    /// to the runs row.
+    fn flush_batch(
         &self,
-        content_hash: &str,
-        label: &str,
-        logit_argmax: f32,
+        misses: &[Miss<'_>],
+        classifications: &[crate::inference::Classification],
+        processed_after: u64,
+        cache_hits_after: u64,
     ) -> Result<(), String> {
         let db = self.app.state::<AppDb>();
         let conn = db.rw()?;
-        conn.execute(
-            "INSERT INTO inference_results
-                (model_id, content_hash, classification, probability,
-                 computed_at, computed_by_run)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                self.model_id,
-                content_hash,
-                label,
-                f64::from(logit_argmax),
-                &self.now,
-                &self.run_id,
-            ],
-        )
-        .map_err(|e| format!("insert inference_results: {e}"))?;
-        Ok(())
-    }
 
-    fn tick_progress(&self, processed: u64, cache_hits: u64) -> Result<(), String> {
-        let db = self.app.state::<AppDb>();
-        let conn = db.rw()?;
+        if !classifications.is_empty() {
+            let mut appender = conn
+                .appender_with_columns(
+                    "inference_results",
+                    &[
+                        "model_id",
+                        "content_hash",
+                        "classification",
+                        "probability",
+                        "computed_at",
+                        "computed_by_run",
+                    ],
+                )
+                .map_err(|e| format!("open inference appender: {e}"))?;
+            for (miss, classification) in misses.iter().zip(classifications.iter()) {
+                appender
+                    .append_row(params![
+                        self.model_id,
+                        miss.content_hash,
+                        classification.label.as_str(),
+                        f64::from(classification.logit_argmax),
+                        self.now.as_str(),
+                        self.run_id.as_str(),
+                    ])
+                    .map_err(|e| format!("inference appender append_row: {e}"))?;
+            }
+            appender
+                .flush()
+                .map_err(|e| format!("inference appender flush: {e}"))?;
+        }
+
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE runs SET rows_processed=?, cache_hits=?, last_progress_at=? WHERE id=?",
             params![
-                i64::try_from(processed).unwrap_or(i64::MAX),
-                i64::try_from(cache_hits).unwrap_or(i64::MAX),
+                i64::try_from(processed_after).unwrap_or(i64::MAX),
+                i64::try_from(cache_hits_after).unwrap_or(i64::MAX),
                 &now,
                 &self.run_id,
             ],
@@ -540,4 +606,12 @@ impl RunTask {
         .map_err(|e| format!("update progress: {e}"))?;
         Ok(())
     }
+}
+
+/// Per-row state for a cache-missed input within one batch. Borrows the
+/// content hash from the worker's owned `rows` Vec so `flush_batch` can pair it
+/// with the corresponding classification without an extra clone.
+struct Miss<'a> {
+    content_hash: &'a str,
+    input: String,
 }

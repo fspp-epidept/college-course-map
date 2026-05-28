@@ -18,7 +18,10 @@ use ort::{
     value::TensorRef,
 };
 use serde::Deserialize;
-use tokenizers::{Tokenizer, TruncationDirection, TruncationParams};
+use tokenizers::{
+    PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection,
+    TruncationParams,
+};
 
 /// Matches `max_length=512` in `scripts/models/_lib/inference.py::predict_batch`.
 const MAX_SEQ_LEN: usize = 512;
@@ -59,9 +62,7 @@ pub struct Classification {
 pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedModel> {
     let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
-    // Match the Python pipeline: `truncation=True, max_length=512`. Padding is
-    // not configured: single-input inference doesn't need it, and batched
-    // inference will set padding per-batch when it lands.
+    // Match the Python pipeline: `truncation=True, max_length=512`.
     tokenizer
         .with_truncation(Some(TruncationParams {
             max_length: MAX_SEQ_LEN,
@@ -69,6 +70,20 @@ pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedMod
             ..Default::default()
         }))
         .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
+    // BatchLongest = pad to the longest sequence in each batch. For a single
+    // input (the `classify` path and the parity fixture), the "batch" has one
+    // entry so this is a no-op — outputs stay byte-identical to the un-padded
+    // path. For real batches (the run worker), this gives encode_batch uniform
+    // [n, max_len] shapes ready to flatten into a tensor. pad_id/pad_token
+    // match the RoBERTa base tokenizer the annamp models are derived from.
+    tokenizer.with_padding(Some(PaddingParams {
+        strategy: PaddingStrategy::BatchLongest,
+        direction: PaddingDirection::Right,
+        pad_to_multiple_of: None,
+        pad_id: 1,
+        pad_type_id: 0,
+        pad_token: "<pad>".to_owned(),
+    }));
 
     let id2label = load_id2label(&model_dir.join("config.json"))?;
 
@@ -89,26 +104,63 @@ pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedMod
     })
 }
 
-/// Run one input through the model. Tokenizes, builds `input_ids` +
-/// `attention_mask` tensors, runs inference, returns the argmax / top-3 /
-/// logit-at-argmax.
+/// Run one input through the model. Thin wrapper over [`classify_batch`] so
+/// the parity fixture exercises the same code path as the batched run worker.
 pub fn classify(model: &LoadedModel, input: &str) -> anyhow::Result<Classification> {
-    let encoding = model
-        .tokenizer
-        .encode(input, true)
-        .map_err(|e| anyhow::anyhow!("encode: {e}"))?;
-    let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| i64::from(id)).collect();
-    let mask: Vec<i64> = encoding
-        .get_attention_mask()
-        .iter()
-        .map(|&m| i64::from(m))
-        .collect();
-    let seq_len_i64 = i64::try_from(ids.len())
-        .map_err(|_| anyhow::anyhow!("token sequence length overflows i64"))?;
+    classify_batch(model, &[input])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("classify_batch returned no rows for single input"))
+}
 
-    let ids_tensor = TensorRef::from_array_view((vec![1_i64, seq_len_i64], ids.as_slice()))
+/// Batched inference. Tokenizes the whole batch with `encode_batch` so the
+/// tokenizer's `BatchLongest` padding produces uniform `[n, max_len]` shapes,
+/// then runs a single ONNX session call. Empty input returns an empty Vec.
+pub fn classify_batch(model: &LoadedModel, inputs: &[&str]) -> anyhow::Result<Vec<Classification>> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let encodings = model
+        .tokenizer
+        .encode_batch(inputs.to_vec(), true)
+        .map_err(|e| anyhow::anyhow!("encode_batch: {e}"))?;
+    let n = encodings.len();
+    let max_len = encodings
+        .iter()
+        .map(|e| e.get_ids().len())
+        .max()
+        .unwrap_or(0);
+    if max_len == 0 {
+        anyhow::bail!("encode_batch produced empty encodings");
+    }
+
+    let mut ids: Vec<i64> = Vec::with_capacity(n * max_len);
+    let mut mask: Vec<i64> = Vec::with_capacity(n * max_len);
+    for enc in &encodings {
+        let row_ids = enc.get_ids();
+        let row_mask = enc.get_attention_mask();
+        // BatchLongest pads every row to max_len, so this is a length check we
+        // expect to always pass — but if the tokenizer config ever changes,
+        // failing here is far better than feeding ONNX a ragged tensor.
+        if row_ids.len() != max_len || row_mask.len() != max_len {
+            anyhow::bail!(
+                "ragged encoding: ids={}, mask={}, expected {max_len}",
+                row_ids.len(),
+                row_mask.len()
+            );
+        }
+        ids.extend(row_ids.iter().map(|&i| i64::from(i)));
+        mask.extend(row_mask.iter().map(|&m| i64::from(m)));
+    }
+
+    let n_i64 = i64::try_from(n).map_err(|_| anyhow::anyhow!("batch size overflows i64"))?;
+    let max_len_i64 =
+        i64::try_from(max_len).map_err(|_| anyhow::anyhow!("seq len overflows i64"))?;
+    let shape = vec![n_i64, max_len_i64];
+    let ids_tensor = TensorRef::from_array_view((shape.clone(), ids.as_slice()))
         .map_err(|e| anyhow::anyhow!("ids tensor: {e}"))?;
-    let mask_tensor = TensorRef::from_array_view((vec![1_i64, seq_len_i64], mask.as_slice()))
+    let mask_tensor = TensorRef::from_array_view((shape, mask.as_slice()))
         .map_err(|e| anyhow::anyhow!("attention_mask tensor: {e}"))?;
 
     let mut session = model
@@ -122,43 +174,42 @@ pub fn classify(model: &LoadedModel, input: &str) -> anyhow::Result<Classificati
         ])
         .map_err(|e| anyhow::anyhow!("session.run: {e}"))?;
 
-    // The annamp models export with a single output named "logits" of shape
-    // [1, num_classes]. Pull it by name so a future model that adds extra
-    // outputs (e.g. hidden states) doesn't shuffle the index.
     let logits_value = outputs
         .get("logits")
         .ok_or_else(|| anyhow::anyhow!("model output has no `logits` tensor"))?;
     let logits_view = logits_value
         .try_extract_array::<f32>()
         .map_err(|e| anyhow::anyhow!("extract logits: {e}"))?;
-    let logits = logits_view
+    let logits_flat = logits_view
         .as_slice()
         .ok_or_else(|| anyhow::anyhow!("logits not contiguous"))?;
-    let num_classes = logits.len();
-    if num_classes == 0 {
-        anyhow::bail!("model returned empty logits");
+    let total = logits_flat.len();
+    if total == 0 || total % n != 0 {
+        anyhow::bail!("logits has unexpected length {total} for batch size {n}");
     }
+    let num_classes = total / n;
 
-    // argmax + top-3 in one pass: stable, no allocation beyond a fixed array.
-    let (argmax, &argmax_val) = logits
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .ok_or_else(|| anyhow::anyhow!("argmax: empty logits"))?;
-    let top3 = top3_indices(logits);
-
-    let label = model
-        .id2label
-        .get(argmax)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("argmax {argmax} out of id2label bounds"))?;
-
-    Ok(Classification {
-        label,
-        label_index: argmax,
-        top3,
-        logit_argmax: argmax_val,
-    })
+    let mut out: Vec<Classification> = Vec::with_capacity(n);
+    for row_logits in logits_flat.chunks(num_classes) {
+        let (argmax, &argmax_val) = row_logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .ok_or_else(|| anyhow::anyhow!("argmax: empty logits row"))?;
+        let top3 = top3_indices(row_logits);
+        let label = model
+            .id2label
+            .get(argmax)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("argmax {argmax} out of id2label bounds"))?;
+        out.push(Classification {
+            label,
+            label_index: argmax,
+            top3,
+            logit_argmax: argmax_val,
+        });
+    }
+    Ok(out)
 }
 
 /// Top-3 indices, sorted descending by logit value. Ties broken by index order
