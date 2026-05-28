@@ -1,11 +1,28 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, watch } from "vue";
 import type { RunSummary } from "../../bindings";
 import { useRuns } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
 const { data: runs, isPending, isError, error } = useRuns();
+
+// Same pattern as DatasetsSidebar: drop persisted tabs whose run no longer
+// exists in the DB. Keeps stale tabs from sticking around after a DB wipe.
+watch(
+  runs,
+  (list) => {
+    if (!list) return;
+    const valid = new Set(list.map((r) => `run:${r.id}`));
+    const open = workspace.tabsByActivity.runs ?? [];
+    for (const tab of open) {
+      if (!valid.has(tab.id)) {
+        workspace.closeTab("runs", tab.id);
+      }
+    }
+  },
+  { immediate: true },
+);
 
 interface RunGroup {
   label: string;

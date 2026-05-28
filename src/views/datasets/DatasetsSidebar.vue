@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import type { DatasetSummary } from "../../bindings";
 import ImportCsvDialog from "../../components/ImportCsvDialog.vue";
 import { useDatasets } from "../../composables/useDatasets";
@@ -18,6 +18,24 @@ function open(dataset: DatasetSummary): void {
     icon: "i-lucide-database",
   });
 }
+
+// Prune persisted tabs whose dataset no longer exists in the DB (e.g. after a
+// `task db:clear-data`). Without this the workbench renders stale tabs from
+// localStorage and clicking Classify on one fails an FK constraint.
+watch(
+  datasets,
+  (list) => {
+    if (!list) return;
+    const valid = new Set(list.map((d) => `dataset:${d.id}`));
+    const open = workspace.tabsByActivity.datasets ?? [];
+    for (const tab of open) {
+      if (!valid.has(tab.id)) {
+        workspace.closeTab("datasets", tab.id);
+      }
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>

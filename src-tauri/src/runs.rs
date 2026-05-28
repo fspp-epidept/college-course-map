@@ -272,6 +272,25 @@ pub(crate) fn start_run(
     }
 
     let conn = db.rw()?;
+
+    // Verify the dataset still exists before we try to FK-reference it from a
+    // new runs row. Stale frontend state (e.g. a tab persisted across a
+    // db:clear-data) would otherwise surface the raw DuckDB FK violation,
+    // which is unhelpful — turn it into an actionable error.
+    let dataset_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM datasets WHERE id = ?",
+            params![req.dataset_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("check dataset {}: {e}", req.dataset_id))?;
+    if dataset_exists == 0 {
+        return Err(format!(
+            "dataset {} no longer exists (the tab may be stale — close it and reopen from the sidebar)",
+            req.dataset_id
+        ));
+    }
+
     let model_id: i64 = conn
         .query_row(
             "SELECT id FROM models WHERE model_type = ? ORDER BY id LIMIT 1",
@@ -290,6 +309,12 @@ pub(crate) fn start_run(
             |row| row.get(0),
         )
         .map_err(|e| format!("count courses for dataset {}: {e}", req.dataset_id))?;
+    if course_count == 0 {
+        return Err(format!(
+            "dataset {} has no courses to classify",
+            req.dataset_id
+        ));
+    }
     let rows_total = std::cmp::min(course_count, i64::from(limit));
 
     let run_id = Uuid::new_v4().to_string();

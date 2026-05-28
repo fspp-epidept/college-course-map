@@ -12,7 +12,6 @@ const previewError = ref<string | null>(null);
 const previewing = ref(false);
 const displayName = ref<string>("");
 const importError = ref<string | null>(null);
-const importSummary = ref<string | null>(null);
 
 const queryClient = useQueryClient();
 
@@ -21,21 +20,24 @@ const importMutation = useMutation({
     const result = await commands.importCsv({
       path: request.path,
       displayName: request.displayName,
-      // Spike cap: 200 rows keeps the synchronous insert loop snappy.
-      limit: 200,
+      // null = import every row. The Rust command bounds file size + field
+      // length + column count itself; we no longer cap row count here.
+      limit: null,
     });
     if (result.status === "error") throw new Error(result.error);
     return result.data;
   },
-  onSuccess: (data) => {
+  onSuccess: () => {
     queryClient.invalidateQueries({ queryKey: ["datasets"] });
     queryClient.invalidateQueries({ queryKey: ["metrics"] });
-    importSummary.value = `Imported ${data.rowsImported} rows (${data.rowsSkipped} skipped).`;
     importError.value = null;
+    // Close the dialog. The refreshed sidebar surfaces the new dataset as
+    // the success signal; the modal staying open invited accidental
+    // re-imports of the same file.
+    isOpen.value = false;
   },
   onError: (err: Error) => {
     importError.value = err.message;
-    importSummary.value = null;
   },
 });
 
@@ -65,7 +67,6 @@ async function pickFile(): Promise<void> {
   preview.value = null;
   previewError.value = null;
   importError.value = null;
-  importSummary.value = null;
   previewing.value = true;
   const base = picked.split(/[\\/]/).pop() ?? picked;
   displayName.value = base.replace(/\.csv$/i, "");
@@ -86,7 +87,6 @@ function reset(): void {
   preview.value = null;
   previewError.value = null;
   importError.value = null;
-  importSummary.value = null;
   displayName.value = "";
 }
 
@@ -171,15 +171,12 @@ watch(isOpen, (next) => {
           <p class="text-xs text-(--ui-text-dimmed)">
             {{ preview.totalColumns }} columns · showing first {{ preview.sampleRows.length }} rows.
             Import auto-detects subject/catalog/title columns by header name and
-            caps at 200 rows for now.
+            ingests every row in the file.
           </p>
         </div>
 
         <p v-if="importError" class="text-sm text-(--ui-color-error-500)">
           Import failed: {{ importError }}
-        </p>
-        <p v-if="importSummary" class="text-sm text-(--ui-color-success-500)">
-          {{ importSummary }}
         </p>
       </div>
     </template>
