@@ -1,5 +1,8 @@
 mod config;
+mod datasets;
+pub mod db;
 pub mod format;
+pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
 mod menu;
@@ -15,6 +18,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         config::read_theme,
         config::read_settings,
         config::write_settings,
+        datasets::list_datasets,
     ])
 }
 
@@ -39,10 +43,15 @@ pub fn run() {
     builder
         .invoke_handler(specta.invoke_handler())
         .setup(move |app| {
+            use tauri::Manager as _;
             specta.mount_events(app);
+            // Open DuckDB + apply migrations before the first command can fire.
+            // Failing here is unrecoverable (no app without storage), so we
+            // surface the error and let Tauri short-circuit setup.
+            let db = db::AppDb::open().map_err(|e| format!("open database: {e}"))?;
+            app.manage(db);
             #[cfg(target_os = "macos")]
             {
-                use tauri::Manager as _;
                 if let Some(window) = app.get_webview_window("main") {
                     window.set_decorations(true)?;
                 }
@@ -55,7 +64,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use specta_typescript::Typescript;
+    use specta_typescript::{BigIntExportBehavior, Typescript};
 
     /// Render `src/bindings.ts` from the command surface. This is the headless,
     /// CI-friendly generator — run `task gen:bindings` (which runs this test, then
@@ -67,7 +76,16 @@ mod tests {
                 // `@ts-nocheck`: the generated file is exempt from the repo's strict
                 // `noUnusedLocals`/`any` rules (tauri-specta's runtime helpers trip both).
                 // Consumers still get full types from the exported declarations.
-                Typescript::default().header("// @ts-nocheck\n"),
+                //
+                // `bigint(Number)`: Tauri's IPC layer hands i64/u64 to JS via
+                // serde_json, which encodes them as JSON numbers. Row counts and
+                // surrogate ids won't approach 2^53 in this app's lifetime, so the
+                // simpler `number` mapping is preferable to BigInt or string. If we
+                // ever introduce a true >2^53 field, switch that specific column to
+                // u128 / string and revisit.
+                Typescript::default()
+                    .header("// @ts-nocheck\n")
+                    .bigint(BigIntExportBehavior::Number),
                 "../src/bindings.ts",
             )
             .map_err(|e| e.to_string())

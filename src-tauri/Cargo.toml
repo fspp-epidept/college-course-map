@@ -27,6 +27,10 @@ tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
 specta-typescript = "=0.0.9"
 dirs = "6"
 specta = { version = "=2.0.0-rc.22", features = ["derive"] }
+duckdb = { version = "1", features = ["bundled", "serde_json"] }
+blake3 = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 [lints.rust]
 unsafe_code = "deny"

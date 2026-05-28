@@ -1,20 +1,16 @@
 <script setup lang="ts">
+import type { DatasetSummary } from "../../bindings";
+import { useDatasets } from "../../composables/useDatasets";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
+const { data: datasets, isPending, isError, error } = useDatasets();
 
-// Placeholder rows until #112 wires real dataset loading. Click opens a tab.
-const stubDatasets = [
-  { id: "panel.csv", name: "panel.csv", note: "165 MB · 14 cols" },
-  { id: "sample-courses.csv", name: "sample-courses.csv", note: "8 KB · 14 cols" },
-  { id: "validation.csv", name: "validation.csv", note: "imported 2026-05-10" },
-];
-
-function open(dataset: { id: string; name: string }): void {
+function open(dataset: DatasetSummary): void {
   workspace.openTab("datasets", {
     id: `dataset:${dataset.id}`,
     kind: "dataset",
-    label: dataset.name,
+    label: dataset.title,
     icon: "i-lucide-database",
   });
 }
@@ -22,16 +18,33 @@ function open(dataset: { id: string; name: string }): void {
 
 <template>
   <div class="flex flex-col gap-1 p-2">
-    <button
-      v-for="dataset in stubDatasets"
-      :key="dataset.id"
-      type="button"
-      class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex flex-col"
-      @click="open(dataset)"
-    >
-      <span class="text-sm text-(--ui-text)">{{ dataset.name }}</span>
-      <span class="text-xs text-(--ui-text-dimmed)">{{ dataset.note }}</span>
-    </button>
+    <p v-if="isPending" class="px-2 py-1.5 text-sm text-(--ui-text-dimmed)">
+      Loading datasets…
+    </p>
+
+    <p v-else-if="isError" class="px-2 py-1.5 text-sm text-(--ui-color-error-500)">
+      Failed to load datasets: {{ error?.message }}
+    </p>
+
+    <template v-else-if="datasets && datasets.length > 0">
+      <button
+        v-for="dataset in datasets"
+        :key="dataset.id"
+        type="button"
+        class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex flex-col"
+        @click="open(dataset)"
+      >
+        <span class="text-sm text-(--ui-text)">{{ dataset.title }}</span>
+        <span class="text-xs text-(--ui-text-dimmed)">
+          {{ dataset.rowCount }} {{ dataset.rowCount === 1 ? "course" : "courses" }}
+          · {{ dataset.sourceKind }}
+        </span>
+      </button>
+    </template>
+
+    <p v-else class="px-2 py-1.5 text-sm text-(--ui-text-dimmed)">
+      No datasets yet. Import a CSV to get started.
+    </p>
 
     <button
       type="button"
