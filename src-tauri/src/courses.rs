@@ -58,41 +58,48 @@ pub(crate) fn list_courses_with_results(
     let limit = req.limit.clamp(1, MAX_PAGE_SIZE);
     let conn = db.ro()?;
 
-    let total: i64 = conn
+    // Use the cached `datasets.row_count` rather than a `COUNT(*)` against
+    // the courses table — for a multi-million-row dataset the scan dominates
+    // page-load time and the cached value is authoritative for file-source
+    // datasets (set by `mark_ready` after the Appender finishes). Falls back
+    // to a real count when the cached value is NULL.
+    let cached: Option<i64> = conn
         .query_row(
-            "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
+            "SELECT row_count FROM datasets WHERE id = ?",
             [&req.dataset_id],
             |row| row.get(0),
         )
-        .map_err(|e| format!("count courses: {e}"))?;
+        .ok();
+    let total: i64 = match cached {
+        Some(n) if n >= 0 => n,
+        _ => conn
+            .query_row(
+                "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
+                [&req.dataset_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count courses: {e}"))?,
+    };
 
-    // The join is parameterised over model_id; the IS NULL guard yields a
-    // single SQL statement that works for both "with results" and "preview
-    // only" callers, instead of two separate prepared queries.
+    // Step 1: page the courses table on its own. The (dataset_id, row_index)
+    // index supports the filter + ordering; the LIMIT keeps the work bounded
+    // to PAGE_SIZE rows regardless of dataset size. Doing the JOIN here
+    // instead used to push DuckDB into a 2M-row scan + hash-join plan on
+    // freshly imported data, which is what was hanging the tab.
     let mut stmt = conn
         .prepare(
-            "SELECT c.id, c.row_index, c.subject_code, c.catalog_number,
-                    c.course_title, c.content_hash,
-                    ir.classification, ir.probability
-             FROM courses c
-             LEFT JOIN inference_results ir
-                 ON ir.content_hash = c.content_hash
-                AND ir.model_id = ?
-             WHERE c.dataset_id = ?
-             ORDER BY c.row_index
+            "SELECT id, row_index, subject_code, catalog_number,
+                    course_title, content_hash
+             FROM courses
+             WHERE dataset_id = ?
+             ORDER BY row_index
              LIMIT ? OFFSET ?",
         )
         .map_err(|e| format!("prepare list courses: {e}"))?;
 
-    let model_id_param: Option<i64> = req.model_id;
     let rows = stmt
         .query_map(
-            duckdb::params![
-                model_id_param,
-                req.dataset_id,
-                i64::from(limit),
-                i64::from(req.offset),
-            ],
+            duckdb::params![req.dataset_id, i64::from(limit), i64::from(req.offset)],
             |row| {
                 Ok(CourseRow {
                     id: row.get(0)?,
@@ -101,16 +108,66 @@ pub(crate) fn list_courses_with_results(
                     catalog_number: row.get(3)?,
                     course_title: row.get(4)?,
                     content_hash: row.get(5)?,
-                    classification: row.get(6)?,
-                    probability: row.get(7)?,
+                    classification: None,
+                    probability: None,
                 })
             },
         )
         .map_err(|e| format!("query courses: {e}"))?;
 
-    let collected: Vec<CourseRow> = rows
+    let mut collected: Vec<CourseRow> = rows
         .collect::<Result<_, _>>()
         .map_err(|e| format!("collect courses: {e}"))?;
+
+    // Step 2: if a model was requested, bulk-look-up classifications for the
+    // content hashes in this page. The inference_results PK is
+    // (model_id, content_hash), so this is a constant-cost index probe per
+    // row — far cheaper than evaluating a join across the whole courses
+    // partition for every page.
+    if let Some(model_id) = req.model_id
+        && !collected.is_empty()
+    {
+        use std::collections::HashMap;
+        let mut placeholders = String::with_capacity(collected.len() * 2);
+        for i in 0..collected.len() {
+            if i > 0 {
+                placeholders.push(',');
+            }
+            placeholders.push('?');
+        }
+        let sql = format!(
+            "SELECT content_hash, classification, probability
+             FROM inference_results
+             WHERE model_id = ? AND content_hash IN ({placeholders})"
+        );
+        let mut params: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(collected.len() + 1);
+        params.push(&model_id);
+        for row in &collected {
+            params.push(&row.content_hash);
+        }
+        let mut lookup_stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare inference lookup: {e}"))?;
+        let mut by_hash: HashMap<String, (String, Option<f64>)> = HashMap::new();
+        let lookup_rows = lookup_stmt
+            .query_map(duckdb::params_from_iter(params), |r| {
+                let h: String = r.get(0)?;
+                let c: String = r.get(1)?;
+                let p: Option<f64> = r.get(2)?;
+                Ok((h, (c, p)))
+            })
+            .map_err(|e| format!("query inference lookup: {e}"))?;
+        for entry in lookup_rows {
+            let (h, v) = entry.map_err(|e| format!("inference lookup row: {e}"))?;
+            by_hash.insert(h, v);
+        }
+        for row in &mut collected {
+            if let Some((label, prob)) = by_hash.get(&row.content_hash) {
+                row.classification = Some(label.clone());
+                row.probability = *prob;
+            }
+        }
+    }
 
     Ok(CoursePage {
         rows: collected,

@@ -7,12 +7,18 @@ interface UseCoursesArgs {
   modelId: MaybeRefOrGetter<number | null>;
   page: MaybeRefOrGetter<number>;
   pageSize: MaybeRefOrGetter<number>;
+  /**
+   * When false, the query is disabled — useful while a dataset is still
+   * importing so we don't pile up `list_courses_with_results` IPCs against a
+   * DB that's getting hammered by the Appender on the writer side.
+   */
+  enabled?: MaybeRefOrGetter<boolean>;
 }
 
 /**
  * Server-paginated courses for a dataset, optionally joined against a model's
- * inference results. Reactive in all four args — TanStack Query refetches when
- * any change. The query key includes the model id so switching digit level
+ * inference results. Reactive in all args — TanStack Query refetches when any
+ * change. The query key includes the model id so switching digit level
  * doesn't surface stale joined columns from a different model.
  */
 export function useCourses(args: UseCoursesArgs) {
@@ -39,6 +45,7 @@ export function useCourses(args: UseCoursesArgs) {
       if (result.status === "error") throw new Error(result.error);
       return result.data;
     },
+    enabled: computed(() => (args.enabled === undefined ? true : !!toValue(args.enabled))),
     // Keep prior page data visible while the next page loads so the table
     // doesn't flash empty on pagination clicks.
     placeholderData: (prev) => prev,

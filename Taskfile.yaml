@@ -141,6 +141,11 @@ tasks:
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example clear_user_data
 
+  db:checkpoint:
+    desc: Compact the DuckDB WAL into the main file (speeds up first read after a big import)
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example checkpoint
+
   check:parity:
     desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match
     cmds:

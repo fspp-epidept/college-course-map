@@ -73,16 +73,12 @@ watch(
   },
 );
 
-// Same idea for active imports: every poll cycle that lands a higher row
-// count should refresh the visible courses page so the user sees rows land.
-watch(
-  () => dataset.value?.rowCount,
-  (next, prev) => {
-    if (dataset.value?.importState !== "importing") return;
-    if (next === prev) return;
-    queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
-  },
-);
+// Note: we deliberately don't invalidate the courses query on every import
+// progress tick. That cascade (listDatasets → invalidate courses →
+// listCoursesWithResults) was hammering DuckDB while the Appender writer was
+// busy and pinning the WebView main thread. The `useCourses` query is
+// disabled outright while import_state === 'importing'; when it flips to
+// 'ready' we invalidate once below.
 
 const progressPct = computed(() => {
   const r = activeRun.value;
@@ -100,6 +96,15 @@ const { data: datasets } = useDatasets();
 const dataset = computed(() => datasets.value?.find((d) => d.id === datasetId.value));
 const isImporting = computed(() => dataset.value?.importState === "importing");
 const importFailed = computed(() => dataset.value?.importState === "failed");
+
+// When import finishes (or fails), refresh the courses query exactly once so
+// the table fills in. We watch the boolean transition rather than the row
+// count so this fires at most twice per import (start + end), not per tick.
+watch(isImporting, (now, before) => {
+  if (before && !now) {
+    queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
+  }
+});
 
 function runFor(level: 2 | 4 | 6): void {
   digitLevel.value = level;
@@ -128,6 +133,11 @@ const {
   modelId: computed(() => modelId.value ?? null),
   page,
   pageSize: PAGE_SIZE,
+  // Pause this query entirely while the import is still streaming rows. The
+  // page is dynamic (offset/limit) so each query is a real read against a
+  // file that's getting hammered by the Appender; skipping while
+  // importing keeps the UI responsive.
+  enabled: computed(() => !isImporting.value),
 });
 
 const totalRows = computed(() => coursePage.value?.total ?? 0);
@@ -265,7 +275,7 @@ function gotoNext(): void {
       </div>
     </section>
 
-    <section class="flex flex-col gap-3 min-h-0">
+    <section v-if="!isImporting" class="flex flex-col gap-3 min-h-0">
       <div class="flex items-baseline justify-between gap-3">
         <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
         <span class="text-xs text-(--ui-text-dimmed) tabular-nums">

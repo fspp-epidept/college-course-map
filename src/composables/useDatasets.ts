@@ -24,7 +24,9 @@ export function useDatasets() {
     refetchInterval: (query) => {
       const data = query.state.data as DatasetSummary[] | undefined;
       if (!data) return false;
-      return data.some((d) => d.importState === "importing") ? 500 : false;
+      // 1 s keeps the progress meter live without piling IPC calls against a
+      // DB that the Appender is hammering with bulk writes.
+      return data.some((d) => d.importState === "importing") ? 1000 : false;
     },
   });
 }
