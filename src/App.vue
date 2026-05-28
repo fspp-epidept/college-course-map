@@ -12,24 +12,26 @@ const isMacOS = import.meta.env.TAURI_ENV_PLATFORM === "macos";
 
 <template>
   <UApp>
-    <div class="h-screen flex flex-col">
+    <!--
+      Workbench shell: AppTitleBar (Win/Linux) above a flex row of
+      ActivityBar | PrimarySidebar | MainPanel. We don't use UDashboardGroup —
+      its base class is `fixed inset-0`, which would pop the workbench out of
+      this normal flow and overlay the titlebar + activity bar. UDashboardSidebar
+      is similarly out (responsive `hidden lg:flex` collapses it under 1024px,
+      always mounts a mobile slideover overlay). A plain <aside> works.
+    -->
+    <div class="h-screen flex flex-col overflow-hidden">
       <AppTitleBar v-if="!isMacOS" />
 
-      <!-- Workbench: VS-Code-style frame.
-           ActivityBar (never collapses) | PrimarySidebar (per activity) | MainPanel.
-           UDashboardGroup persists the resizable sidebar's width/collapsed state
-           to localStorage under storageKey "dashboard". -->
       <div class="flex flex-1 min-h-0">
         <ActivityBar />
-
-        <UDashboardGroup unit="rem" storage="local" class="flex flex-1 min-w-0">
-          <PrimarySidebar />
-          <MainPanel />
-          <!-- Cmd/Ctrl-K opens the palette (UDashboardSearch's default shortcut).
-               Mounted inside the group so it picks up dashboard context. -->
-          <CommandPalette />
-        </UDashboardGroup>
+        <PrimarySidebar />
+        <MainPanel />
       </div>
     </div>
+
+    <!-- Cmd/Ctrl-K opens the palette via UDashboardSearch's own defineShortcuts
+         binding (works standalone, no UDashboardGroup needed). -->
+    <CommandPalette />
   </UApp>
 </template>

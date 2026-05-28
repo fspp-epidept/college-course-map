@@ -68,5 +68,12 @@ const groups = computed(() => [
 </script>
 
 <template>
-  <UDashboardSearch :groups="groups" placeholder="Jump to activity or open tab" />
+  <!-- :color-mode="false" suppresses UDashboardSearch's auto-added "Theme"
+       group; theming is driven by settings.json + the registry (#106), not by
+       VueUse's useColorMode preference. -->
+  <UDashboardSearch
+    :groups="groups"
+    :color-mode="false"
+    placeholder="Jump to activity or open tab"
+  />
 </template>
