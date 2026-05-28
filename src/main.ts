@@ -1,6 +1,8 @@
 import "./assets/css/main.css";
 
 import ui from "@nuxt/ui/vue-plugin";
+import { createPinia } from "pinia";
+import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
 import { createApp } from "vue";
 import App from "./App.vue";
 import { bootstrapTheme } from "./composables/useTheme";
@@ -10,7 +12,13 @@ import { router } from "./router";
 // theme (FOUC). bootstrapTheme never rejects — it falls back to a built-in default.
 async function bootstrap(): Promise<void> {
   await bootstrapTheme();
-  createApp(App).use(router).use(ui).mount("#app");
+
+  const pinia = createPinia();
+  // Persist opted-in stores to localStorage so workspace state (active activity,
+  // open tabs) survives reloads. Opt-in per store via `persist: true`.
+  pinia.use(piniaPluginPersistedstate);
+
+  createApp(App).use(pinia).use(router).use(ui).mount("#app");
 }
 
 void bootstrap();
