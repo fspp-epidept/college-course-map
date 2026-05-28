@@ -282,27 +282,46 @@ impl InferenceRegistry {
     }
 }
 
-/// Resolve the on-disk model directory for the spike. For now this is the
-/// Python pipeline's output dir; the bundled-resource lookup lands when #52
-/// wires up the build-time model embed.
-#[must_use]
-pub fn models_root() -> PathBuf {
+/// Same product dir convention as `db.rs::PRODUCT_DIR` and `config.rs` —
+/// kept duplicated rather than hoisted into a shared module while only two
+/// callers exist; promote when a third lands.
+const PRODUCT_DIR: &str = "college-course-map";
+const MODELS_SUBDIR: &str = "models";
+
+/// Resolve the on-disk model directory.
+///
+/// Resolution order:
+/// 1. `COURSE_CLASSIFIER_MODELS_DIR` env var if set — explicit override for
+///    CI and one-off dev tweaks (e.g. pointing at a freshly converted
+///    `scripts/models/output/` without copying).
+/// 2. `<data>/college-course-map/models/` — the standard location, portable
+///    across machines via a copy of the data dir. This is what
+///    `task models:install` populates.
+///
+/// The bundled-resource lookup from `tauri::resource_dir()` lands when #52
+/// wires up the build-time model embed; until then this is the only path.
+pub fn models_root() -> Result<PathBuf, String> {
     if let Ok(env) = std::env::var("COURSE_CLASSIFIER_MODELS_DIR") {
-        return PathBuf::from(env);
+        return Ok(PathBuf::from(env));
     }
-    // CARGO_MANIFEST_DIR is src-tauri/; the converted ONNX trees live under
-    // ../scripts/models/output during the spike.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("scripts")
-        .join("models")
-        .join("output")
+    dirs::data_dir()
+        .map(|dir| dir.join(PRODUCT_DIR).join(MODELS_SUBDIR))
+        .ok_or_else(|| "no platform data directory available".to_owned())
 }
 
-/// Load all three digit-level models from the pipeline output dir. Slow
-/// (each model is ~500 MB); call once at startup.
+/// Load all three digit-level models from the resolved model dir. Slow (each
+/// model is ~500 MB); call once at startup. Surfaces an actionable error if
+/// the directory is missing — `task models:install` is the install path.
 pub fn load_all_models() -> anyhow::Result<InferenceRegistry> {
-    let root = models_root();
+    let root = models_root().map_err(|e| anyhow::anyhow!(e))?;
+    if !root.exists() {
+        anyhow::bail!(
+            "models directory missing: {} — run `task models:install` to copy \
+             from scripts/models/output, or set COURSE_CLASSIFIER_MODELS_DIR \
+             to point at an existing directory",
+            root.display()
+        );
+    }
     Ok(InferenceRegistry {
         two_digit: load_model(&root.join("two-digit"), 2)?,
         four_digit: load_model(&root.join("four-digit"), 4)?,

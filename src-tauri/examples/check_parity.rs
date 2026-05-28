@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     let mut max_logit_diff: f32 = 0.0;
     let mut failures: Vec<String> = Vec::new();
 
-    let root = inference::models_root();
+    let root = inference::models_root().map_err(|e| anyhow::anyhow!(e))?;
     for (subdir, items) in by_model {
         let digit_level = match subdir.as_str() {
             "two-digit" => 2,

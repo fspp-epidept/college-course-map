@@ -146,6 +146,11 @@ tasks:
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example checkpoint
 
+  models:install:
+    desc: Copy converted ONNX models from scripts/models/output into the data dir (skips entries that already exist)
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example models_install
+
   check:parity:
     desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match
     cmds:
