@@ -2,6 +2,7 @@
 import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
+import { useCourses, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useRun } from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
@@ -43,7 +44,8 @@ const classify = useMutation({
 
 // `useRun` polls every 250 ms while state === 'running'. When the run we
 // kicked off completes, also nudge the global query caches so the sidebar /
-// metrics surfaces refresh exactly once.
+// metrics surfaces refresh exactly once and the courses table pulls fresh
+// classification columns.
 const runQueryId = computed(() => activeRunId.value ?? "");
 const { data: activeRun } = useRun(runQueryId);
 
@@ -54,7 +56,19 @@ watch(
       queryClient.invalidateQueries({ queryKey: ["datasets"] });
       queryClient.invalidateQueries({ queryKey: ["metrics"] });
       queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["courses"] });
     }
+  },
+);
+
+// While a run is running, keep the courses table fresh so newly-written
+// classifications surface every poll cycle.
+watch(
+  () => activeRun.value?.rowsProcessed,
+  (next, prev) => {
+    if (activeRun.value?.state !== "running") return;
+    if (next === prev) return;
+    queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
   },
 );
 
@@ -71,6 +85,44 @@ const isRunning = computed(() => activeRun.value?.state === "running");
 function runFor(level: 2 | 4 | 6): void {
   digitLevel.value = level;
   classify.mutate(level);
+}
+
+// --- Courses table ---
+
+const PAGE_SIZE = 50;
+const page = ref(0);
+
+// Reset to page 0 whenever the user switches digit level (the joined column
+// changes underneath them).
+watch(digitLevel, () => {
+  page.value = 0;
+});
+
+const { data: modelId } = useModelIdForDigitLevel(digitLevel);
+const {
+  data: coursePage,
+  isPending: coursesPending,
+  isError: coursesError,
+  error: coursesErr,
+} = useCourses({
+  datasetId,
+  modelId: computed(() => modelId.value ?? null),
+  page,
+  pageSize: PAGE_SIZE,
+});
+
+const totalRows = computed(() => coursePage.value?.total ?? 0);
+const totalPages = computed(() =>
+  totalRows.value === 0 ? 0 : Math.ceil(totalRows.value / PAGE_SIZE),
+);
+const pageStart = computed(() => (totalRows.value === 0 ? 0 : page.value * PAGE_SIZE + 1));
+const pageEnd = computed(() => Math.min((page.value + 1) * PAGE_SIZE, totalRows.value));
+
+function gotoPrev(): void {
+  if (page.value > 0) page.value -= 1;
+}
+function gotoNext(): void {
+  if (page.value + 1 < totalPages.value) page.value += 1;
 }
 </script>
 
@@ -158,6 +210,102 @@ function runFor(level: 2 | 4 | 6): void {
         >
           {{ activeRun.errorMessage }}
         </p>
+      </div>
+    </section>
+
+    <section class="flex flex-col gap-3 min-h-0">
+      <div class="flex items-baseline justify-between gap-3">
+        <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
+        <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
+          <template v-if="totalRows > 0">
+            {{ pageStart.toLocaleString() }}–{{ pageEnd.toLocaleString() }}
+            of {{ totalRows.toLocaleString() }}
+          </template>
+        </span>
+      </div>
+
+      <p v-if="coursesError" class="text-sm text-(--ui-color-error-500)">
+        Failed to load courses: {{ coursesErr?.message }}
+      </p>
+
+      <div class="rounded-lg border border-(--ui-border) overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="min-w-full text-xs">
+            <thead class="bg-(--ui-bg-muted)">
+              <tr>
+                <th class="px-3 py-2 text-left font-medium text-(--ui-text) w-14">#</th>
+                <th class="px-3 py-2 text-left font-medium text-(--ui-text)">Subject</th>
+                <th class="px-3 py-2 text-left font-medium text-(--ui-text)">Catalog</th>
+                <th class="px-3 py-2 text-left font-medium text-(--ui-text)">Title</th>
+                <th class="px-3 py-2 text-left font-medium text-(--ui-text)">
+                  {{ digitLevel }}-digit CCM
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-if="coursesPending && !coursePage"
+                class="text-(--ui-text-dimmed)"
+              >
+                <td colspan="5" class="px-3 py-6 text-center">Loading courses…</td>
+              </tr>
+              <tr
+                v-else-if="!coursePage || coursePage.rows.length === 0"
+                class="text-(--ui-text-dimmed)"
+              >
+                <td colspan="5" class="px-3 py-6 text-center">
+                  No courses in this dataset.
+                </td>
+              </tr>
+              <tr
+                v-for="row in coursePage?.rows"
+                v-else
+                :key="row.id"
+                class="border-t border-(--ui-border-muted)"
+              >
+                <td class="px-3 py-1.5 text-(--ui-text-dimmed) tabular-nums">{{ row.rowIndex }}</td>
+                <td class="px-3 py-1.5 text-(--ui-text)">{{ row.subjectCode ?? "—" }}</td>
+                <td class="px-3 py-1.5 text-(--ui-text)">{{ row.catalogNumber ?? "—" }}</td>
+                <td class="px-3 py-1.5 text-(--ui-text)">{{ row.courseTitle ?? "—" }}</td>
+                <td class="px-3 py-1.5">
+                  <span
+                    v-if="row.classification"
+                    class="font-mono text-(--ui-text) tabular-nums"
+                  >
+                    {{ row.classification }}
+                  </span>
+                  <span v-else class="text-(--ui-text-dimmed)">—</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2">
+        <UButton
+          variant="ghost"
+          color="neutral"
+          icon="i-lucide-chevron-left"
+          size="xs"
+          :disabled="page === 0"
+          @click="gotoPrev"
+        >
+          Previous
+        </UButton>
+        <span class="text-xs text-(--ui-text-muted) tabular-nums px-2">
+          Page {{ page + 1 }} of {{ Math.max(totalPages, 1) }}
+        </span>
+        <UButton
+          variant="ghost"
+          color="neutral"
+          trailing-icon="i-lucide-chevron-right"
+          size="xs"
+          :disabled="page + 1 >= totalPages"
+          @click="gotoNext"
+        >
+          Next
+        </UButton>
       </div>
     </section>
 

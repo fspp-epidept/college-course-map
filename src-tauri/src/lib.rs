@@ -1,4 +1,5 @@
 mod config;
+mod courses;
 mod csv_io;
 mod datasets;
 pub mod db;
@@ -23,6 +24,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
         config::read_theme,
         config::read_settings,
         config::write_settings,
+        courses::list_courses_with_results,
+        courses::model_id_for_digit_level,
         csv_io::preview_csv,
         datasets::list_datasets,
         import::import_csv,

@@ -51,6 +51,27 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async listCoursesWithResults(req: ListCoursesRequest): Promise<Result<CoursePage, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_courses_with_results", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Convenience IPC: return the seeded `models.id` for a given digit level so
+   * the frontend can request joined results without owning the surrogate id
+   * space. Returns `None` if no row matches.
+   */
+  async modelIdForDigitLevel(digitLevel: number): Promise<Result<number | null, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("model_id_for_digit_level", { digitLevel }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   /**
    * Read up to [`SAMPLE_ROW_LIMIT`] rows from the CSV at `path`, returning the
    * headers + sample rows + file metadata. Never persists anything — the only
@@ -169,6 +190,21 @@ export type ColorRamps = {
  * `light` / `dark` — drives `VueUse` `useColorMode().preference` on the frontend.
  */
 export type ColorScheme = "light" | "dark";
+export type CoursePage = { rows: CourseRow[]; total: number };
+export type CourseRow = {
+  id: number;
+  rowIndex: number;
+  subjectCode: string | null;
+  catalogNumber: string | null;
+  courseTitle: string | null;
+  contentHash: string;
+  /**
+   * Classification label from `inference_results` for the requested model;
+   * `None` when there's no result yet (or no `model_id` was requested).
+   */
+  classification: string | null;
+  probability: number | null;
+};
 export type CsvPreview = {
   headers: string[];
   sampleRows: string[][];
@@ -207,6 +243,16 @@ export type ImportResult = {
   sourceFileId: number;
   rowsImported: number;
   rowsSkipped: number;
+};
+export type ListCoursesRequest = {
+  datasetId: string;
+  /**
+   * Optional model id for the joined classification + probability columns.
+   * `None` means the joined columns come back as `null`.
+   */
+  modelId: number | null;
+  offset: number;
+  limit: number;
 };
 /**
  * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
