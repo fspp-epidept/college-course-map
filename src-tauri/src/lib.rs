@@ -3,6 +3,7 @@ mod csv_io;
 mod datasets;
 pub mod db;
 pub mod format;
+mod import;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
@@ -21,6 +22,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         config::write_settings,
         csv_io::preview_csv,
         datasets::list_datasets,
+        import::import_csv,
     ])
 }
 

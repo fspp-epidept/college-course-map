@@ -72,6 +72,14 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async importCsv(req: ImportRequest): Promise<Result<ImportResult, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
 };
 
 /** user-defined events **/
@@ -134,6 +142,23 @@ export type DatasetSummary = {
    * `datasets.row_count` cached column staying in sync isn't load-bearing.
    */
   rowCount: number;
+};
+export type ImportRequest = {
+  path: string;
+  /**
+   * Falls back to the filename when null/blank.
+   */
+  displayName: string | null;
+  /**
+   * Optional row cap; `None` means import every row. The spike UI sends 200.
+   */
+  limit: number | null;
+};
+export type ImportResult = {
+  datasetId: string;
+  sourceFileId: number;
+  rowsImported: number;
+  rowsSkipped: number;
 };
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, ref, watch } from "vue";
 import { type CsvPreview, commands } from "../bindings";
@@ -9,6 +10,33 @@ const path = ref<string | null>(null);
 const preview = ref<CsvPreview | null>(null);
 const previewError = ref<string | null>(null);
 const previewing = ref(false);
+const displayName = ref<string>("");
+const importError = ref<string | null>(null);
+const importSummary = ref<string | null>(null);
+
+const queryClient = useQueryClient();
+
+const importMutation = useMutation({
+  mutationFn: async (request: { path: string; displayName: string | null }) => {
+    const result = await commands.importCsv({
+      path: request.path,
+      displayName: request.displayName,
+      // Spike cap: 200 rows keeps the synchronous insert loop snappy.
+      limit: 200,
+    });
+    if (result.status === "error") throw new Error(result.error);
+    return result.data;
+  },
+  onSuccess: (data) => {
+    queryClient.invalidateQueries({ queryKey: ["datasets"] });
+    importSummary.value = `Imported ${data.rowsImported} rows (${data.rowsSkipped} skipped).`;
+    importError.value = null;
+  },
+  onError: (err: Error) => {
+    importError.value = err.message;
+    importSummary.value = null;
+  },
+});
 
 const fileLabel = computed(() => {
   if (!path.value) return null;
@@ -35,7 +63,11 @@ async function pickFile(): Promise<void> {
   path.value = picked;
   preview.value = null;
   previewError.value = null;
+  importError.value = null;
+  importSummary.value = null;
   previewing.value = true;
+  const base = picked.split(/[\\/]/).pop() ?? picked;
+  displayName.value = base.replace(/\.csv$/i, "");
   try {
     const result = await commands.previewCsv(picked);
     if (result.status === "error") {
@@ -52,6 +84,17 @@ function reset(): void {
   path.value = null;
   preview.value = null;
   previewError.value = null;
+  importError.value = null;
+  importSummary.value = null;
+  displayName.value = "";
+}
+
+function importNow(): void {
+  if (!path.value) return;
+  importMutation.mutate({
+    path: path.value,
+    displayName: displayName.value.trim() || null,
+  });
 }
 
 // Reset internal state every time the modal opens so a stale preview from a
@@ -86,6 +129,11 @@ watch(isOpen, (next) => {
         </p>
 
         <div v-if="preview" class="flex flex-col gap-3">
+          <label class="flex flex-col gap-1 text-sm">
+            <span class="text-(--ui-text-muted)">Display name</span>
+            <UInput v-model="displayName" placeholder="Dataset name" />
+          </label>
+
           <div class="rounded-lg border border-(--ui-border) overflow-hidden">
             <div class="overflow-x-auto max-h-80">
               <table class="min-w-full text-xs">
@@ -121,15 +169,30 @@ watch(isOpen, (next) => {
 
           <p class="text-xs text-(--ui-text-dimmed)">
             {{ preview.totalColumns }} columns · showing first {{ preview.sampleRows.length }} rows.
-            Import wiring lands in a follow-up commit.
+            Import auto-detects subject/catalog/title columns by header name and
+            caps at 200 rows for now.
           </p>
         </div>
+
+        <p v-if="importError" class="text-sm text-(--ui-color-error-500)">
+          Import failed: {{ importError }}
+        </p>
+        <p v-if="importSummary" class="text-sm text-(--ui-color-success-500)">
+          {{ importSummary }}
+        </p>
       </div>
     </template>
     <template #footer>
       <div class="flex justify-end gap-2 w-full">
         <UButton variant="ghost" color="neutral" @click="isOpen = false">Close</UButton>
-        <UButton color="primary" :disabled="true">Import</UButton>
+        <UButton
+          color="primary"
+          :disabled="!preview || importMutation.isPending.value"
+          :loading="importMutation.isPending.value"
+          @click="importNow"
+        >
+          Import
+        </UButton>
       </div>
     </template>
   </UModal>
