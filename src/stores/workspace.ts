@@ -1,6 +1,7 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { ActivityId, TabKind } from "../config/activities";
+import type { SettingsSectionId } from "../config/settingsSections";
 
 /**
  * One open thing in a tabbed activity (a dataset detail, a run detail, etc.).
@@ -45,8 +46,17 @@ export const useWorkspace = defineStore(
     // (the titlebar search button) can toggle the same UDashboardSearch instance.
     const commandPaletteOpen = ref(false);
 
+    // Settings activity is a fixed kind, but it has sub-sections. We route between
+    // them via this store rather than vue-router so workbench state stays in one
+    // place. New sections: extend `SettingsSectionId` in config/settingsSections.ts.
+    const activeSettingsSection = ref<SettingsSectionId>("general");
+
     function setActiveActivity(id: ActivityId): void {
       activeActivityId.value = id;
+    }
+
+    function setActiveSettingsSection(id: SettingsSectionId): void {
+      activeSettingsSection.value = id;
     }
 
     function openTab(activityId: ActivityId, tab: OpenTab): void {
@@ -108,10 +118,12 @@ export const useWorkspace = defineStore(
       sidebarOpen,
       sidebarWidthRem,
       commandPaletteOpen,
+      activeSettingsSection,
       activeTabs,
       activeTabId,
       activeTab,
       setActiveActivity,
+      setActiveSettingsSection,
       openTab,
       closeTab,
       setActiveTab,
@@ -124,7 +136,13 @@ export const useWorkspace = defineStore(
     // Persist what should survive reload. sidebarOpen + commandPaletteOpen are
     // per-session (a demo opens with the sidebar showing and the palette closed).
     persist: {
-      pick: ["activeActivityId", "tabsByActivity", "activeTabIdByActivity", "sidebarWidthRem"],
+      pick: [
+        "activeActivityId",
+        "tabsByActivity",
+        "activeTabIdByActivity",
+        "sidebarWidthRem",
+        "activeSettingsSection",
+      ],
     },
   },
 );

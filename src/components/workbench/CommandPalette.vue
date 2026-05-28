@@ -53,6 +53,12 @@ function jumpToTab(row: OpenTabRow): void {
   workspace.setActiveTab(row.activityId, row.tabId);
 }
 
+function jumpToSettingsSection(section: "general" | "theme" | "about"): void {
+  workspace.setActiveActivity("settings");
+  workspace.setActiveSettingsSection(section);
+  if (!workspace.sidebarOpen) workspace.toggleSidebar();
+}
+
 // UDashboardSearch consumes the result of this computed and binds Cmd/Ctrl-K
 // itself (its `shortcut` prop defaults to "meta_k").
 const groups = computed(() => [
@@ -74,6 +80,23 @@ const groups = computed(() => [
       suffix: row.activityLabel,
       onSelect: () => jumpToTab(row),
     })),
+  },
+  {
+    id: "commands",
+    label: "Commands",
+    items: [
+      {
+        label: "Switch theme…",
+        icon: "i-lucide-palette",
+        onSelect: () => jumpToSettingsSection("theme"),
+      },
+      {
+        label: "Toggle sidebar",
+        icon: "i-lucide-panel-left",
+        suffix: "Cmd/Ctrl-B",
+        onSelect: () => workspace.toggleSidebar(),
+      },
+    ],
   },
 ]);
 </script>

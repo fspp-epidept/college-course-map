@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { listen } from "@tauri-apps/api/event";
+import { onBeforeUnmount, onMounted } from "vue";
 import AppTitleBar from "./components/AppTitleBar.vue";
 import ActivityBar from "./components/workbench/ActivityBar.vue";
 import CommandPalette from "./components/workbench/CommandPalette.vue";
@@ -12,6 +14,23 @@ const workspace = useWorkspace();
 // macOS keeps native chrome (decorations + global menu); Windows/Linux get the
 // custom titlebar. See decision #102.
 const isMacOS = import.meta.env.TAURI_ENV_PLATFORM === "macos";
+
+// Cmd/Ctrl-B sidebar toggle. On macOS the native menu accelerator intercepts the
+// keypress (Layer 2 — see docs/keybinds.md) and emits `menu:toggle_sidebar`; the
+// WebView never sees Cmd-B, so defineShortcuts is a no-op there. On Windows/Linux
+// there is no native menu yet (#104), so Layer 3 carries the binding directly.
+// Both paths call the same store action — duplication of effect, not of binding.
+defineShortcuts({
+  meta_b: () => workspace.toggleSidebar(),
+});
+
+let unlistenToggleSidebar: (() => void) | undefined;
+onMounted(async () => {
+  unlistenToggleSidebar = await listen("menu:toggle_sidebar", () => workspace.toggleSidebar());
+});
+onBeforeUnmount(() => {
+  unlistenToggleSidebar?.();
+});
 </script>
 
 <template>
