@@ -31,6 +31,8 @@ duckdb = { version = "1", features = ["bundled", "serde_json"] }
 blake3 = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+tauri-plugin-dialog = "2"
+csv = "1"
 
 [lints.rust]
 unsafe_code = "deny"

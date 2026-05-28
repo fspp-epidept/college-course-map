@@ -1,4 +1,5 @@
 mod config;
+mod csv_io;
 mod datasets;
 pub mod db;
 pub mod format;
@@ -18,6 +19,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         config::read_theme,
         config::read_settings,
         config::write_settings,
+        csv_io::preview_csv,
         datasets::list_datasets,
     ])
 }
@@ -30,7 +32,9 @@ fn specta_builder() -> Builder<tauri::Wry> {
 pub fn run() {
     let specta = specta_builder();
 
-    let builder = tauri::Builder::default().plugin(tauri_plugin_opener::init());
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init());
 
     // macOS keeps native chrome: the base window config is frameless (for the custom
     // Windows/Linux titlebar), so re-enable decorations at startup and attach the

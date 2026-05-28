@@ -19,6 +19,7 @@
     "@nuxt/ui": "^4.8.0",
     "@tanstack/vue-query": "^5.100.14",
     "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
     "pinia": "^3.0.4",
     "pinia-plugin-persistedstate": "^4.7.1",

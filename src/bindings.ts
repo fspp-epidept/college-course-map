@@ -51,6 +51,19 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  /**
+   * Read up to [`SAMPLE_ROW_LIMIT`] rows from the CSV at `path`, returning the
+   * headers + sample rows + file metadata. Never persists anything — the only
+   * side effect is opening the file for reading.
+   */
+  async previewCsv(path: string): Promise<Result<CsvPreview, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("preview_csv", { path }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   async listDatasets(): Promise<Result<DatasetSummary[], string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("list_datasets") };
@@ -100,6 +113,12 @@ export type ColorRamps = {
  * `light` / `dark` — drives `VueUse` `useColorMode().preference` on the frontend.
  */
 export type ColorScheme = "light" | "dark";
+export type CsvPreview = {
+  headers: string[];
+  sampleRows: string[][];
+  totalColumns: number;
+  sizeBytes: number;
+};
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
