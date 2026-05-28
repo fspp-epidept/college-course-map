@@ -13,6 +13,16 @@ tasks:
       - task --list-all
     silent: true
 
+  gen:bindings:
+    desc: Regenerate src/bindings.ts from the Rust IPC commands (tauri-specta), then format it
+    cmds:
+      # The exporter runs as a test so it works headlessly (no running webview).
+      # cargo runs the test with CWD = the crate dir, so its `../src/bindings.ts`
+      # export path resolves to the repo's src/ even when invoked from the root.
+      - cargo test --manifest-path src-tauri/Cargo.toml export_bindings
+      # specta emits unformatted TS; bring it to the repo's Biome style.
+      - pnpm exec biome format --write src/bindings.ts
+
   dev:
     desc: Run the full Tauri app (Vite + native webview, IPC live)
     interactive: true
