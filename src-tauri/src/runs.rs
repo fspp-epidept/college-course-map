@@ -22,6 +22,211 @@ use crate::{
     inference::{self, InferenceRegistry, classify},
 };
 
+/// One row in the Runs sidebar list. Joined with the dataset title so the UI
+/// doesn't need a second IPC call to render a meaningful label.
+#[derive(Type, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RunSummary {
+    pub id: String,
+    pub dataset_id: String,
+    pub dataset_title: String,
+    pub description: Option<String>,
+    pub state: String,
+    pub rows_total: Option<i64>,
+    pub rows_processed: Option<i64>,
+    pub cache_hits: Option<i64>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub last_progress_at: Option<String>,
+}
+
+/// Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
+/// model digit level (resolved from the JSON `model_ids` array) and the
+/// `unique_inputs_done` + `error_message` fields the summary view drops.
+#[derive(Type, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RunDetail {
+    pub id: String,
+    pub dataset_id: String,
+    pub dataset_title: String,
+    pub description: Option<String>,
+    pub state: String,
+    pub digit_level: Option<u8>,
+    pub rows_total: Option<i64>,
+    pub rows_processed: Option<i64>,
+    pub unique_inputs_done: Option<i64>,
+    pub cache_hits: Option<i64>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub last_progress_at: Option<String>,
+    pub error_message: Option<String>,
+    pub execution_provider: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects State by value; cannot be taken by reference at the macro layer"
+)]
+pub(crate) fn list_runs(db: State<'_, AppDb>) -> Result<Vec<RunSummary>, String> {
+    let conn = db.ro()?;
+    // Active states float to the top, then most-recent first within each
+    // ordering bucket. The frontend further regroups by state but the
+    // ordering inside each group should be useful as-is.
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.id, r.dataset_id, d.title, r.description, r.state,
+                    r.rows_total, r.rows_processed, r.cache_hits,
+                    strftime(r.created_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    strftime(r.started_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    strftime(r.completed_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    strftime(r.last_progress_at, '%Y-%m-%dT%H:%M:%SZ')
+             FROM runs r
+             JOIN datasets d ON d.id = r.dataset_id
+             ORDER BY
+                CASE r.state
+                    WHEN 'running' THEN 0
+                    WHEN 'pending' THEN 1
+                    WHEN 'paused'  THEN 2
+                    ELSE 3
+                END,
+                r.created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(RunSummary {
+                id: row.get(0)?,
+                dataset_id: row.get(1)?,
+                dataset_title: row.get(2)?,
+                description: row.get(3)?,
+                state: row.get(4)?,
+                rows_total: row.get(5)?,
+                rows_processed: row.get(6)?,
+                cache_hits: row.get(7)?,
+                created_at: row.get(8)?,
+                started_at: row.get(9)?,
+                completed_at: row.get(10)?,
+                last_progress_at: row.get(11)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
+}
+
+/// Intermediate row shape for the run detail query. Stays private so the
+/// public type ([`RunDetail`]) doesn't carry the JSON `model_ids` string.
+struct RunRow {
+    id: String,
+    dataset_id: String,
+    dataset_title: String,
+    description: Option<String>,
+    state: String,
+    model_ids_json: String,
+    rows_total: Option<i64>,
+    rows_processed: Option<i64>,
+    unique_inputs_done: Option<i64>,
+    cache_hits: Option<i64>,
+    created_at: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+    last_progress_at: Option<String>,
+    error_message: Option<String>,
+    execution_provider: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn get_run(id: String, db: State<'_, AppDb>) -> Result<RunDetail, String> {
+    let conn = db.ro()?;
+    let row = conn
+        .query_row(
+            "SELECT r.id, r.dataset_id, d.title, r.description, r.state, r.model_ids,
+                    r.rows_total, r.rows_processed, r.unique_inputs_done, r.cache_hits,
+                    strftime(r.created_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    strftime(r.started_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    strftime(r.completed_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    strftime(r.last_progress_at, '%Y-%m-%dT%H:%M:%SZ'),
+                    r.error_message, r.execution_provider
+             FROM runs r
+             JOIN datasets d ON d.id = r.dataset_id
+             WHERE r.id = ?",
+            params![id],
+            |row| {
+                Ok(RunRow {
+                    id: row.get(0)?,
+                    dataset_id: row.get(1)?,
+                    dataset_title: row.get(2)?,
+                    description: row.get(3)?,
+                    state: row.get(4)?,
+                    model_ids_json: row.get(5)?,
+                    rows_total: row.get(6)?,
+                    rows_processed: row.get(7)?,
+                    unique_inputs_done: row.get(8)?,
+                    cache_hits: row.get(9)?,
+                    created_at: row.get(10)?,
+                    started_at: row.get(11)?,
+                    completed_at: row.get(12)?,
+                    last_progress_at: row.get(13)?,
+                    error_message: row.get(14)?,
+                    execution_provider: row.get(15)?,
+                })
+            },
+        )
+        .map_err(|e| format!("run {id}: {e}"))?;
+
+    // Resolve the digit level from the first id in `model_ids` (JSON array).
+    // Runs always carry exactly one model id during the spike, so taking
+    // first() is fine until multi-model runs land.
+    let digit_level = resolve_digit_level(&conn, &row.model_ids_json).unwrap_or(None);
+
+    Ok(RunDetail {
+        id: row.id,
+        dataset_id: row.dataset_id,
+        dataset_title: row.dataset_title,
+        description: row.description,
+        state: row.state,
+        digit_level,
+        rows_total: row.rows_total,
+        rows_processed: row.rows_processed,
+        unique_inputs_done: row.unique_inputs_done,
+        cache_hits: row.cache_hits,
+        created_at: row.created_at,
+        started_at: row.started_at,
+        completed_at: row.completed_at,
+        last_progress_at: row.last_progress_at,
+        error_message: row.error_message,
+        execution_provider: row.execution_provider,
+    })
+}
+
+fn resolve_digit_level(
+    conn: &duckdb::Connection,
+    model_ids_json: &str,
+) -> Result<Option<u8>, String> {
+    let ids: Vec<i64> =
+        serde_json::from_str(model_ids_json).map_err(|e| format!("parse model_ids: {e}"))?;
+    let Some(first) = ids.first() else {
+        return Ok(None);
+    };
+    let model_type: Option<String> = conn
+        .query_row(
+            "SELECT model_type FROM models WHERE id = ?",
+            params![first],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(model_type.and_then(|s| s.parse::<u8>().ok()))
+}
+
 /// 50 keeps the synchronous loop under ~10 s on CPU; the dialog default. The
 /// caller may override.
 const DEFAULT_LIMIT: u32 = 50;

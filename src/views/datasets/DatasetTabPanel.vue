@@ -38,6 +38,7 @@ const classify = useMutation({
     // Refresh datasets so any new row_count / run state surfaces in the sidebar.
     queryClient.invalidateQueries({ queryKey: ["datasets"] });
     queryClient.invalidateQueries({ queryKey: ["metrics"] });
+    queryClient.invalidateQueries({ queryKey: ["runs"] });
   },
   onError: (err: Error) => {
     errorMessage.value = err.message;

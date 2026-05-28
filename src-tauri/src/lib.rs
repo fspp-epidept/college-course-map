@@ -27,6 +27,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
         datasets::list_datasets,
         import::import_csv,
         metrics::list_metrics,
+        runs::get_run,
+        runs::list_runs,
         runs::start_run,
     ])
 }

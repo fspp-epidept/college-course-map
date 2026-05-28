@@ -88,6 +88,22 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  async getRun(id: string): Promise<Result<RunDetail, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("get_run", { id }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listRuns(): Promise<Result<RunSummary[], string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_runs") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   async startRun(req: StartRunRequest): Promise<Result<RunResult, string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
@@ -192,12 +208,53 @@ export type ImportResult = {
   rowsImported: number;
   rowsSkipped: number;
 };
+/**
+ * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
+ * model digit level (resolved from the JSON `model_ids` array) and the
+ * `unique_inputs_done` + `error_message` fields the summary view drops.
+ */
+export type RunDetail = {
+  id: string;
+  datasetId: string;
+  datasetTitle: string;
+  description: string | null;
+  state: string;
+  digitLevel: number | null;
+  rowsTotal: number | null;
+  rowsProcessed: number | null;
+  uniqueInputsDone: number | null;
+  cacheHits: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastProgressAt: string | null;
+  errorMessage: string | null;
+  executionProvider: string | null;
+};
 export type RunResult = {
   runId: string;
   rowsProcessed: number;
   uniqueInputsDone: number;
   cacheHits: number;
   durationMs: number;
+};
+/**
+ * One row in the Runs sidebar list. Joined with the dataset title so the UI
+ * doesn't need a second IPC call to render a meaningful label.
+ */
+export type RunSummary = {
+  id: string;
+  datasetId: string;
+  datasetTitle: string;
+  description: string | null;
+  state: string;
+  rowsTotal: number | null;
+  rowsProcessed: number | null;
+  cacheHits: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastProgressAt: string | null;
 };
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
