@@ -22,7 +22,13 @@ const DB_FILE: &str = "app.duckdb";
 
 /// Ordered list of migration scripts. Add new entries — never edit or reorder
 /// existing ones. Version numbers are monotonic and gap-free by convention.
-const MIGRATIONS: &[(u32, &str)] = &[(1, include_str!("../migrations/0001_initial.sql"))];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (1, include_str!("../migrations/0001_initial.sql")),
+    (
+        2,
+        include_str!("../migrations/0002_dataset_import_state.sql"),
+    ),
+];
 
 /// Owned read-write connection plus the resolved on-disk path, so read-only
 /// consumers can re-open the same database without re-resolving the path.

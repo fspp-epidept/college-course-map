@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
 import { useCourses, useModelIdForDigitLevel } from "../../composables/useCourses";
+import { useDatasets } from "../../composables/useDatasets";
 import { useRun } from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
@@ -72,6 +73,17 @@ watch(
   },
 );
 
+// Same idea for active imports: every poll cycle that lands a higher row
+// count should refresh the visible courses page so the user sees rows land.
+watch(
+  () => dataset.value?.rowCount,
+  (next, prev) => {
+    if (dataset.value?.importState !== "importing") return;
+    if (next === prev) return;
+    queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
+  },
+);
+
 const progressPct = computed(() => {
   const r = activeRun.value;
   if (!r?.rowsTotal || r.rowsProcessed === null || r.rowsProcessed === undefined) {
@@ -81,6 +93,13 @@ const progressPct = computed(() => {
 });
 
 const isRunning = computed(() => activeRun.value?.state === "running");
+
+// Surface this dataset's import state by reusing the cached datasets query
+// (it's already polled while any import is active). No extra IPC traffic.
+const { data: datasets } = useDatasets();
+const dataset = computed(() => datasets.value?.find((d) => d.id === datasetId.value));
+const isImporting = computed(() => dataset.value?.importState === "importing");
+const importFailed = computed(() => dataset.value?.importState === "failed");
 
 function runFor(level: 2 | 4 | 6): void {
   digitLevel.value = level;
@@ -131,7 +150,40 @@ function gotoNext(): void {
     <header class="flex items-center gap-3">
       <UIcon name="i-lucide-database" class="size-5 text-(--ui-text-muted)" />
       <h2 class="text-lg font-medium">{{ tab.label }}</h2>
+      <span
+        v-if="isImporting"
+        class="text-(--ui-color-info-500) animate-pulse text-xs uppercase tracking-wide"
+      >
+        importing
+      </span>
+      <span
+        v-else-if="importFailed"
+        class="text-(--ui-color-error-500) text-xs uppercase tracking-wide"
+      >
+        import failed
+      </span>
     </header>
+
+    <div
+      v-if="isImporting"
+      class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-1"
+    >
+      <span class="text-(--ui-text) font-medium">Importing rows in the background…</span>
+      <span class="text-(--ui-text-muted) tabular-nums">
+        {{ (dataset?.rowCount ?? 0).toLocaleString() }} rows so far
+      </span>
+      <span class="text-(--ui-text-dimmed) text-xs">
+        Classify is disabled until the import finishes. The row count and
+        the table below update every half second.
+      </span>
+    </div>
+
+    <div
+      v-else-if="importFailed && dataset?.importError"
+      class="rounded-lg border border-(--ui-color-error-500)/40 bg-(--ui-color-error-500)/10 px-4 py-3 text-sm text-(--ui-color-error-500)"
+    >
+      Import failed: {{ dataset.importError }}
+    </div>
 
     <section class="flex flex-col gap-3">
       <h3 class="text-sm font-medium text-(--ui-text)">Classify</h3>
@@ -147,7 +199,7 @@ function gotoNext(): void {
           :color="digitLevel === level ? 'primary' : 'neutral'"
           :variant="digitLevel === level ? 'solid' : 'outline'"
           :loading="classify.isPending.value && digitLevel === level"
-          :disabled="classify.isPending.value || isRunning"
+          :disabled="classify.isPending.value || isRunning || isImporting || importFailed"
           @click="runFor(level)"
         >
           Classify ({{ level }}-digit)

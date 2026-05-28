@@ -93,7 +93,7 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
-  async importCsv(req: ImportRequest): Promise<Result<ImportResult, string>> {
+  async importCsv(req: ImportRequest): Promise<Result<ImportStarted, string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
     } catch (e) {
@@ -226,6 +226,12 @@ export type DatasetSummary = {
    * `datasets.row_count` cached column staying in sync isn't load-bearing.
    */
   rowCount: number;
+  /**
+   * `importing` while the background worker is still streaming rows in,
+   * `ready` when complete, `failed` when the worker errored.
+   */
+  importState: string;
+  importError: string | null;
 };
 export type ImportRequest = {
   path: string;
@@ -234,16 +240,15 @@ export type ImportRequest = {
    */
   displayName: string | null;
   /**
-   * Optional row cap; `None` means import every row. The spike UI sends 200.
+   * Optional row cap; `None` means import every row.
    */
   limit: number | null;
 };
-export type ImportResult = {
-  datasetId: string;
-  sourceFileId: number;
-  rowsImported: number;
-  rowsSkipped: number;
-};
+/**
+ * Response from `import_csv`: the dataset has been queued and is already
+ * streaming rows in. The frontend polls `list_datasets` from here.
+ */
+export type ImportStarted = { datasetId: string; sourceFileId: number };
 export type ListCoursesRequest = {
   datasetId: string;
   /**

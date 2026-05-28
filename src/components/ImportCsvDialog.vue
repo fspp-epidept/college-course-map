@@ -28,12 +28,13 @@ const importMutation = useMutation({
     return result.data;
   },
   onSuccess: () => {
+    // `importCsv` now returns as soon as the dataset row is inserted; the
+    // background worker streams rows in. The sidebar's useDatasets refetches
+    // every 500 ms while any dataset is `importing`, so closing the modal
+    // is the right move: the user can watch the row count tick up live.
     queryClient.invalidateQueries({ queryKey: ["datasets"] });
     queryClient.invalidateQueries({ queryKey: ["metrics"] });
     importError.value = null;
-    // Close the dialog. The refreshed sidebar surfaces the new dataset as
-    // the success signal; the modal staying open invited accidental
-    // re-imports of the same file.
     isOpen.value = false;
   },
   onError: (err: Error) => {
@@ -171,7 +172,8 @@ watch(isOpen, (next) => {
           <p class="text-xs text-(--ui-text-dimmed)">
             {{ preview.totalColumns }} columns · showing first {{ preview.sampleRows.length }} rows.
             Import auto-detects subject/catalog/title columns by header name and
-            ingests every row in the file.
+            ingests every row in the file. The import runs in the background;
+            you'll see the row count tick up live in the sidebar.
           </p>
         </div>
 

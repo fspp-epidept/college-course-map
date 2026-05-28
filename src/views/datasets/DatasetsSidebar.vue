@@ -56,10 +56,30 @@ watch(
         class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex flex-col"
         @click="open(dataset)"
       >
-        <span class="text-sm text-(--ui-text)">{{ dataset.title }}</span>
-        <span class="text-xs text-(--ui-text-dimmed)">
-          {{ dataset.rowCount }} {{ dataset.rowCount === 1 ? "course" : "courses" }}
-          · {{ dataset.sourceKind }}
+        <span class="text-sm text-(--ui-text) flex items-center gap-1.5">
+          <span class="truncate">{{ dataset.title }}</span>
+          <span
+            v-if="dataset.importState === 'importing'"
+            class="text-(--ui-color-info-500) animate-pulse text-[10px] uppercase tracking-wide"
+          >
+            importing
+          </span>
+          <span
+            v-else-if="dataset.importState === 'failed'"
+            class="text-(--ui-color-error-500) text-[10px] uppercase tracking-wide"
+          >
+            failed
+          </span>
+        </span>
+        <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
+          <template v-if="dataset.importState === 'importing'">
+            {{ dataset.rowCount.toLocaleString() }} rows so far…
+          </template>
+          <template v-else>
+            {{ dataset.rowCount.toLocaleString() }}
+            {{ dataset.rowCount === 1 ? "course" : "courses" }}
+            · {{ dataset.sourceKind }}
+          </template>
         </span>
       </button>
     </template>

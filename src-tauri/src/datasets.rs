@@ -21,6 +21,10 @@ pub(crate) struct DatasetSummary {
     /// `COUNT(*)` from `courses` for this dataset — recomputed each call so the
     /// `datasets.row_count` cached column staying in sync isn't load-bearing.
     pub(crate) row_count: i64,
+    /// `importing` while the background worker is still streaming rows in,
+    /// `ready` when complete, `failed` when the worker errored.
+    pub(crate) import_state: String,
+    pub(crate) import_error: Option<String>,
 }
 
 #[tauri::command]
@@ -37,10 +41,13 @@ pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>,
                     d.title,
                     d.source_kind,
                     strftime(d.imported_at, '%Y-%m-%dT%H:%M:%SZ') AS imported_at,
-                    COALESCE(COUNT(c.id), 0)                      AS row_count
+                    COALESCE(COUNT(c.id), 0)                      AS row_count,
+                    d.import_state,
+                    d.import_error
              FROM datasets d
              LEFT JOIN courses c ON c.dataset_id = d.id
-             GROUP BY d.id, d.title, d.source_kind, d.imported_at
+             GROUP BY d.id, d.title, d.source_kind, d.imported_at,
+                      d.import_state, d.import_error
              ORDER BY d.imported_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -52,6 +59,8 @@ pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>,
                 source_kind: row.get(2)?,
                 imported_at: row.get(3)?,
                 row_count: row.get(4)?,
+                import_state: row.get(5)?,
+                import_error: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
