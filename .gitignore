@@ -13,7 +13,7 @@ dist-ssr
 *.local
 
 # Dev-time datasets
-data/validation.csv
+data/
 
 # Scratch
 tmp/
