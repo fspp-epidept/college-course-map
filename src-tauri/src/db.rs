@@ -1,14 +1,18 @@
 //! `DuckDB` connection management + migration runner.
 //!
-//! One read-write [`Connection`] and one read-only [`Connection`] live behind
-//! `Mutex`es in Tauri state. The RW is held briefly per write; the RO is
-//! shared across list/dashboard reads. This diverges from the original
-//! `CLAUDE.md` ground rule of "ad-hoc RO connections" because `DuckDB`'s
-//! connection-open is **not** free under writer load — it parses schema and
-//! inspects WAL state, costing tens to hundreds of ms during an active import
-//! or run. Sharing a single RO mutex is uncontended in single-user flows; if
-//! reads ever serialize badly under heavy concurrency, switch to a small RO
-//! pool, not back to per-call open.
+//! One **shared `DuckDB` instance**, two `Connection`s behind `Mutex`es in
+//! Tauri state: a read-write handle held briefly per write, and a read handle
+//! cloned from it ([`Connection::try_clone`]) for list/dashboard reads. The
+//! clone matters: a *separate* read-only instance (`open_with_flags`) is a
+//! point-in-time snapshot frozen at open and never observes the RW instance's
+//! later commits — so polling reads (`list_datasets`, `get_run`) would show an
+//! import or run stuck at zero forever. Connections cloned from one instance
+//! share `DuckDB`'s MVCC, so reads see committed writes immediately. The read
+//! handle is therefore not access-mode read-only; it's only handed to read
+//! commands by convention (`ro()` is `pub(crate)`), and the cached clone keeps
+//! per-read open cost (tens to hundreds of ms under writer load) at zero. If
+//! reads ever serialize badly under heavy concurrency, clone more handles into
+//! a small pool rather than reopening per call.
 //!
 //! Migrations are hand-rolled: ordered SQL files embedded via `include_str!`,
 //! applied in transactions, tracked by a `schema_version` table. This is fine
@@ -21,7 +25,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use duckdb::{AccessMode, Config, Connection, params};
+use duckdb::{Connection, params};
 
 const PRODUCT_DIR: &str = "college-course-map";
 const DB_FILE: &str = "app.duckdb";
@@ -57,9 +61,9 @@ impl std::fmt::Debug for AppDb {
 
 impl AppDb {
     /// Resolve the on-disk path, create the parent directory, open the RW
-    /// connection, apply any pending migrations, then open the shared RO
-    /// connection. RO is opened **after** migrations so its schema cache is
-    /// in sync with what callers will query.
+    /// connection, apply any pending migrations, then clone a read handle off
+    /// it. The clone is taken **after** migrations and shares the same instance,
+    /// so it sees the migrated schema and every subsequent committed write.
     pub fn open() -> Result<Self, String> {
         let path = db_path()?;
         if let Some(parent) = path.parent() {
@@ -67,10 +71,7 @@ impl AppDb {
         }
         let rw = Connection::open(&path).map_err(|e| e.to_string())?;
         migrate(&rw)?;
-        let ro_cfg = Config::default()
-            .access_mode(AccessMode::ReadOnly)
-            .map_err(|e| e.to_string())?;
-        let ro = Connection::open_with_flags(&path, ro_cfg).map_err(|e| e.to_string())?;
+        let ro = rw.try_clone().map_err(|e| e.to_string())?;
         Ok(Self {
             rw: Mutex::new(rw),
             ro: Mutex::new(ro),
@@ -85,9 +86,11 @@ impl AppDb {
         self.rw.lock().map_err(|_| "rw mutex poisoned".to_owned())
     }
 
-    /// Borrow the shared read-only connection. Cheap (no open cost), but
-    /// serializes reads — fine while the only reader callers are the IPC
-    /// list/dashboard queries. The `MutexGuard` derefs to `Connection` so
+    /// Borrow the shared read connection (a clone of the RW instance, so it
+    /// observes committed writes live). Cheap (no open cost), but serializes
+    /// reads — fine while the only reader callers are the IPC list/dashboard
+    /// queries. Read-only by convention, not by access mode: only read commands
+    /// should take this handle. The `MutexGuard` derefs to `Connection` so
     /// existing `conn.prepare(...)` call sites are unchanged.
     pub(crate) fn ro(&self) -> Result<MutexGuard<'_, Connection>, String> {
         self.ro.lock().map_err(|_| "ro mutex poisoned".to_owned())
