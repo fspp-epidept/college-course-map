@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { useRun } from "../../composables/useRuns";
+import { usePauseRun, useRun } from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -9,6 +9,11 @@ const props = defineProps<{ tab: OpenTab }>();
 const runId = computed(() => props.tab.id.replace(/^run:/, ""));
 
 const { data: run, isPending, isError, error } = useRun(runId);
+
+const pauseRun = usePauseRun();
+function onPause() {
+  pauseRun.mutate(runId.value);
+}
 
 const progressPct = computed(() => {
   const r = run.value;
@@ -26,6 +31,8 @@ function stateBadgeClass(state: string | undefined): string {
       return "bg-(--ui-color-success-500)/15 text-(--ui-color-success-500)";
     case "failed":
       return "bg-(--ui-color-error-500)/15 text-(--ui-color-error-500)";
+    case "interrupted":
+      return "bg-(--ui-color-warning-500)/15 text-(--ui-color-warning-500)";
     default:
       return "bg-(--ui-bg-muted) text-(--ui-text-muted)";
   }
@@ -63,6 +70,18 @@ function fmtTime(iso: string | null | undefined): string {
         <span v-if="run.executionProvider" class="text-sm text-(--ui-text-dimmed)">
           · {{ run.executionProvider }}
         </span>
+        <UButton
+          v-if="run.state === 'running'"
+          class="ml-auto"
+          color="neutral"
+          variant="subtle"
+          size="xs"
+          icon="i-lucide-pause"
+          :loading="pauseRun.isPending.value"
+          @click="onPause"
+        >
+          Pause
+        </UButton>
       </div>
 
       <div v-if="progressPct !== null" class="flex flex-col gap-1.5">

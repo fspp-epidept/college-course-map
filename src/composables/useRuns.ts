@@ -1,5 +1,5 @@
 import { type MaybeRefOrGetter, computed, toValue } from "vue";
-import { useQuery } from "@tanstack/vue-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { type RunDetail, type RunSummary, commands } from "../bindings";
 
 /**
@@ -33,6 +33,25 @@ export function useRun(id: MaybeRefOrGetter<string>) {
     refetchInterval: (query) => {
       const data = query.state.data as RunDetail | undefined;
       return data?.state === "running" ? 250 : false;
+    },
+  });
+}
+
+/**
+ * Request a graceful pause of a running run. The worker stops at its next batch
+ * boundary and finalizes as `interrupted`; the `useRun` poll picks up the new
+ * state on its next tick. Invalidates the run + runs-list queries so any
+ * non-polling view (the sidebar) also refreshes.
+ */
+export function usePauseRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    // pause_run can't fail (it just flips a flag), so the binding returns a
+    // bare boolean rather than the usual Result envelope.
+    mutationFn: (runId: string): Promise<boolean> => commands.pauseRun(runId),
+    onSuccess: (_signalled, runId) => {
+      queryClient.invalidateQueries({ queryKey: ["runs", runId] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
     },
   });
 }

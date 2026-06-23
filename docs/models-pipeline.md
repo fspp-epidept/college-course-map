@@ -1,6 +1,6 @@
 # Course Classifier — Models Pipeline (Python, uv-managed)
 
-Companion doc to the main handoff. Covers the one-time-ish Python pipeline that takes the three annamp PyTorch models and produces ONNX artifacts hosted under your own HF account, ready for the Tauri app to fetch at runtime.
+Companion doc to `CLAUDE.md`. Covers the one-time-ish Python pipeline that takes the three annamp PyTorch models and produces ONNX artifacts hosted under your own HF account, ready for the Tauri app to fetch at runtime.
 
 The Python in this project is **build-time tooling, not runtime infrastructure**. The Tauri app never calls Python. This pipeline produces files; those files get hosted on HF; the Rust app fetches them. After conversion, Python isn't in the loop until you need to add a new model variant or a new precision tier.
 
@@ -229,7 +229,7 @@ SOC,101,"Introduction to Sociology","Group behavior and social institutions."
 
 20 inputs across diverse subjects is the bare minimum. More is better. If you have access to a labeled holdout from the original training run, use that and verify accuracy too.
 
-**The input format question matters here.** Per the open issues in the main handoff doc, the model may have been trained on `{SUBJECT} {NUMBER} --- {TITLE}` rather than raw `course_title`. The verification script needs to format the input the same way the model was trained, or you'll get false negatives (the model legitimately produces different predictions on differently-formatted inputs, but that's a feature, not a conversion bug). Confirm the training format from the source model card or training code before running this stage.
+**The input format question matters here.** Per the CLAUDE.md model-input ground rule, the model expects `{SUBJECT} {NUMBER} --- {TITLE}` rather than raw `course_title`. The verification script needs to format the input the same way the model was trained, or you'll get false negatives (the model legitimately produces different predictions on differently-formatted inputs, but that's a feature, not a conversion bug). Confirm the training format from the source model card or training code before running this stage.
 
 `scripts/models/verify.py`:
 
@@ -611,7 +611,7 @@ Notice `models:upload` depends on `models:verify` which depends on `models:conve
 
 1. **Confirm the four-digit and six-digit repo names.** The two-digit repo is at the verified URL; the others are inferred from the naming pattern. First time you run convert, verify these resolve. If not, find the correct names (probably listed in the [annamp/classifying-courses-at-scale collection](https://huggingface.co/collections/annamp/classifying-courses-at-scale)) and update the `MODELS` list.
 
-2. **Confirm the input format.** Before running verify.py, decide whether the model was trained on `{course_title}` alone or `{SUBJECT} {NUMBER} --- {TITLE}`. The verify script defaults to the latter; change `format_input()` if needed. This decision also needs to be reflected in the Tauri app's input formatting (it must match exactly), and in the model card text. Open question per the main handoff doc — settle here, propagate.
+2. **Confirm the input format.** Before running verify.py, decide whether the model was trained on `{course_title}` alone or `{SUBJECT} {NUMBER} --- {TITLE}`. The verify script defaults to the latter; change `format_input()` if needed. This decision also needs to be reflected in the Tauri app's input formatting (it must match exactly), and in the model card text. Settled in the CLAUDE.md model-input ground rule (`{SUBJECT} {NUMBER} --- {TITLE}`) — keep this script in sync.
 
 3. **Choose the HF repo namespace.** The `HF_USERNAME` constant in upload.py is a placeholder. Use a personal account if this is exploratory, an org account if the project has one (e.g., `umsi-courses` or similar institutional namespace). Pick one and stick with it — repo URLs end up baked into the Tauri app config.
 
@@ -621,13 +621,13 @@ Notice `models:upload` depends on `models:verify` which depends on `models:conve
 
 ## What's deliberately not in this pipeline
 
-**Quantization (F16, int8).** Per the main handoff doc, deferred to Phase 2. F32 ships first. If quantization is added later, extend `convert.py` to also produce `model_fp16.onnx` and/or `model_quantized.onnx`, run the same parity verification on each variant (with relaxed tolerance — quantization legitimately changes outputs by a small amount), and upload the additional files to the same repos.
+**Quantization (F16, int8).** Deferred (Linear: EPI-33, Airgap build project). F32 ships first. If quantization is added later, extend `convert.py` to also produce `model_fp16.onnx` and/or `model_quantized.onnx`, run the same parity verification on each variant (with relaxed tolerance — quantization legitimately changes outputs by a small amount), and upload the additional files to the same repos.
 
 **Accuracy benchmarking on a labeled set.** Parity verification confirms the ONNX matches the PyTorch source. It does *not* confirm either matches the labels in your data. If you have a labeled holdout and want to verify accuracy hasn't regressed, that's a separate script — load both models, predict on labeled inputs, compute accuracy/F1, compare against published numbers in the source model card. Worth doing once for confidence; not needed every conversion run.
 
 **Continuous integration.** This pipeline runs rarely (once per model variant per quantization level). Doesn't need to run in CI on every commit. If you add new variants, run it locally and commit the resulting HF repo URLs to the Tauri app config. If CI runs become useful (e.g., when adding F16/int8 variants), this pipeline is structured to be CI-friendly — Task targets, deterministic via lockfile, exits nonzero on failures.
 
-**Mirroring to UMich storage.** Phase 3 concern per the main handoff doc. If institutional permanence matters later, mirror these HF repos to UMich-controlled storage and have the Tauri app fetch with HF as a fallback (or vice versa). Don't optimize for it now.
+**Mirroring to UMich storage.** A later-phase concern, not tracked yet. If institutional permanence matters later, mirror these HF repos to UMich-controlled storage and have the Tauri app fetch with HF as a fallback (or vice versa). Don't optimize for it now.
 
 ## Failure modes to watch for
 
