@@ -125,6 +125,16 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  /**
+   * Request a graceful pause of an in-flight run. The worker stops at its next
+   * batch boundary — after the current batch's results and progress are flushed
+   * in the usual transaction — and finalizes the run as `interrupted` (resumable
+   * later; see EPI-38/EPI-39). Returns `true` if a running worker was signalled,
+   * `false` if the run wasn't active (already terminal, or unknown id).
+   */
+  async pauseRun(runId: string): Promise<boolean> {
+    return await TAURI_INVOKE("pause_run", { runId });
+  },
   async startRun(req: StartRunRequest): Promise<Result<StartRunResponse, string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
@@ -260,8 +270,8 @@ export type ListCoursesRequest = {
   /**
    * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
    * mean "from the start". The frontend hands back the row index of the
-   * last row of a page + 1 to advance. Replaces OFFSET because DuckDB's
-   * TopN plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
+   * last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
+   * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
    * `(dataset_id, row_index)` index and scans the whole partition;
    * the range predicate lets the index drive the scan.
    */

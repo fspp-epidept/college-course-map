@@ -1,5 +1,4 @@
--- Phase 1 schema. See CLAUDE.md "Schema" ground rule; docs/handoff.md (retired)
--- carries the design rationale. Closes #22 #23 #24 #25 #26 #27.
+-- Phase 1 schema. See CLAUDE.md "Schema" ground rule for the design rationale.
 --
 -- Surrogate ids use sequences + DEFAULT nextval(); DuckDB rejects
 -- `GENERATED ALWAYS AS IDENTITY` ("Constraint not implemented").

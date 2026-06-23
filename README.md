@@ -7,7 +7,7 @@ A native desktop app for bulk-classifying college courses against CCM codes usin
 - Built for ~2M-row datasets with resumable jobs and content-hash-keyed result caching
 - DuckDB-backed storage for streaming ingest and interactive dashboard queries
 
-Pre-alpha. The Python model-conversion pipeline under `scripts/models/` is working end-to-end. The Tauri desktop app is scaffold + design docs; see [`docs/handoff.md`](docs/handoff.md) for the build order.
+Pre-alpha. The Python model-conversion pipeline under `scripts/models/` is working end-to-end. The Tauri desktop app's core loop works — import a CSV, classify it locally via ONNX, and browse cached results — with the remaining work toward a shippable v1 tracked in Linear (team EPI).
 
 ## Prerequisites
 
@@ -51,9 +51,9 @@ Standalone Python tooling that converts the annamp CCM classifiers from PyTorch 
 
 ## Architecture
 
-- [`docs/handoff.md`](docs/handoff.md) — schema, IPC contracts, threat model, build order. Source of truth for design decisions.
+- [`CLAUDE.md`](CLAUDE.md) — repository conventions, architectural ground rules, schema, IPC contracts, and threat model. The durable source of truth for design decisions.
 - [`docs/keybinds.md`](docs/keybinds.md) — the three-layer keyboard-shortcut model (OS global / Tauri menu accelerator / WebView).
-- [`CLAUDE.md`](CLAUDE.md) — repository conventions and architectural ground rules.
+- [`docs/models-pipeline.md`](docs/models-pipeline.md) — the Python PyTorch→ONNX conversion pipeline.
 
 ## Layout
 

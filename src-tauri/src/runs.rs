@@ -8,6 +8,14 @@
 //! tab also feeds the live progress meter. Tauri-events for run progress are
 //! deferred until the broader async-pipeline pass (#124).
 
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
 use chrono::Utc;
 use duckdb::params;
 use serde::{Deserialize, Serialize};
@@ -20,6 +28,50 @@ use crate::{
     format::{CourseInput, format_input},
     inference::{InferenceRegistry, classify_batch},
 };
+
+/// Cancellation flags for in-flight runs, keyed by run id. A run registers an
+/// `AtomicBool` when it starts and removes it once it reaches a terminal state;
+/// [`pause_run`] flips the flag so the worker stops at its next batch boundary.
+/// Managed as Tauri state alongside [`AppDb`] / [`InferenceRegistry`].
+#[derive(Default)]
+pub(crate) struct RunRegistry {
+    flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl RunRegistry {
+    /// Mutex poisoning here is benign: the only mutated state is a flag map, and
+    /// a poisoned guard still holds a consistent map. Recover the inner value
+    /// rather than propagate — losing the ability to pause a run on a panic in
+    /// some unrelated registry call is worse than a stale lock.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+        self.flags.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Register a fresh (un-cancelled) flag for `run_id` and hand back a clone
+    /// for the worker to poll.
+    fn register(&self, run_id: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        self.lock().insert(run_id.to_owned(), Arc::clone(&flag));
+        flag
+    }
+
+    /// Flip the cancellation flag for `run_id`. Returns `false` if no such run
+    /// is currently registered (already finished, never started, or wrong id).
+    fn cancel(&self, run_id: &str) -> bool {
+        match self.lock().get(run_id) {
+            Some(flag) => {
+                flag.store(true, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop the flag once a run reaches a terminal state.
+    fn remove(&self, run_id: &str) {
+        self.lock().remove(run_id);
+    }
+}
 
 /// Inputs are batched through the model in chunks of this size. Matches the
 /// Python pipeline's `predict_batch` default. Two effects: one ONNX call per
@@ -267,6 +319,7 @@ pub(crate) fn start_run(
     app: AppHandle,
     db: State<'_, AppDb>,
     registry: State<'_, InferenceRegistry>,
+    runs: State<'_, RunRegistry>,
 ) -> Result<StartRunResponse, String> {
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
     // Fail fast if the requested digit level isn't loaded — caller gets a
@@ -355,6 +408,10 @@ pub(crate) fn start_run(
     // it without blocking on `db.rw()` inside the closure.
     drop(conn);
 
+    // Register the cancellation flag before the worker starts so a pause request
+    // arriving immediately after this returns can't race the registration.
+    let cancel = runs.register(&run_id);
+
     let task = RunTask {
         app: app.clone(),
         dataset_id: req.dataset_id,
@@ -363,6 +420,7 @@ pub(crate) fn start_run(
         digit_level: req.digit_level,
         limit,
         now,
+        cancel,
     };
     // spawn_blocking owns the synchronous ORT calls. tauri::async_runtime
     // dispatches the closure onto the runtime's blocking pool, which doesn't
@@ -371,6 +429,21 @@ pub(crate) fn start_run(
     tauri::async_runtime::spawn_blocking(move || task.run());
 
     Ok(StartRunResponse { run_id, rows_total })
+}
+
+/// Request a graceful pause of an in-flight run. The worker stops at its next
+/// batch boundary — after the current batch's results and progress are flushed
+/// in the usual transaction — and finalizes the run as `interrupted` (resumable
+/// later; see EPI-38/EPI-39). Returns `true` if a running worker was signalled,
+/// `false` if the run wasn't active (already terminal, or unknown id).
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn pause_run(run_id: String, registry: State<'_, RunRegistry>) -> bool {
+    registry.cancel(&run_id)
 }
 
 /// All the inputs the background task needs. Owned values only so the spawned
@@ -383,6 +456,8 @@ struct RunTask {
     digit_level: u8,
     limit: u32,
     now: String,
+    /// Set true by [`pause_run`]; polled at each batch boundary to stop early.
+    cancel: Arc<AtomicBool>,
 }
 
 impl RunTask {
@@ -390,18 +465,41 @@ impl RunTask {
     /// runs row, even on a mid-loop error.
     fn run(self) {
         let outcome = self.run_inner();
-        let completed_at = Utc::now().to_rfc3339();
+        let finished_at = Utc::now().to_rfc3339();
 
         let db = self.app.state::<AppDb>();
         let Ok(conn) = db.rw() else {
             // Mutex poisoning is unrecoverable; the run row stays in
             // 'running' which is technically wrong, but the alternative
-            // (panic in a worker thread) is worse.
+            // (panic in a worker thread) is worse. The cancel flag is left in
+            // the registry — also unrecoverable, and harmless.
             eprintln!("run {}: rw mutex poisoned", self.run_id);
             return;
         };
         match outcome {
-            Ok((processed, unique_done, cache_hits)) => {
+            Ok(o) if o.interrupted => {
+                // Graceful pause: in-flight work was already flushed by the last
+                // batch's transaction. Persist the running totals and stop in
+                // `interrupted` (resumable) without stamping completed_at.
+                if let Err(e) = conn.execute(
+                    "UPDATE runs SET state='interrupted',
+                        rows_processed=?,
+                        unique_inputs_total=?, unique_inputs_done=?, cache_hits=?,
+                        last_progress_at=?
+                     WHERE id=?",
+                    params![
+                        i64::try_from(o.processed).unwrap_or(i64::MAX),
+                        i64::try_from(o.unique_done + o.cache_hits).unwrap_or(i64::MAX),
+                        i64::try_from(o.unique_done).unwrap_or(i64::MAX),
+                        i64::try_from(o.cache_hits).unwrap_or(i64::MAX),
+                        &finished_at,
+                        &self.run_id,
+                    ],
+                ) {
+                    eprintln!("run {}: interrupt finalize: {e}", self.run_id);
+                }
+            }
+            Ok(o) => {
                 if let Err(e) = conn.execute(
                     "UPDATE runs SET state='completed',
                         rows_processed=?,
@@ -409,12 +507,12 @@ impl RunTask {
                         completed_at=?, last_progress_at=?
                      WHERE id=?",
                     params![
-                        i64::try_from(processed).unwrap_or(i64::MAX),
-                        i64::try_from(unique_done + cache_hits).unwrap_or(i64::MAX),
-                        i64::try_from(unique_done).unwrap_or(i64::MAX),
-                        i64::try_from(cache_hits).unwrap_or(i64::MAX),
-                        &completed_at,
-                        &completed_at,
+                        i64::try_from(o.processed).unwrap_or(i64::MAX),
+                        i64::try_from(o.unique_done + o.cache_hits).unwrap_or(i64::MAX),
+                        i64::try_from(o.unique_done).unwrap_or(i64::MAX),
+                        i64::try_from(o.cache_hits).unwrap_or(i64::MAX),
+                        &finished_at,
+                        &finished_at,
                         &self.run_id,
                     ],
                 ) {
@@ -424,13 +522,17 @@ impl RunTask {
             Err(err) => {
                 let _ = conn.execute(
                     "UPDATE runs SET state='failed', error_message=?, completed_at=? WHERE id=?",
-                    params![&err, &completed_at, &self.run_id],
+                    params![&err, &finished_at, &self.run_id],
                 );
             }
         }
+
+        // Run is terminal whichever branch ran: drop its cancel flag so the
+        // registry doesn't leak an entry per completed run.
+        self.app.state::<RunRegistry>().remove(&self.run_id);
     }
 
-    fn run_inner(&self) -> Result<(u64, u64, u64), String> {
+    fn run_inner(&self) -> Result<RunOutcome, String> {
         // Re-acquire the registry inside the worker so we don't have to send
         // a State across threads (it would carry a borrow). Fresh State<T> is
         // cheap; manage() puts T inside an Arc.
@@ -484,8 +586,26 @@ impl RunTask {
             processed = processed_after;
             cache_hits = cache_hits_after;
             unique_done += classifications.len() as u64;
+
+            // Batch boundary: the just-processed chunk is fully flushed, so this
+            // is the consistent point to honor a pause request. Relaxed is fine —
+            // we only need eventual visibility of the flag, not ordering against
+            // other memory.
+            if self.cancel.load(Ordering::Relaxed) {
+                return Ok(RunOutcome {
+                    processed,
+                    unique_done,
+                    cache_hits,
+                    interrupted: true,
+                });
+            }
         }
-        Ok((processed, unique_done, cache_hits))
+        Ok(RunOutcome {
+            processed,
+            unique_done,
+            cache_hits,
+            interrupted: false,
+        })
     }
 
     fn select_courses(&self) -> Result<Vec<(String, String, String, String)>, String> {
@@ -606,6 +726,15 @@ impl RunTask {
         .map_err(|e| format!("update progress: {e}"))?;
         Ok(())
     }
+}
+
+/// Running totals returned by [`RunTask::run_inner`]. `interrupted` is true when
+/// the loop stopped early on a pause request rather than exhausting the dataset.
+struct RunOutcome {
+    processed: u64,
+    unique_done: u64,
+    cache_hits: u64,
+    interrupted: bool,
 }
 
 /// Per-row state for a cache-missed input within one batch. Borrows the

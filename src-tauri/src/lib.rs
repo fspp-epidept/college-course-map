@@ -32,6 +32,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         metrics::list_metrics,
         runs::get_run,
         runs::list_runs,
+        runs::pause_run,
         runs::start_run,
     ])
 }
@@ -72,6 +73,9 @@ pub fn run() {
             let registry =
                 inference::load_all_models().map_err(|e| format!("load inference models: {e}"))?;
             app.manage(registry);
+            // Tracks per-run cancellation flags so `pause_run` can signal an
+            // in-flight worker (EPI-37).
+            app.manage(runs::RunRegistry::default());
             #[cfg(target_os = "macos")]
             {
                 if let Some(window) = app.get_webview_window("main") {
