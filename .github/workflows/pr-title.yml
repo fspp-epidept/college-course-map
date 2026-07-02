@@ -1,0 +1,34 @@
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint:
+    name: Conventional title
+    runs-on: ubuntu-latest
+    steps:
+      # Merges to main are squash-only (branch protection) and the squash
+      # commit's subject is the PR title, so the title itself must be a valid
+      # Conventional Commit for release-please to parse. Local commit messages
+      # are squashed away — this check is the whole contract; there is no
+      # commit-msg hook on purpose.
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            chore
+            refactor
+            docs
+            test
+            ci
+            perf
+          requireScope: false
+          subjectPattern: ^.{1,65}$

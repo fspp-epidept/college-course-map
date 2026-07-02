@@ -90,7 +90,8 @@
     },
     {
       "includes": ["src/bindings.ts"],
-      "linter": { "enabled": false }
+      "linter": { "enabled": false },
+      "formatter": { "enabled": false }
     }
   ]
 }
