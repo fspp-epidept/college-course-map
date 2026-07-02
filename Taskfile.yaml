@@ -82,7 +82,10 @@ tasks:
     cmds:
       - task: fmt:check
       - task: lint
-      - task: check:rust
+      # No check:rust here on purpose: clippy (lint:rust) fully type-checks
+      # as part of linting; a separate cargo check pass duplicates the whole
+      # compile. `task check:rust` stays available for a fast standalone
+      # typecheck during development.
       - task: check:js
 
   fmt:js:
