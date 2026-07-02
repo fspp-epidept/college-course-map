@@ -3,7 +3,6 @@
   "bootstrap-sha": "0e656716d4061923136976ec8f826f931ef28f31",
   "release-type": "node",
   "bump-minor-pre-major": true,
-  "bump-patch-for-minor-pre-major": true,
   "include-v-in-tag": true,
   "packages": {
     ".": {
