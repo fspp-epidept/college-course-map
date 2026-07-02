@@ -83,6 +83,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # A red run (lint failure, flaky test) must still save the compile
+          # work — a cold seed costs ~20 min and default is save-on-success.
+          cache-on-failure: true
 
       - run: task fmt:rust:check
 
