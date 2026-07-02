@@ -250,15 +250,19 @@ fn seed_results(
     run_id: &str,
     now: &str,
 ) -> Result<(), String> {
-    let demo_codes = ["270101", "270102", "230101", "110701", "110702", "260101"];
+    // Canonical zero-padded codes (match ccm_taxonomy) so demo rows exercise
+    // the taxonomy join like real runs do.
+    let demo_codes = [
+        "27.0101", "27.0102", "23.0101", "11.0701", "11.0798", "26.0101",
+    ];
     for (i, hash) in hashes.iter().enumerate() {
-        let code = demo_codes.get(i).copied().unwrap_or("000000");
+        let code = demo_codes.get(i).copied().unwrap_or("00.0000");
         conn.execute(
             "INSERT INTO inference_results
                 (model_id, content_hash, classification, probability,
-                 computed_at, computed_by_run)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![model_six, hash, code, 0.94_f64, now, run_id],
+                 logit_argmax, computed_at, computed_by_run)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![model_six, hash, code, 0.94_f64, 7.8_f64, now, run_id],
         )
         .map_err(|e| format!("insert inference_results: {e}"))?;
     }

@@ -38,6 +38,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         2,
         include_str!("../migrations/0002_dataset_import_state.sql"),
     ),
+    (
+        3,
+        include_str!("../migrations/0003_ccm_taxonomy_and_confidence.sql"),
+    ),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -132,6 +136,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             let _ = conn.execute_batch("ROLLBACK");
             return Err(format!("migration {version} failed: {e}"));
         }
+        if let Err(e) = post_migration(version, conn) {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(format!("data hook for migration {version} failed: {e}"));
+        }
         if let Err(e) = conn.execute(
             "INSERT INTO schema_version(version) VALUES (?)",
             params![version],
@@ -145,4 +153,124 @@ fn migrate(conn: &Connection) -> Result<(), String> {
             .map_err(|e| format!("commit migration {version}: {e}"))?;
     }
     Ok(())
+}
+
+/// Rust data hooks that run inside a migration's transaction, after its SQL.
+/// For embedded-data seeding that plain SQL can't express cleanly (CSV loads).
+/// Same once-per-database semantics as the SQL: tracked by the identical
+/// `schema_version` row, rolled back together on failure. This is the single
+/// place database state gets established — don't add seeding at startup.
+fn post_migration(version: u32, conn: &Connection) -> Result<(), String> {
+    match version {
+        3 => seed_ccm_taxonomy(conn),
+        _ => Ok(()),
+    }
+}
+
+/// Insert the CCM taxonomy from CSVs embedded at compile time (sourced from
+/// the official `ccm_taxonomy_{two,six}.xlsx`, converted + whitespace-cleaned;
+/// see migration 0003). 2-digit rows carry `title_short`, 6-digit rows carry
+/// `description`; the government publishes no 4-digit taxonomy.
+fn seed_ccm_taxonomy(conn: &Connection) -> Result<(), String> {
+    insert_taxonomy_csv(
+        conn,
+        2,
+        include_str!("../migrations/data/ccm_taxonomy_two.csv"),
+    )?;
+    insert_taxonomy_csv(
+        conn,
+        6,
+        include_str!("../migrations/data/ccm_taxonomy_six.csv"),
+    )
+}
+
+fn insert_taxonomy_csv(conn: &Connection, digit_level: u8, data: &str) -> Result<(), String> {
+    let mut reader = csv::Reader::from_reader(data.as_bytes());
+    let headers = reader
+        .headers()
+        .map_err(|e| format!("taxonomy csv headers: {e}"))?;
+    // Column 3 is `title_short` for the 2-digit file, `description` for the
+    // 6-digit file; route it to the matching table column.
+    let third_is_short = headers.get(2) == Some("title_short");
+    let mut stmt = conn
+        .prepare(
+            "INSERT INTO ccm_taxonomy (digit_level, code, title, title_short, description)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .map_err(|e| format!("prepare taxonomy insert: {e}"))?;
+    for record in reader.records() {
+        let record = record.map_err(|e| format!("taxonomy csv record: {e}"))?;
+        let code = record
+            .get(0)
+            .ok_or_else(|| "taxonomy csv row missing code".to_owned())?;
+        let title = record
+            .get(1)
+            .ok_or_else(|| format!("taxonomy csv row {code} missing title"))?;
+        let third = record.get(2).unwrap_or_default();
+        let (title_short, description) = if third_is_short {
+            (Some(third), None)
+        } else {
+            (None, Some(third))
+        };
+        stmt.execute(params![digit_level, code, title, title_short, description])
+            .map_err(|e| format!("insert taxonomy row {code}: {e}"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate;
+
+    /// Full migration chain on a fresh database: schema applies, the 0003
+    /// data hook seeds the taxonomy inside the same transaction, and a second
+    /// `migrate` call is a no-op (no duplicate seeding).
+    #[test]
+    fn migrations_apply_and_seed_taxonomy() -> Result<(), String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        migrate(&conn)?;
+
+        let count = |level: i64| -> Result<i64, String> {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ccm_taxonomy WHERE digit_level = ?",
+                [level],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())
+        };
+        assert_eq!(count(2)?, 48);
+        assert_eq!(count(6)?, 2119);
+
+        // Third CSV column routes to the right table column per digit level.
+        let (title, short, desc): (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT title, title_short, description
+                 FROM ccm_taxonomy WHERE digit_level = 2 AND code = '01'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        assert!(title.starts_with("Agriculture"), "title = {title}");
+        assert_eq!(short.as_deref(), Some("Agriculture"));
+        assert_eq!(desc, None);
+
+        let desc6: Option<String> = conn
+            .query_row(
+                "SELECT description FROM ccm_taxonomy
+                 WHERE digit_level = 6 AND code = '01.0000'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert!(desc6.is_some_and(|d| !d.is_empty()));
+
+        // 0003 also added the research-signal column to the cache.
+        conn.prepare("SELECT logit_argmax FROM inference_results")
+            .map_err(|e| e.to_string())?;
+
+        // Re-running is a no-op: schema_version gates both SQL and data hook.
+        migrate(&conn)?;
+        assert_eq!(count(2)?, 48);
+        Ok(())
+    }
 }

@@ -222,11 +222,31 @@ export type CourseRow = {
   courseTitle: string | null;
   contentHash: string;
   /**
-   * Classification label from `inference_results` for the requested model;
+   * Canonical CCM code from `inference_results` for the requested model;
    * `None` when there's no result yet (or no `model_id` was requested).
    */
   classification: string | null;
+  /**
+   * Softmax confidence at argmax, `(0, 1]`. See `docs/model-confidence.md`.
+   */
   probability: number | null;
+  /**
+   * Official CCM title for the code, joined from `ccm_taxonomy`. For
+   * 4-digit codes (no published taxonomy exists) and 6-digit codes missing
+   * from the table, this is the 2-digit parent's title — `ccm_title_level`
+   * says which level matched.
+   */
+  ccmTitle: string | null;
+  ccmTitleShort: string | null;
+  /**
+   * Only 6-digit taxonomy rows carry descriptions.
+   */
+  ccmDescription: string | null;
+  /**
+   * Digit level the title came from (the model's own level, or 2 for the
+   * parent fallback); `None` when no taxonomy row matched.
+   */
+  ccmTitleLevel: number | null;
 };
 export type CsvPreview = {
   headers: string[];
