@@ -38,10 +38,22 @@ pub(crate) struct CourseRow {
     pub catalog_number: Option<String>,
     pub course_title: Option<String>,
     pub content_hash: String,
-    /// Classification label from `inference_results` for the requested model;
+    /// Canonical CCM code from `inference_results` for the requested model;
     /// `None` when there's no result yet (or no `model_id` was requested).
     pub classification: Option<String>,
+    /// Softmax confidence at argmax, `(0, 1]`. See `docs/model-confidence.md`.
     pub probability: Option<f64>,
+    /// Official CCM title for the code, joined from `ccm_taxonomy`. For
+    /// 4-digit codes (no published taxonomy exists) and 6-digit codes missing
+    /// from the table, this is the 2-digit parent's title — `ccm_title_level`
+    /// says which level matched.
+    pub ccm_title: Option<String>,
+    pub ccm_title_short: Option<String>,
+    /// Only 6-digit taxonomy rows carry descriptions.
+    pub ccm_description: Option<String>,
+    /// Digit level the title came from (the model's own level, or 2 for the
+    /// parent fallback); `None` when no taxonomy row matched.
+    pub ccm_title_level: Option<u8>,
 }
 
 #[derive(Type, Serialize, Debug)]
@@ -116,6 +128,10 @@ pub(crate) fn list_courses_with_results(
                     content_hash: row.get(5)?,
                     classification: None,
                     probability: None,
+                    ccm_title: None,
+                    ccm_title_short: None,
+                    ccm_description: None,
+                    ccm_title_level: None,
                 })
             },
         )
@@ -133,52 +149,124 @@ pub(crate) fn list_courses_with_results(
     if let Some(model_id) = req.model_id
         && !collected.is_empty()
     {
-        use std::collections::HashMap;
-        let mut placeholders = String::with_capacity(collected.len() * 2);
-        for i in 0..collected.len() {
-            if i > 0 {
-                placeholders.push(',');
-            }
-            placeholders.push('?');
-        }
-        let sql = format!(
-            "SELECT content_hash, classification, probability
-             FROM inference_results
-             WHERE model_id = ? AND content_hash IN ({placeholders})"
-        );
-        let mut params: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(collected.len() + 1);
-        params.push(&model_id);
-        for row in &collected {
-            params.push(&row.content_hash);
-        }
-        let mut lookup_stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("prepare inference lookup: {e}"))?;
-        let mut by_hash: HashMap<String, (String, Option<f64>)> = HashMap::new();
-        let lookup_rows = lookup_stmt
-            .query_map(duckdb::params_from_iter(params), |r| {
-                let h: String = r.get(0)?;
-                let c: String = r.get(1)?;
-                let p: Option<f64> = r.get(2)?;
-                Ok((h, (c, p)))
-            })
-            .map_err(|e| format!("query inference lookup: {e}"))?;
-        for entry in lookup_rows {
-            let (h, v) = entry.map_err(|e| format!("inference lookup row: {e}"))?;
-            by_hash.insert(h, v);
-        }
-        for row in &mut collected {
-            if let Some((label, prob)) = by_hash.get(&row.content_hash) {
-                row.classification = Some(label.clone());
-                row.probability = *prob;
-            }
-        }
+        attach_results(&conn, model_id, &mut collected)?;
     }
 
     Ok(CoursePage {
         rows: collected,
         total,
     })
+}
+
+/// Classification + taxonomy fields for one cached result, keyed by hash in
+/// [`attach_results`].
+struct ResultInfo {
+    classification: String,
+    probability: Option<f64>,
+    title: Option<String>,
+    title_short: Option<String>,
+    description: Option<String>,
+    title_level: Option<u8>,
+}
+
+/// Bulk-attach cached classifications (plus their `ccm_taxonomy` titles) to a
+/// page of course rows. One index probe per hash against the
+/// `(model_id, content_hash)` PK. The model's digit level drives the taxonomy
+/// join: exact match at the model's own level, else the 2-digit parent by
+/// code prefix (the government publishes no 4-digit taxonomy, and the parent
+/// also covers any 6-digit code absent from the table).
+fn attach_results(
+    conn: &duckdb::Connection,
+    model_id: i64,
+    collected: &mut [CourseRow],
+) -> Result<(), String> {
+    use std::collections::HashMap;
+
+    let digit_level: u8 = conn
+        .query_row(
+            "SELECT model_type FROM models WHERE id = ?",
+            [model_id],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|e| format!("model digit lookup: {e}"))?
+        .parse()
+        .map_err(|e| format!("non-numeric model_type: {e}"))?;
+
+    let mut placeholders = String::with_capacity(collected.len() * 2);
+    for i in 0..collected.len() {
+        if i > 0 {
+            placeholders.push(',');
+        }
+        placeholders.push('?');
+    }
+    let sql = format!(
+        "SELECT r.content_hash, r.classification, r.probability,
+                t.title, t.title_short, t.description,
+                p.title, p.title_short
+         FROM inference_results r
+         LEFT JOIN ccm_taxonomy t
+           ON t.digit_level = ? AND t.code = r.classification
+         LEFT JOIN ccm_taxonomy p
+           ON p.digit_level = 2 AND p.code = substr(r.classification, 1, 2)
+         WHERE r.model_id = ? AND r.content_hash IN ({placeholders})"
+    );
+    let digit_i64 = i64::from(digit_level);
+    let mut params: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(collected.len() + 2);
+    params.push(&digit_i64);
+    params.push(&model_id);
+    for row in collected.iter() {
+        params.push(&row.content_hash);
+    }
+    let mut lookup_stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("prepare inference lookup: {e}"))?;
+
+    let mut by_hash: HashMap<String, ResultInfo> = HashMap::new();
+    let lookup_rows = lookup_stmt
+        .query_map(duckdb::params_from_iter(params), |r| {
+            let hash: String = r.get(0)?;
+            let exact_title: Option<String> = r.get(3)?;
+            let exact_short: Option<String> = r.get(4)?;
+            let exact_desc: Option<String> = r.get(5)?;
+            let parent_title: Option<String> = r.get(6)?;
+            let parent_short: Option<String> = r.get(7)?;
+            let info = if exact_title.is_some() {
+                ResultInfo {
+                    classification: r.get(1)?,
+                    probability: r.get(2)?,
+                    title: exact_title,
+                    title_short: exact_short,
+                    description: exact_desc,
+                    title_level: Some(digit_level),
+                }
+            } else {
+                ResultInfo {
+                    classification: r.get(1)?,
+                    probability: r.get(2)?,
+                    title: parent_title.clone(),
+                    title_short: parent_short,
+                    description: None,
+                    title_level: parent_title.is_some().then_some(2),
+                }
+            };
+            Ok((hash, info))
+        })
+        .map_err(|e| format!("query inference lookup: {e}"))?;
+    for entry in lookup_rows {
+        let (h, v) = entry.map_err(|e| format!("inference lookup row: {e}"))?;
+        by_hash.insert(h, v);
+    }
+    for row in collected.iter_mut() {
+        if let Some(info) = by_hash.get(&row.content_hash) {
+            row.classification = Some(info.classification.clone());
+            row.probability = info.probability;
+            row.ccm_title = info.title.clone();
+            row.ccm_title_short = info.title_short.clone();
+            row.ccm_description = info.description.clone();
+            row.ccm_title_level = info.title_level;
+        }
+    }
+    Ok(())
 }
 
 /// Convenience IPC: return the seeded `models.id` for a given digit level so

@@ -48,13 +48,15 @@ impl std::fmt::Debug for LoadedModel {
 }
 
 /// One classification: argmax label, its index, the top-3 indices (sorted
-/// descending by logit), and the raw logit value at argmax.
+/// descending by logit), the raw logit value at argmax, and the softmax
+/// probability at argmax (the confidence; see `docs/model-confidence.md`).
 #[derive(Debug, Clone)]
 pub struct Classification {
     pub label: String,
     pub label_index: usize,
     pub top3: [usize; 3],
     pub logit_argmax: f32,
+    pub probability: f32,
 }
 
 /// Build a [`LoadedModel`] from a directory containing `model.onnx`,
@@ -207,9 +209,27 @@ pub fn classify_batch(model: &LoadedModel, inputs: &[&str]) -> anyhow::Result<Ve
             label_index: argmax,
             top3,
             logit_argmax: argmax_val,
+            probability: softmax_at(row_logits, argmax_val),
         });
     }
     Ok(out)
+}
+
+/// Softmax probability of the argmax class, computed in the numerically
+/// stable max-shifted form (see `docs/model-confidence.md` for the exact
+/// formula, dependency chain, and research-validity notes):
+///
+/// ```text
+/// p(argmax) = exp(z_max − z_max) / Σ_j exp(z_j − z_max)
+///           = 1 / Σ_j exp(z_j − z_max)
+/// ```
+///
+/// Subtracting the row maximum before exponentiating bounds every exponent
+/// at ≤ 0, so `exp` can't overflow f32 regardless of logit magnitude; the
+/// result is identical to naive softmax in exact arithmetic.
+fn softmax_at(row_logits: &[f32], z_max: f32) -> f32 {
+    let denom: f32 = row_logits.iter().map(|&z| (z - z_max).exp()).sum();
+    1.0 / denom
 }
 
 /// Top-3 indices, sorted descending by logit value. Ties broken by index order
@@ -227,6 +247,34 @@ fn top3_indices(logits: &[f32]) -> [usize; 3] {
         indexed.get(1).map_or(0, |x| x.0),
         indexed.get(2).map_or(0, |x| x.0),
     ]
+}
+
+/// Normalize a model `id2label` value to the canonical zero-padded CCM code
+/// used by the official taxonomy (and therefore by `ccm_taxonomy` joins,
+/// display, and exports).
+///
+/// The annamp models' label strings are float-mangled — somewhere in
+/// training-data prep the codes were parsed as floats and stringified, losing
+/// leading zeros and trailing fractional zeros: `1` (should be `01`), `1.0`
+/// (`01.0000`), `11.1` (`11.1000`), `12.041` (`12.0410`). Canonical form is
+/// a 2-digit integer part plus, for 4/6-digit levels, a dot and a 2/4-digit
+/// fraction: `XX`, `XX.XX`, `XX.XXXX`.
+#[must_use]
+pub fn normalize_ccm_code(label: &str, digit_level: u8) -> String {
+    let (int_part, frac_part) = match label.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (label, ""),
+    };
+    let frac_len: usize = match digit_level {
+        4 => 2,
+        6 => 4,
+        _ => 0,
+    };
+    if frac_len == 0 {
+        format!("{int_part:0>2}")
+    } else {
+        format!("{int_part:0>2}.{frac_part:0<frac_len$}")
+    }
 }
 
 #[derive(Deserialize)]
@@ -327,4 +375,53 @@ pub fn load_all_models() -> anyhow::Result<InferenceRegistry> {
         four_digit: load_model(&root.join("four-digit"), 4)?,
         six_digit: load_model(&root.join("six-digit"), 6)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_ccm_code, softmax_at};
+
+    /// Cases drawn from the real `id2label` sets of all three models —
+    /// including every float-mangling shape observed (lost leading zeros,
+    /// lost trailing fractional zeros).
+    #[test]
+    fn normalizes_float_mangled_labels() {
+        // 2-digit: XX
+        assert_eq!(normalize_ccm_code("1", 2), "01");
+        assert_eq!(normalize_ccm_code("10", 2), "10");
+        assert_eq!(normalize_ccm_code("45", 2), "45");
+        // 4-digit: XX.XX
+        assert_eq!(normalize_ccm_code("1.0", 4), "01.00");
+        assert_eq!(normalize_ccm_code("1.01", 4), "01.01");
+        assert_eq!(normalize_ccm_code("11.1", 4), "11.10");
+        // 6-digit: XX.XXXX
+        assert_eq!(normalize_ccm_code("1.0", 6), "01.0000");
+        assert_eq!(normalize_ccm_code("1.0101", 6), "01.0101");
+        assert_eq!(normalize_ccm_code("11.1", 6), "11.1000");
+        assert_eq!(normalize_ccm_code("12.041", 6), "12.0410");
+        // Already-canonical input is a no-op.
+        assert_eq!(normalize_ccm_code("01.0000", 6), "01.0000");
+    }
+
+    /// The probability must match naive softmax on friendly values and stay
+    /// finite (no overflow) on logit magnitudes that would blow up the naive
+    /// form in f32 (`exp(100)` is already infinite).
+    #[test]
+    fn softmax_at_matches_naive_and_is_stable() {
+        let logits = [2.0_f32, 1.0, 0.5];
+        let max = 2.0_f32;
+        let naive: f32 = logits.iter().map(|z| z.exp()).sum();
+        let expected = max.exp() / naive;
+        let got = softmax_at(&logits, max);
+        assert!((got - expected).abs() < 1e-6, "got {got}, want {expected}");
+
+        // Uniform logits → uniform probability.
+        let uniform = [3.0_f32; 4];
+        assert!((softmax_at(&uniform, 3.0) - 0.25).abs() < 1e-6);
+
+        // Large-magnitude logits: naive softmax would overflow f32.
+        let big = [500.0_f32, 499.0, -500.0];
+        let p = softmax_at(&big, 500.0);
+        assert!(p.is_finite() && p > 0.5 && p < 1.0, "p = {p}");
+    }
 }

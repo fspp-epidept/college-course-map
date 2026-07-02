@@ -317,6 +317,9 @@ function gotoNext(): void {
                 <th class="px-3 py-2 text-left font-medium text-(--ui-text)">
                   {{ digitLevel }}-digit CCM
                 </th>
+                <th class="px-3 py-2 text-right font-medium text-(--ui-text) w-24">
+                  Confidence
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -324,13 +327,13 @@ function gotoNext(): void {
                 v-if="coursesPending && !coursePage"
                 class="text-(--ui-text-dimmed)"
               >
-                <td colspan="5" class="px-3 py-6 text-center">Loading courses…</td>
+                <td colspan="6" class="px-3 py-6 text-center">Loading courses…</td>
               </tr>
               <tr
                 v-else-if="!coursePage || coursePage.rows.length === 0"
                 class="text-(--ui-text-dimmed)"
               >
-                <td colspan="5" class="px-3 py-6 text-center">
+                <td colspan="6" class="px-3 py-6 text-center">
                   No courses in this dataset.
                 </td>
               </tr>
@@ -345,11 +348,61 @@ function gotoNext(): void {
                 <td class="px-3 py-1.5 text-(--ui-text)">{{ row.catalogNumber ?? "—" }}</td>
                 <td class="px-3 py-1.5 text-(--ui-text)">{{ row.courseTitle ?? "—" }}</td>
                 <td class="px-3 py-1.5">
-                  <span
-                    v-if="row.classification"
-                    class="font-mono text-(--ui-text) tabular-nums"
-                  >
-                    {{ row.classification }}
+                  <UPopover v-if="row.classification">
+                    <button
+                      type="button"
+                      class="font-mono text-(--ui-text) tabular-nums underline decoration-dotted underline-offset-2 cursor-pointer"
+                    >
+                      {{ row.classification }}
+                    </button>
+                    <template #content>
+                      <div class="max-w-sm p-4 flex flex-col gap-2 text-sm">
+                        <div class="flex items-baseline gap-2">
+                          <code class="font-mono text-(--ui-text) tabular-nums">
+                            {{ row.classification }}
+                          </code>
+                          <span
+                            v-if="row.probability != null"
+                            class="text-xs text-(--ui-text-muted) tabular-nums"
+                          >
+                            {{ (row.probability * 100).toFixed(1) }}% confidence
+                          </span>
+                        </div>
+                        <template v-if="row.ccmTitle">
+                          <p class="font-medium text-(--ui-text)">
+                            {{ row.ccmTitle }}
+                            <span
+                              v-if="row.ccmTitleShort && row.ccmTitleShort !== row.ccmTitle"
+                              class="font-normal text-(--ui-text-muted)"
+                            >
+                              ({{ row.ccmTitleShort }})
+                            </span>
+                          </p>
+                          <p
+                            v-if="row.ccmTitleLevel === 2 && digitLevel !== 2"
+                            class="text-xs text-(--ui-text-dimmed)"
+                          >
+                            2-digit parent category — no official
+                            {{ digitLevel }}-digit title exists for this code.
+                          </p>
+                          <p
+                            v-if="row.ccmDescription"
+                            class="text-(--ui-text-muted) leading-relaxed"
+                          >
+                            {{ row.ccmDescription }}
+                          </p>
+                        </template>
+                        <p v-else class="text-(--ui-text-dimmed) text-xs">
+                          No taxonomy entry for this code.
+                        </p>
+                      </div>
+                    </template>
+                  </UPopover>
+                  <span v-else class="text-(--ui-text-dimmed)">—</span>
+                </td>
+                <td class="px-3 py-1.5 text-right tabular-nums">
+                  <span v-if="row.probability != null" class="text-(--ui-text)">
+                    {{ (row.probability * 100).toFixed(1) }}%
                   </span>
                   <span v-else class="text-(--ui-text-dimmed)">—</span>
                 </td>

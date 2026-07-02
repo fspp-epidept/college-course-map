@@ -691,17 +691,26 @@ impl RunTask {
                         "content_hash",
                         "classification",
                         "probability",
+                        "logit_argmax",
                         "computed_at",
                         "computed_by_run",
                     ],
                 )
                 .map_err(|e| format!("open inference appender: {e}"))?;
             for (miss, classification) in misses.iter().zip(classifications.iter()) {
+                // Codes persist in canonical zero-padded form (the model's
+                // id2label strings are float-mangled); probability is the
+                // softmax confidence, logit_argmax the raw research signal —
+                // see docs/model-confidence.md.
                 appender
                     .append_row(params![
                         self.model_id,
                         miss.content_hash,
-                        classification.label.as_str(),
+                        crate::inference::normalize_ccm_code(
+                            &classification.label,
+                            self.digit_level
+                        ),
+                        f64::from(classification.probability),
                         f64::from(classification.logit_argmax),
                         self.now.as_str(),
                         self.run_id.as_str(),
