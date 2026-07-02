@@ -2,15 +2,15 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "resources": {
-      "../scripts/models/output/two-digit/model.onnx": "models/two-digit/model.onnx",
-      "../scripts/models/output/two-digit/tokenizer.json": "models/two-digit/tokenizer.json",
-      "../scripts/models/output/two-digit/config.json": "models/two-digit/config.json",
-      "../scripts/models/output/four-digit/model.onnx": "models/four-digit/model.onnx",
-      "../scripts/models/output/four-digit/tokenizer.json": "models/four-digit/tokenizer.json",
-      "../scripts/models/output/four-digit/config.json": "models/four-digit/config.json",
-      "../scripts/models/output/six-digit/model.onnx": "models/six-digit/model.onnx",
-      "../scripts/models/output/six-digit/tokenizer.json": "models/six-digit/tokenizer.json",
-      "../scripts/models/output/six-digit/config.json": "models/six-digit/config.json"
+      "../scripts/models/output/two-digit-modernbert/model.onnx": "models/two-digit/model.onnx",
+      "../scripts/models/output/two-digit-modernbert/tokenizer.json": "models/two-digit/tokenizer.json",
+      "../scripts/models/output/two-digit-modernbert/config.json": "models/two-digit/config.json",
+      "../scripts/models/output/four-digit-modernbert/model.onnx": "models/four-digit/model.onnx",
+      "../scripts/models/output/four-digit-modernbert/tokenizer.json": "models/four-digit/tokenizer.json",
+      "../scripts/models/output/four-digit-modernbert/config.json": "models/four-digit/config.json",
+      "../scripts/models/output/six-digit-modernbert/model.onnx": "models/six-digit/model.onnx",
+      "../scripts/models/output/six-digit-modernbert/tokenizer.json": "models/six-digit/tokenizer.json",
+      "../scripts/models/output/six-digit-modernbert/config.json": "models/six-digit/config.json"
     }
   }
 }

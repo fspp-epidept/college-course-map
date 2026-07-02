@@ -7,36 +7,46 @@ mod export;
 pub mod format;
 mod import;
 pub mod inference;
+pub mod manifest;
 mod metrics;
+mod models;
 mod runs;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
 mod menu;
 
-use tauri_specta::{Builder, collect_commands};
+use tauri_specta::{Builder, collect_commands, collect_events};
 
 /// Collect the IPC command surface into a tauri-specta builder. Single source of
 /// truth for both the runtime `invoke_handler` and the generated `src/bindings.ts`
 /// (see #58); the `export_bindings` test renders the bindings from this same builder.
 fn specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![
-        config::list_themes,
-        config::read_theme,
-        config::read_settings,
-        config::write_settings,
-        courses::list_courses_with_results,
-        courses::model_id_for_digit_level,
-        csv_io::preview_csv,
-        datasets::list_datasets,
-        export::export_results,
-        import::import_csv,
-        metrics::list_metrics,
-        runs::get_run,
-        runs::list_runs,
-        runs::pause_run,
-        runs::start_run,
-    ])
+    Builder::<tauri::Wry>::new()
+        .commands(collect_commands![
+            config::list_themes,
+            config::read_theme,
+            config::read_settings,
+            config::write_settings,
+            courses::list_courses_with_results,
+            courses::model_id_for_digit_level,
+            csv_io::preview_csv,
+            datasets::list_datasets,
+            export::export_results,
+            import::import_csv,
+            metrics::list_metrics,
+            models::download_models,
+            models::load_models,
+            models::models_status,
+            runs::get_run,
+            runs::list_runs,
+            runs::pause_run,
+            runs::start_run,
+        ])
+        .events(collect_events![
+            models::ModelDownloadProgress,
+            models::ModelsStateChanged,
+        ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -68,24 +78,22 @@ pub fn run() {
             // Failing here is unrecoverable (no app without storage), so we
             // surface the error and let Tauri short-circuit setup.
             let db = db::AppDb::open().map_err(|e| format!("open database: {e}"))?;
+            // Resolve the embedded model manifest against the models table so
+            // every digit-level → model-id lookup goes through pinned rows
+            // (stale rows from earlier families stay put for their cached
+            // results but are never selected).
+            let catalog = {
+                let conn = db.rw().map_err(|e| format!("manifest rows: {e}"))?;
+                manifest::resolve_model_rows(&conn, manifest::load()?)?
+            };
             app.manage(db);
-            // Load all three digit-level models at startup. Slow (~5-15 s on
-            // CPU for ~1.5 GB total) but unavoidable for the spike: the
-            // synchronous `start_run` IPC expects the registry to be ready.
-            // The airgap flavor bundles models into the installer and loads
-            // them straight from the bundle's resource dir (packaging ADR);
-            // dev/connected builds resolve via `models_root()`.
-            #[cfg(feature = "airgap")]
-            let models_dir = app
-                .path()
-                .resource_dir()
-                .map_err(|e| format!("resolve bundle resource dir: {e}"))?
-                .join("models");
-            #[cfg(not(feature = "airgap"))]
-            let models_dir = inference::models_root()?;
-            let registry = inference::load_all_models(&models_dir)
-                .map_err(|e| format!("load inference models: {e}"))?;
-            app.manage(registry);
+            app.manage(catalog);
+            // Models load lazily (EPI-3/EPI-56): the store starts empty and a
+            // background thread fills it when the manifest files are already
+            // on disk (always, for airgap; post-download for connected).
+            // Commands that need models error cleanly until then.
+            app.manage(inference::ModelStore::default());
+            models::autoload_if_present(app.handle());
             // Tracks per-run cancellation flags so `pause_run` can signal an
             // in-flight worker (EPI-37).
             app.manage(runs::RunRegistry::default());

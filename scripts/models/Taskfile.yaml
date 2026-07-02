@@ -74,6 +74,12 @@ tasks:
     dotenv: ['.env']
     cmds: [uv run python upload.py]
 
+  manifest:
+    desc: Regenerate src-tauri/models.toml from the published HF repos (pinned SHAs + sha256)
+    deps: [setup]
+    dotenv: ['.env']
+    cmds: [uv run python manifest.py]
+
   all:
     desc: Convert + verify (no validation, no upload)
     cmds:

@@ -61,9 +61,10 @@ async listCoursesWithResults(req: ListCoursesRequest) : Promise<Result<CoursePag
 }
 },
 /**
- * Convenience IPC: return the seeded `models.id` for a given digit level so
- * the frontend can request joined results without owning the surrogate id
- * space. Returns `None` if no row matches.
+ * Convenience IPC: return the manifest-active `models.id` for a digit level
+ * so the frontend can request joined results without owning the surrogate id
+ * space. Resolved through the catalog — never by SQL guessing, which would
+ * happily pick a stale row from an earlier model family.
  */
 async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, string>> {
     try {
@@ -123,6 +124,40 @@ async listMetrics() : Promise<Result<AppMetrics, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Download every missing manifest file from its pinned HF revision into the
+ * data-dir models path, sha256-verifying as it streams. Connected builds
+ * only — the airgap bundle ships its models read-only in the resource dir.
+ */
+async downloadModels() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("download_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Load models from disk into the store. No-op when already loaded; errors if
+ * a load is in flight or files are missing. Slow (~5-15 s), so it runs on a
+ * blocking thread and the UI shows `loading` from `models_status`.
+ */
+async loadModels() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async modelsStatus() : Promise<Result<ModelStatus[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("models_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async getRun(id: string) : Promise<Result<RunDetail, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_run", { id }) };
@@ -162,6 +197,13 @@ async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>>
 /** user-defined events **/
 
 
+export const events = __makeEvents__<{
+modelDownloadProgress: ModelDownloadProgress,
+modelsStateChanged: ModelsStateChanged
+}>({
+modelDownloadProgress: "model-download-progress",
+modelsStateChanged: "models-state-changed"
+})
 
 /** user-defined constants **/
 
@@ -274,6 +316,23 @@ modelId: number | null;
  * the range predicate lets the index drive the scan.
  */
 cursor: number | null; limit: number }
+/**
+ * Per-file download progress. `received`/`total` are bytes; the frontend
+ * derives percentages.
+ */
+export type ModelDownloadProgress = { digitLevel: number; file: string; received: number; total: number }
+export type ModelStatus = { digitLevel: number; displayName: string; hfRepo: string; revision: string; filesTotal: number; 
+/**
+ * Files on disk with the manifest's exact size. Full sha256 verification
+ * happens during download, not on status polls.
+ */
+filesPresent: number; totalBytes: number; loaded: boolean; loading: boolean }
+/**
+ * Coarse "something about model state changed" signal — emitted after a file
+ * finishes downloading, a load starts/completes, or either fails. The
+ * frontend responds by refetching `models_status`.
+ */
+export type ModelsStateChanged = Record<string, never>
 /**
  * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
  * model digit level (resolved from the JSON `model_ids` array) and the

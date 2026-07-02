@@ -42,6 +42,11 @@ csv = "1"
 ort = "2.0.0-rc.12"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 ndarray = "0.17"
+toml = "0.9"
+# Connected-build model downloader (models.rs): blocking client driven from
+# spawn_blocking; rustls so we never link system OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+sha2 = "0.10"
 
 [lints.rust]
 unsafe_code = "deny"
