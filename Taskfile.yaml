@@ -45,6 +45,14 @@ tasks:
     cmds:
       - pnpm tauri build
 
+  build:airgap:
+    desc: Build installers with models bundled from scripts/models/output (airgap flavor)
+    preconditions:
+      - sh: test -f scripts/models/output/two-digit/model.onnx
+        msg: "models missing — run `task models:convert` first"
+    cmds:
+      - pnpm tauri build --config src-tauri/tauri.airgap.conf.json --features airgap --bundles deb,appimage
+
   fmt:
     desc: Format all code (Biome + rustfmt)
     cmds:
