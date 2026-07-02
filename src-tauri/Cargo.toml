@@ -14,6 +14,12 @@ edition = "2024"
 name = "course_classifier_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Airgap installer flavor (packaging ADR): models are bundled into the
+# installer via tauri.airgap.conf.json's `bundle.resources` and loaded from
+# the bundle's resource dir. Build with `task build:airgap`.
+airgap = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

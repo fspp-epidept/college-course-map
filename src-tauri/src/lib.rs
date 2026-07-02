@@ -72,8 +72,19 @@ pub fn run() {
             // Load all three digit-level models at startup. Slow (~5-15 s on
             // CPU for ~1.5 GB total) but unavoidable for the spike: the
             // synchronous `start_run` IPC expects the registry to be ready.
-            let registry =
-                inference::load_all_models().map_err(|e| format!("load inference models: {e}"))?;
+            // The airgap flavor bundles models into the installer and loads
+            // them straight from the bundle's resource dir (packaging ADR);
+            // dev/connected builds resolve via `models_root()`.
+            #[cfg(feature = "airgap")]
+            let models_dir = app
+                .path()
+                .resource_dir()
+                .map_err(|e| format!("resolve bundle resource dir: {e}"))?
+                .join("models");
+            #[cfg(not(feature = "airgap"))]
+            let models_dir = inference::models_root()?;
+            let registry = inference::load_all_models(&models_dir)
+                .map_err(|e| format!("load inference models: {e}"))?;
             app.manage(registry);
             // Tracks per-run cancellation flags so `pause_run` can signal an
             // in-flight worker (EPI-37).
