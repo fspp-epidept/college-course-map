@@ -93,6 +93,19 @@ export const commands = {
       else return { status: "error", error: e as any };
     }
   },
+  /**
+   * Export a dataset's courses (joined with one model's cached classifications)
+   * to a CSV the user picks via the native save dialog. Returns `None` when the
+   * user cancels the dialog.
+   */
+  async exportResults(req: ExportRequest): Promise<Result<ExportOutcome | null, string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("export_results", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
   async importCsv(req: ImportRequest): Promise<Result<ImportStarted, string>> {
     try {
       return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
@@ -243,6 +256,15 @@ export type DatasetSummary = {
    */
   importState: string;
   importError: string | null;
+};
+export type ExportOutcome = { path: string; rows: number };
+export type ExportRequest = {
+  datasetId: string;
+  /**
+   * Model whose classifications populate the classification/probability
+   * columns. Rows without a cached result export with those cells empty.
+   */
+  modelId: number;
 };
 export type ImportRequest = {
   path: string;

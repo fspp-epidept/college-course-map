@@ -3,6 +3,7 @@ mod courses;
 mod csv_io;
 mod datasets;
 pub mod db;
+mod export;
 pub mod format;
 mod import;
 pub mod inference;
@@ -28,6 +29,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
         courses::model_id_for_digit_level,
         csv_io::preview_csv,
         datasets::list_datasets,
+        export::export_results,
         import::import_csv,
         metrics::list_metrics,
         runs::get_run,
