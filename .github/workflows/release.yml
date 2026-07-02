@@ -29,7 +29,74 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # Installer builds (Linux/macOS/Windows, unsigned, models fetched from the
-  # published robotastronaut HF repos) attach to the release created above —
-  # tracked as the EPI-24/EPI-31 build-matrix follow-up. Until that lands, a
-  # published release carries source archives only.
+  # Installer builds attach to the release created above. Connected flavor
+  # only: it ships no models (first-run in-app download), so installers are
+  # small and fit GitHub's 2 GiB/asset cap. The airgap flavor
+  # (--config src-tauri/tauri.airgap.conf.json --features airgap) bundles
+  # ~1.8-2.2 GB of models and is blocked on EPI-62 (non-GitHub hosting);
+  # its legs would also need a model-fetch pre-step reading src-tauri/
+  # models.toml (same URL scheme + sha256 verify as models.rs::download_one).
+  #
+  # Unsigned for now. Signing lands as env vars on the tauri-action step,
+  # no restructuring: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) for the updater
+  # (EPI-55), APPLE_CERTIFICATE/APPLE_ID etc. for macOS (EPI-1/21/22).
+  #
+  # macOS runners bill 10x minutes on this repo — this matrix runs on
+  # release events only, never per-PR.
+  build:
+    name: Installers (${{ matrix.platform }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created }}
+    permissions:
+      contents: write # upload assets to the existing release
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      # The tag was created on this workflow's own trigger commit, so the
+      # default checkout ref IS the released commit.
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Canonical Tauri build list — note patchelf/xdg-utils, which the
+      # lint-only list in ci.yml doesn't need.
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf xdg-utils
+
+      # rust-toolchain.toml pins the toolchain; the rustup shim installs it
+      # on first cargo invocation.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          cache-on-failure: true
+
+      - run: pnpm install --frozen-lockfile
+
+      # beforeBuildCommand runs vue-tsc before vite build, but the
+      # auto-imports.d.ts/components.d.ts it needs are gitignored Vite
+      # build products — generate them first (same step as ci.yml).
+      - name: Generate auto-import declarations
+        run: pnpm exec vite build
+
+      # release-please owns tag/release creation; tagName points tauri-action
+      # at that existing release (gated on release_created, so it exists and
+      # is non-draft, matching releaseDraft's default) — it must never create
+      # its own. release-please-action exposes no release-id output, hence
+      # tagName rather than releaseId.
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.release-please.outputs.tag_name }}
