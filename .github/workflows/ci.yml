@@ -2,6 +2,13 @@ name: CI
 
 on:
   pull_request:
+  # Also run on main: caches saved during pull_request runs are scoped to
+  # that PR's merge ref and invisible to sibling PRs, so without a main run
+  # every new PR would compile cold. The post-merge run both seeds the
+  # shared default-branch cache (readable by all PRs) and gives main its
+  # own green/red signal.
+  push:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
