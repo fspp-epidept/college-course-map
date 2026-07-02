@@ -155,52 +155,14 @@ fn seed_courses(conn: &duckdb::Connection, ds1: &str, ds2: &str) -> Result<Vec<S
     Ok(hashes)
 }
 
-/// Three CCM models at F32. Placeholder revisions until #91 lands the real
-/// converted-ONNX HF repos. Returns the 6-digit model id, which the demo run
-/// targets.
+/// Seed the models table from the embedded manifest — the same rows the app
+/// resolves at startup, so demo results reference real pinned models instead
+/// of placeholders. Returns the 6-digit model id, which the demo run targets.
 fn seed_models(conn: &duckdb::Connection) -> Result<i64, String> {
-    let model_six: i64 = conn
-        .query_row(
-            "INSERT INTO models
-                (hf_repo, hf_revision, model_type, precision, display_name)
-             VALUES (?, ?, ?, ?, ?) RETURNING id",
-            params![
-                "annamp/courses-six-digit-roberta-base",
-                "deadbeef000000000000000000000000deadbeef",
-                "6",
-                "f32",
-                "CCM 6-digit (demo)",
-            ],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("insert models (six): {e}"))?;
-    for (repo, ty, label) in [
-        (
-            "annamp/courses-four-digit-roberta-base",
-            "4",
-            "CCM 4-digit (demo)",
-        ),
-        (
-            "annamp/courses-two-digit-roberta-base",
-            "2",
-            "CCM 2-digit (demo)",
-        ),
-    ] {
-        conn.execute(
-            "INSERT INTO models
-                (hf_repo, hf_revision, model_type, precision, display_name)
-             VALUES (?, ?, ?, ?, ?)",
-            params![
-                repo,
-                "deadbeef000000000000000000000000deadbeef",
-                ty,
-                "f32",
-                label,
-            ],
-        )
-        .map_err(|e| format!("insert models ({ty}-digit): {e}"))?;
-    }
-    Ok(model_six)
+    let catalog = crate::manifest::resolve_model_rows(conn, crate::manifest::load()?)?;
+    catalog
+        .model_id(6)
+        .ok_or_else(|| "manifest has no 6-digit model".to_owned())
 }
 
 fn seed_run(

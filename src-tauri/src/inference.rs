@@ -80,14 +80,12 @@ pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedMod
             ..Default::default()
         }))
         .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
-    let pad_token = tokenizer
-        .id_to_token(config.pad_token_id)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "config.json pad_token_id {} not present in tokenizer vocab",
-                config.pad_token_id
-            )
-        })?;
+    let pad_token = tokenizer.id_to_token(config.pad_token_id).ok_or_else(|| {
+        anyhow::anyhow!(
+            "config.json pad_token_id {} not present in tokenizer vocab",
+            config.pad_token_id
+        )
+    })?;
     // BatchLongest = pad to the longest sequence in each batch. For a single
     // input (the `classify` path and the parity fixture), the "batch" has one
     // entry so this is a no-op — outputs stay byte-identical to the un-padded
@@ -293,8 +291,8 @@ pub fn normalize_ccm_code(label: &str, digit_level: u8) -> String {
 #[derive(Deserialize)]
 struct HfConfig {
     id2label: HashMap<String, String>,
-    /// Family-specific pad token id (RoBERTa 1, ModernBERT 50283); drives the
-    /// tokenizer padding setup in [`load_model`].
+    /// Family-specific pad token id (`RoBERTa` 1, `ModernBERT` 50283); drives
+    /// the tokenizer padding setup in [`load_model`].
     pad_token_id: u32,
 }
 
@@ -393,6 +391,57 @@ pub fn load_all_models(root: &Path) -> anyhow::Result<InferenceRegistry> {
         four_digit: load_model(&root.join("four-digit"), 4)?,
         six_digit: load_model(&root.join("six-digit"), 6)?,
     })
+}
+
+/// Lazily-populated holder for the loaded registry, managed as Tauri state.
+///
+/// The connected build boots model-less on first run (files may not be
+/// downloaded yet), so commands can no longer assume models exist — they take
+/// this store and error with "models not loaded" when empty. Loading happens
+/// off the startup path (`models::autoload_if_present` / the `load_models`
+/// command); the registry goes behind an `Arc` so a run worker holds its
+/// clone for the whole run regardless of later store changes.
+#[derive(Debug, Default)]
+pub struct ModelStore {
+    registry: std::sync::RwLock<Option<std::sync::Arc<InferenceRegistry>>>,
+    loading: std::sync::atomic::AtomicBool,
+}
+
+impl ModelStore {
+    pub fn get(&self) -> Option<std::sync::Arc<InferenceRegistry>> {
+        self.registry.read().ok().and_then(|guard| guard.clone())
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.registry
+            .read()
+            .ok()
+            .is_some_and(|guard| guard.is_some())
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn set(&self, registry: InferenceRegistry) -> Result<(), String> {
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| "model store lock poisoned".to_owned())?;
+        *guard = Some(std::sync::Arc::new(registry));
+        Ok(())
+    }
+
+    /// Claim the loading flag. Returns false if a load is already in flight —
+    /// callers must not start a second one.
+    pub(crate) fn try_begin_loading(&self) -> bool {
+        !self.loading.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn end_loading(&self) {
+        self.loading
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]

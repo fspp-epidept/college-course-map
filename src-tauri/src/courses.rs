@@ -269,26 +269,23 @@ fn attach_results(
     Ok(())
 }
 
-/// Convenience IPC: return the seeded `models.id` for a given digit level so
-/// the frontend can request joined results without owning the surrogate id
-/// space. Returns `None` if no row matches.
+/// Convenience IPC: return the manifest-active `models.id` for a digit level
+/// so the frontend can request joined results without owning the surrogate id
+/// space. Resolved through the catalog — never by SQL guessing, which would
+/// happily pick a stale row from an earlier model family.
 #[tauri::command]
 #[specta::specta]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri command arguments are deserialized by value"
 )]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Result is the stable IPC contract; frontend handles the wrapper"
+)]
 pub(crate) fn model_id_for_digit_level(
     digit_level: u8,
-    db: State<'_, AppDb>,
+    catalog: State<'_, crate::manifest::ModelCatalog>,
 ) -> Result<Option<i64>, String> {
-    let conn = db.ro()?;
-    let id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM models WHERE model_type = ? ORDER BY id LIMIT 1",
-            [digit_level.to_string()],
-            |row| row.get(0),
-        )
-        .ok();
-    Ok(id)
+    Ok(catalog.model_id(digit_level))
 }

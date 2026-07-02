@@ -26,7 +26,8 @@ use uuid::Uuid;
 use crate::{
     db::AppDb,
     format::{CourseInput, format_input},
-    inference::{InferenceRegistry, classify_batch},
+    inference::{ModelStore, classify_batch},
+    manifest::ModelCatalog,
 };
 
 /// Cancellation flags for in-flight runs, keyed by run id. A run registers an
@@ -318,12 +319,17 @@ pub(crate) fn start_run(
     req: StartRunRequest,
     app: AppHandle,
     db: State<'_, AppDb>,
-    registry: State<'_, InferenceRegistry>,
+    store: State<'_, ModelStore>,
+    catalog: State<'_, ModelCatalog>,
     runs: State<'_, RunRegistry>,
 ) -> Result<StartRunResponse, String> {
     let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
-    // Fail fast if the requested digit level isn't loaded — caller gets a
-    // synchronous error rather than a "queued then mysteriously failed" run.
+    // Fail fast if models aren't ready — caller gets a synchronous error
+    // rather than a "queued then mysteriously failed" run. The store starts
+    // empty on a connected-build first run (EPI-56) until download + load.
+    let Some(registry) = store.get() else {
+        return Err("models not loaded — download/load them from the Models panel".to_owned());
+    };
     if registry.by_digit_level(req.digit_level).is_none() {
         return Err(format!(
             "no model loaded for digit_level={}",
@@ -351,13 +357,12 @@ pub(crate) fn start_run(
         ));
     }
 
-    let model_id: i64 = conn
-        .query_row(
-            "SELECT id FROM models WHERE model_type = ? ORDER BY id LIMIT 1",
-            params![req.digit_level.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("lookup model row for digit_level {}: {e}", req.digit_level))?;
+    // Resolve the models-table row through the manifest catalog — never by
+    // guessing with SQL, which would happily pick a stale row from an
+    // earlier model family.
+    let model_id: i64 = catalog
+        .model_id(req.digit_level)
+        .ok_or_else(|| format!("manifest has no model for digit_level {}", req.digit_level))?;
 
     // Cap the planned row count by what the dataset actually contains; the
     // progress meter's denominator is therefore honest even when limit
@@ -533,10 +538,13 @@ impl RunTask {
     }
 
     fn run_inner(&self) -> Result<RunOutcome, String> {
-        // Re-acquire the registry inside the worker so we don't have to send
-        // a State across threads (it would carry a borrow). Fresh State<T> is
-        // cheap; manage() puts T inside an Arc.
-        let registry = self.app.state::<InferenceRegistry>();
+        // Clone the registry Arc out of the store once — the worker keeps
+        // this snapshot for the whole run even if the store changes later.
+        let registry = self
+            .app
+            .state::<ModelStore>()
+            .get()
+            .ok_or_else(|| "models not loaded (worker)".to_owned())?;
         let model = registry.by_digit_level(self.digit_level).ok_or_else(|| {
             format!(
                 "no model loaded for digit_level={} (worker)",

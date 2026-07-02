@@ -13,8 +13,8 @@ use course_classifier_lib::inference;
 
 /// (source dir under scripts/models/output, app-facing dest dir). The app's
 /// on-disk layout is family-agnostic (two/four/six-digit); the app-active
-/// family decides which converted outputs land there — ModernBERT per
-/// EPI-56. Mirrors the `app_subdir` mapping in scripts/models/_lib/models.py.
+/// family decides which converted outputs land there — `ModernBERT` per
+/// EPI-56. Mirrors the `app_subdir` mapping in `scripts/models/_lib/models.py`.
 const DIGIT_DIRS: &[(&str, &str)] = &[
     ("two-digit-modernbert", "two-digit"),
     ("four-digit-modernbert", "four-digit"),
