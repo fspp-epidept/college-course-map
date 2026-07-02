@@ -117,8 +117,7 @@ pub fn files_present(root: &Path, entry: &ManifestModel) -> usize {
         .iter()
         .filter(|f| {
             std::fs::metadata(root.join(&entry.app_subdir).join(&f.name))
-                .map(|m| m.len() == f.size)
-                .unwrap_or(false)
+                .is_ok_and(|m| m.len() == f.size)
         })
         .count()
 }
