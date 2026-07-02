@@ -169,6 +169,32 @@ function gotoNext(): void {
   cursorStack.value.push(cursor.value ?? 0);
   cursor.value = last.rowIndex + 1;
 }
+
+// --- CSV export (EPI-15) ---
+// Rust owns the save dialog and streams straight from DuckDB to disk; the
+// resolved path comes back for display. `null` data means the user cancelled.
+
+const exporting = ref(false);
+const exportOutcome = ref<{ path: string; rows: number } | null>(null);
+const exportError = ref<string | null>(null);
+
+async function exportCsv(): Promise<void> {
+  if (modelId.value == null) return;
+  exporting.value = true;
+  exportError.value = null;
+  try {
+    const result = await commands.exportResults({
+      datasetId: datasetId.value,
+      modelId: modelId.value,
+    });
+    if (result.status === "error") throw new Error(result.error);
+    if (result.data) exportOutcome.value = result.data;
+  } catch (e) {
+    exportError.value = (e as Error).message;
+  } finally {
+    exporting.value = false;
+  }
+}
 </script>
 
 <template>
@@ -294,12 +320,33 @@ function gotoNext(): void {
     <section v-if="!isImporting" class="flex flex-col gap-3 min-h-0">
       <div class="flex items-baseline justify-between gap-3">
         <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
-        <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
-          <template v-if="totalRows > 0">
-            {{ pageRows.length.toLocaleString() }} of {{ totalRows.toLocaleString() }}
-          </template>
-        </span>
+        <div class="flex items-baseline gap-3">
+          <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
+            <template v-if="totalRows > 0">
+              {{ pageRows.length.toLocaleString() }} of {{ totalRows.toLocaleString() }}
+            </template>
+          </span>
+          <UButton
+            variant="outline"
+            color="neutral"
+            icon="i-lucide-download"
+            size="xs"
+            :loading="exporting"
+            :disabled="modelId == null || isRunning || totalRows === 0"
+            @click="exportCsv"
+          >
+            Export CSV
+          </UButton>
+        </div>
       </div>
+
+      <p v-if="exportError" class="text-sm text-(--ui-color-error-500)">
+        Export failed: {{ exportError }}
+      </p>
+      <p v-else-if="exportOutcome" class="text-xs text-(--ui-text-muted)">
+        Exported {{ exportOutcome.rows.toLocaleString() }} rows to
+        <code>{{ exportOutcome.path }}</code>
+      </p>
 
       <p v-if="coursesError" class="text-sm text-(--ui-color-error-500)">
         Failed to load courses: {{ coursesErr?.message }}

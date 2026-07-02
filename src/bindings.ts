@@ -4,354 +4,471 @@
 
 /** user-defined commands **/
 
-
 export const commands = {
-/**
- * List user-supplied themes (built-in themes are registered on the frontend).
- * Unparseable or invalid files are skipped, not fatal, so one bad file can't hide
- * the rest.
- */
-async listThemes() : Promise<Result<ThemeSummary[], string>> {
+  /**
+   * List user-supplied themes (built-in themes are registered on the frontend).
+   * Unparseable or invalid files are skipped, not fatal, so one bad file can't hide
+   * the rest.
+   */
+  async listThemes(): Promise<Result<ThemeSummary[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_themes") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Read one user theme by id.
- */
-async readTheme(id: string) : Promise<Result<Theme, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("list_themes") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Read one user theme by id.
+   */
+  async readTheme(id: string): Promise<Result<Theme, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("read_theme", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Read settings, creating a default file on first run.
- */
-async readSettings() : Promise<Result<Settings, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("read_theme", { id }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Read settings, creating a default file on first run.
+   */
+  async readSettings(): Promise<Result<Settings, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("read_settings") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Persist settings. Validates `activeTheme` is a well-formed id.
- */
-async writeSettings(settings: Settings) : Promise<Result<null, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("read_settings") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Persist settings. Validates `activeTheme` is a well-formed id.
+   */
+  async writeSettings(settings: Settings): Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("write_settings", { settings }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listCoursesWithResults(req: ListCoursesRequest) : Promise<Result<CoursePage, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("write_settings", { settings }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listCoursesWithResults(req: ListCoursesRequest): Promise<Result<CoursePage, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_courses_with_results", { req }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Convenience IPC: return the seeded `models.id` for a given digit level so
- * the frontend can request joined results without owning the surrogate id
- * space. Returns `None` if no row matches.
- */
-async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("list_courses_with_results", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Convenience IPC: return the seeded `models.id` for a given digit level so
+   * the frontend can request joined results without owning the surrogate id
+   * space. Returns `None` if no row matches.
+   */
+  async modelIdForDigitLevel(digitLevel: number): Promise<Result<number | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("model_id_for_digit_level", { digitLevel }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Read up to [`SAMPLE_ROW_LIMIT`] rows from the CSV at `path`, returning the
- * headers + sample rows + file metadata. Never persists anything — the only
- * side effect is opening the file for reading.
- */
-async previewCsv(path: string) : Promise<Result<CsvPreview, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("model_id_for_digit_level", { digitLevel }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Read up to [`SAMPLE_ROW_LIMIT`] rows from the CSV at `path`, returning the
+   * headers + sample rows + file metadata. Never persists anything — the only
+   * side effect is opening the file for reading.
+   */
+  async previewCsv(path: string): Promise<Result<CsvPreview, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("preview_csv", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listDatasets() : Promise<Result<DatasetSummary[], string>> {
+      return { status: "ok", data: await TAURI_INVOKE("preview_csv", { path }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listDatasets(): Promise<Result<DatasetSummary[], string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_datasets") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async importCsv(req: ImportRequest) : Promise<Result<ImportStarted, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("list_datasets") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Export a dataset's courses (joined with one model's cached classifications)
+   * to a CSV the user picks via the native save dialog. Returns `None` when the
+   * user cancels the dialog.
+   */
+  async exportResults(req: ExportRequest): Promise<Result<ExportOutcome | null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listMetrics() : Promise<Result<AppMetrics, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("export_results", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async importCsv(req: ImportRequest): Promise<Result<ImportStarted, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_metrics") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async getRun(id: string) : Promise<Result<RunDetail, string>> {
+      return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listMetrics(): Promise<Result<AppMetrics, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("get_run", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listRuns() : Promise<Result<RunSummary[], string>> {
+      return { status: "ok", data: await TAURI_INVOKE("list_metrics") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async getRun(id: string): Promise<Result<RunDetail, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_runs") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Request a graceful pause of an in-flight run. The worker stops at its next
- * batch boundary — after the current batch's results and progress are flushed
- * in the usual transaction — and finalizes the run as `interrupted` (resumable
- * later; see EPI-38/EPI-39). Returns `true` if a running worker was signalled,
- * `false` if the run wasn't active (already terminal, or unknown id).
- */
-async pauseRun(runId: string) : Promise<boolean> {
+      return { status: "ok", data: await TAURI_INVOKE("get_run", { id }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  async listRuns(): Promise<Result<RunSummary[], string>> {
+    try {
+      return { status: "ok", data: await TAURI_INVOKE("list_runs") };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+  /**
+   * Request a graceful pause of an in-flight run. The worker stops at its next
+   * batch boundary — after the current batch's results and progress are flushed
+   * in the usual transaction — and finalizes the run as `interrupted` (resumable
+   * later; see EPI-38/EPI-39). Returns `true` if a running worker was signalled,
+   * `false` if the run wasn't active (already terminal, or unknown id).
+   */
+  async pauseRun(runId: string): Promise<boolean> {
     return await TAURI_INVOKE("pause_run", { runId });
-},
-async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>> {
+  },
+  async startRun(req: StartRunRequest): Promise<Result<StartRunResponse, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-}
-}
+      return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      else return { status: "error", error: e as any };
+    }
+  },
+};
 
 /** user-defined events **/
 
-
-
 /** user-defined constants **/
-
-
 
 /** user-defined types **/
 
-export type AppMetrics = { datasets: number; courses: number; runs: number; completedRuns: number; 
-/**
- * Distinct `(model_id, content_hash)` rows in `inference_results`.
- */
-classifications: number; 
-/**
- * Sum of `runs.cache_hits` divided by sum of `runs.rows_processed`, both
- * across all runs. `None` when no rows have been processed yet (avoids a
- * noisy 0% on a fresh DB).
- */
-cacheHitRate: number | null }
+export type AppMetrics = {
+  datasets: number;
+  courses: number;
+  runs: number;
+  completedRuns: number;
+  /**
+   * Distinct `(model_id, content_hash)` rows in `inference_results`.
+   */
+  classifications: number;
+  /**
+   * Sum of `runs.cache_hits` divided by sum of `runs.rows_processed`, both
+   * across all runs. `None` when no rows have been processed yet (avoids a
+   * noisy 0% on a fresh DB).
+   */
+  cacheHitRate: number | null;
+};
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.
  */
-export type ColorRamp = { "50"?: string | null; "100"?: string | null; "200"?: string | null; "300"?: string | null; "400"?: string | null; "500"?: string | null; "600"?: string | null; "700"?: string | null; "800"?: string | null; "900"?: string | null; "950"?: string | null }
+export type ColorRamp = {
+  "50"?: string | null;
+  "100"?: string | null;
+  "200"?: string | null;
+  "300"?: string | null;
+  "400"?: string | null;
+  "500"?: string | null;
+  "600"?: string | null;
+  "700"?: string | null;
+  "800"?: string | null;
+  "900"?: string | null;
+  "950"?: string | null;
+};
 /**
  * The role color ramps (`--ui-color-<role>-<shade>`).
  */
-export type ColorRamps = { primary?: ColorRamp | null; secondary?: ColorRamp | null; success?: ColorRamp | null; info?: ColorRamp | null; warning?: ColorRamp | null; error?: ColorRamp | null; neutral?: ColorRamp | null }
+export type ColorRamps = {
+  primary?: ColorRamp | null;
+  secondary?: ColorRamp | null;
+  success?: ColorRamp | null;
+  info?: ColorRamp | null;
+  warning?: ColorRamp | null;
+  error?: ColorRamp | null;
+  neutral?: ColorRamp | null;
+};
 /**
  * `light` / `dark` — drives `VueUse` `useColorMode().preference` on the frontend.
  */
-export type ColorScheme = "light" | "dark"
-export type CoursePage = { rows: CourseRow[]; total: number }
-export type CourseRow = { id: number; rowIndex: number; subjectCode: string | null; catalogNumber: string | null; courseTitle: string | null; contentHash: string; 
-/**
- * Canonical CCM code from `inference_results` for the requested model;
- * `None` when there's no result yet (or no `model_id` was requested).
- */
-classification: string | null; 
-/**
- * Softmax confidence at argmax, `(0, 1]`. See `docs/model-confidence.md`.
- */
-probability: number | null; 
-/**
- * Official CCM title for the code, joined from `ccm_taxonomy`. For
- * 4-digit codes (no published taxonomy exists) and 6-digit codes missing
- * from the table, this is the 2-digit parent's title — `ccm_title_level`
- * says which level matched.
- */
-ccmTitle: string | null; ccmTitleShort: string | null; 
-/**
- * Only 6-digit taxonomy rows carry descriptions.
- */
-ccmDescription: string | null; 
-/**
- * Digit level the title came from (the model's own level, or 2 for the
- * parent fallback); `None` when no taxonomy row matched.
- */
-ccmTitleLevel: number | null }
-export type CsvPreview = { headers: string[]; sampleRows: string[][]; totalColumns: number; sizeBytes: number }
+export type ColorScheme = "light" | "dark";
+export type CoursePage = { rows: CourseRow[]; total: number };
+export type CourseRow = {
+  id: number;
+  rowIndex: number;
+  subjectCode: string | null;
+  catalogNumber: string | null;
+  courseTitle: string | null;
+  contentHash: string;
+  /**
+   * Canonical CCM code from `inference_results` for the requested model;
+   * `None` when there's no result yet (or no `model_id` was requested).
+   */
+  classification: string | null;
+  /**
+   * Softmax confidence at argmax, `(0, 1]`. See `docs/model-confidence.md`.
+   */
+  probability: number | null;
+  /**
+   * Official CCM title for the code, joined from `ccm_taxonomy`. For
+   * 4-digit codes (no published taxonomy exists) and 6-digit codes missing
+   * from the table, this is the 2-digit parent's title — `ccm_title_level`
+   * says which level matched.
+   */
+  ccmTitle: string | null;
+  ccmTitleShort: string | null;
+  /**
+   * Only 6-digit taxonomy rows carry descriptions.
+   */
+  ccmDescription: string | null;
+  /**
+   * Digit level the title came from (the model's own level, or 2 for the
+   * parent fallback); `None` when no taxonomy row matched.
+   */
+  ccmTitleLevel: number | null;
+};
+export type CsvPreview = {
+  headers: string[];
+  sampleRows: string[][];
+  totalColumns: number;
+  sizeBytes: number;
+};
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
  * integration just yet — the frontend treats them as opaque sortable strings.
  */
-export type DatasetSummary = { id: string; title: string; sourceKind: string; importedAt: string; 
-/**
- * Read straight from `datasets.row_count`, which the import worker keeps
- * up to date (live ticks during streaming, finalized in `mark_ready`).
- * Datasets are otherwise immutable, so there's no fallback `COUNT(*)`.
- */
-rowCount: number; 
-/**
- * `importing` while the background worker is still streaming rows in,
- * `ready` when complete, `failed` when the worker errored.
- */
-importState: string; importError: string | null }
-export type ImportRequest = { path: string; 
-/**
- * Falls back to the filename when null/blank.
- */
-displayName: string | null; 
-/**
- * Optional row cap; `None` means import every row.
- */
-limit: number | null }
+export type DatasetSummary = {
+  id: string;
+  title: string;
+  sourceKind: string;
+  importedAt: string;
+  /**
+   * Read straight from `datasets.row_count`, which the import worker keeps
+   * up to date (live ticks during streaming, finalized in `mark_ready`).
+   * Datasets are otherwise immutable, so there's no fallback `COUNT(*)`.
+   */
+  rowCount: number;
+  /**
+   * `importing` while the background worker is still streaming rows in,
+   * `ready` when complete, `failed` when the worker errored.
+   */
+  importState: string;
+  importError: string | null;
+};
+export type ExportOutcome = { path: string; rows: number };
+export type ExportRequest = {
+  datasetId: string;
+  /**
+   * Model whose classifications populate the classification/probability
+   * columns. Rows without a cached result export with those cells empty.
+   */
+  modelId: number;
+};
+export type ImportRequest = {
+  path: string;
+  /**
+   * Falls back to the filename when null/blank.
+   */
+  displayName: string | null;
+  /**
+   * Optional row cap; `None` means import every row.
+   */
+  limit: number | null;
+};
 /**
  * Response from `import_csv`: the dataset has been queued and is already
  * streaming rows in. The frontend polls `list_datasets` from here.
  */
-export type ImportStarted = { datasetId: string; sourceFileId: number }
-export type ListCoursesRequest = { datasetId: string; 
-/**
- * Optional model id for the joined classification + probability columns.
- * `None` means the joined columns come back as `null`.
- */
-modelId: number | null; 
-/**
- * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
- * mean "from the start". The frontend hands back the row index of the
- * last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
- * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
- * `(dataset_id, row_index)` index and scans the whole partition;
- * the range predicate lets the index drive the scan.
- */
-cursor: number | null; limit: number }
+export type ImportStarted = { datasetId: string; sourceFileId: number };
+export type ListCoursesRequest = {
+  datasetId: string;
+  /**
+   * Optional model id for the joined classification + probability columns.
+   * `None` means the joined columns come back as `null`.
+   */
+  modelId: number | null;
+  /**
+   * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
+   * mean "from the start". The frontend hands back the row index of the
+   * last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
+   * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
+   * `(dataset_id, row_index)` index and scans the whole partition;
+   * the range predicate lets the index drive the scan.
+   */
+  cursor: number | null;
+  limit: number;
+};
 /**
  * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
  * model digit level (resolved from the JSON `model_ids` array) and the
  * `unique_inputs_done` + `error_message` fields the summary view drops.
  */
-export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null }
+export type RunDetail = {
+  id: string;
+  datasetId: string;
+  datasetTitle: string;
+  description: string | null;
+  state: string;
+  digitLevel: number | null;
+  rowsTotal: number | null;
+  rowsProcessed: number | null;
+  uniqueInputsDone: number | null;
+  cacheHits: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastProgressAt: string | null;
+  errorMessage: string | null;
+  executionProvider: string | null;
+};
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
  */
-export type RunSummary = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null }
+export type RunSummary = {
+  id: string;
+  datasetId: string;
+  datasetTitle: string;
+  description: string | null;
+  state: string;
+  rowsTotal: number | null;
+  rowsProcessed: number | null;
+  cacheHits: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastProgressAt: string | null;
+};
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).
  */
-export type SemanticTokens = { bg?: string | null; "bg-muted"?: string | null; "bg-elevated"?: string | null; "bg-accented"?: string | null; "bg-inverted"?: string | null; text?: string | null; "text-muted"?: string | null; "text-dimmed"?: string | null; "text-toned"?: string | null; "text-highlighted"?: string | null; "text-inverted"?: string | null; border?: string | null; "border-muted"?: string | null; "border-accented"?: string | null; "border-inverted"?: string | null; primary?: string | null; secondary?: string | null; success?: string | null; info?: string | null; warning?: string | null; error?: string | null; radius?: string | null }
+export type SemanticTokens = {
+  bg?: string | null;
+  "bg-muted"?: string | null;
+  "bg-elevated"?: string | null;
+  "bg-accented"?: string | null;
+  "bg-inverted"?: string | null;
+  text?: string | null;
+  "text-muted"?: string | null;
+  "text-dimmed"?: string | null;
+  "text-toned"?: string | null;
+  "text-highlighted"?: string | null;
+  "text-inverted"?: string | null;
+  border?: string | null;
+  "border-muted"?: string | null;
+  "border-accented"?: string | null;
+  "border-inverted"?: string | null;
+  primary?: string | null;
+  secondary?: string | null;
+  success?: string | null;
+  info?: string | null;
+  warning?: string | null;
+  error?: string | null;
+  radius?: string | null;
+};
 /**
  * General application settings. `activeTheme` references a theme by id; design
  * tokens themselves live in `themes/*.json`, not here.
  */
-export type Settings = { activeTheme: string }
-export type StartRunRequest = { datasetId: string; 
-/**
- * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
- * spike avoids forcing the frontend to know surrogate model ids.
- */
-digitLevel: number; limit: number | null }
+export type Settings = { activeTheme: string };
+export type StartRunRequest = {
+  datasetId: string;
+  /**
+   * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
+   * spike avoids forcing the frontend to know surrogate model ids.
+   */
+  digitLevel: number;
+  limit: number | null;
+};
 /**
  * Response from `start_run`: the run has been queued and is already updating
  * its own row. The frontend polls `get_run(run_id)` from here.
  */
-export type StartRunResponse = { runId: string; rowsTotal: number }
+export type StartRunResponse = { runId: string; rowsTotal: number };
 /**
  * A full theme. `id` is the filename stem (set after load), never read from the
  * file body — `deny_unknown_fields` rejects an `id` key in the JSON.
  */
-export type Theme = { name: string; colorScheme: ColorScheme; font?: string | null; tokens?: SemanticTokens; colors?: ColorRamps }
+export type Theme = {
+  name: string;
+  colorScheme: ColorScheme;
+  font?: string | null;
+  tokens?: SemanticTokens;
+  colors?: ColorRamps;
+};
 /**
  * Lightweight listing entry (no token payload) for the theme registry.
  */
-export type ThemeSummary = { id: string; name: string; colorScheme: ColorScheme }
+export type ThemeSummary = { id: string; name: string; colorScheme: ColorScheme };
 
 /** tauri-specta globals **/
 
-import {
-	invoke as TAURI_INVOKE,
-	Channel as TAURI_CHANNEL,
-} from "@tauri-apps/api/core";
+import { invoke as TAURI_INVOKE, Channel as TAURI_CHANNEL } from "@tauri-apps/api/core";
 import * as TAURI_API_EVENT from "@tauri-apps/api/event";
 import { type WebviewWindow as __WebviewWindow__ } from "@tauri-apps/api/webviewWindow";
 
 type __EventObj__<T> = {
-	listen: (
-		cb: TAURI_API_EVENT.EventCallback<T>,
-	) => ReturnType<typeof TAURI_API_EVENT.listen<T>>;
-	once: (
-		cb: TAURI_API_EVENT.EventCallback<T>,
-	) => ReturnType<typeof TAURI_API_EVENT.once<T>>;
-	emit: null extends T
-		? (payload?: T) => ReturnType<typeof TAURI_API_EVENT.emit>
-		: (payload: T) => ReturnType<typeof TAURI_API_EVENT.emit>;
+  listen: (cb: TAURI_API_EVENT.EventCallback<T>) => ReturnType<typeof TAURI_API_EVENT.listen<T>>;
+  once: (cb: TAURI_API_EVENT.EventCallback<T>) => ReturnType<typeof TAURI_API_EVENT.once<T>>;
+  emit: null extends T
+    ? (payload?: T) => ReturnType<typeof TAURI_API_EVENT.emit>
+    : (payload: T) => ReturnType<typeof TAURI_API_EVENT.emit>;
 };
 
-export type Result<T, E> =
-	| { status: "ok"; data: T }
-	| { status: "error"; error: E };
+export type Result<T, E> = { status: "ok"; data: T } | { status: "error"; error: E };
 
-function __makeEvents__<T extends Record<string, any>>(
-	mappings: Record<keyof T, string>,
-) {
-	return new Proxy(
-		{} as unknown as {
-			[K in keyof T]: __EventObj__<T[K]> & {
-				(handle: __WebviewWindow__): __EventObj__<T[K]>;
-			};
-		},
-		{
-			get: (_, event) => {
-				const name = mappings[event as keyof T];
+function __makeEvents__<T extends Record<string, any>>(mappings: Record<keyof T, string>) {
+  return new Proxy(
+    {} as unknown as {
+      [K in keyof T]: __EventObj__<T[K]> & {
+        (handle: __WebviewWindow__): __EventObj__<T[K]>;
+      };
+    },
+    {
+      get: (_, event) => {
+        const name = mappings[event as keyof T];
 
-				return new Proxy((() => {}) as any, {
-					apply: (_, __, [window]: [__WebviewWindow__]) => ({
-						listen: (arg: any) => window.listen(name, arg),
-						once: (arg: any) => window.once(name, arg),
-						emit: (arg: any) => window.emit(name, arg),
-					}),
-					get: (_, command: keyof __EventObj__<any>) => {
-						switch (command) {
-							case "listen":
-								return (arg: any) => TAURI_API_EVENT.listen(name, arg);
-							case "once":
-								return (arg: any) => TAURI_API_EVENT.once(name, arg);
-							case "emit":
-								return (arg: any) => TAURI_API_EVENT.emit(name, arg);
-						}
-					},
-				});
-			},
-		},
-	);
+        return new Proxy((() => {}) as any, {
+          apply: (_, __, [window]: [__WebviewWindow__]) => ({
+            listen: (arg: any) => window.listen(name, arg),
+            once: (arg: any) => window.once(name, arg),
+            emit: (arg: any) => window.emit(name, arg),
+          }),
+          get: (_, command: keyof __EventObj__<any>) => {
+            switch (command) {
+              case "listen":
+                return (arg: any) => TAURI_API_EVENT.listen(name, arg);
+              case "once":
+                return (arg: any) => TAURI_API_EVENT.once(name, arg);
+              case "emit":
+                return (arg: any) => TAURI_API_EVENT.emit(name, arg);
+            }
+          },
+        });
+      },
+    },
+  );
 }

@@ -336,7 +336,10 @@ impl InferenceRegistry {
 const PRODUCT_DIR: &str = "college-course-map";
 const MODELS_SUBDIR: &str = "models";
 
-/// Resolve the on-disk model directory.
+/// Resolve the on-disk model directory for **non-airgap** (dev/connected)
+/// runs. The airgap build never calls this — its models live in the bundle's
+/// `resource_dir` and `lib.rs` resolves that at setup (see the `airgap`
+/// cargo feature).
 ///
 /// Resolution order:
 /// 1. `COURSE_CLASSIFIER_MODELS_DIR` env var if set — explicit override for
@@ -345,9 +348,6 @@ const MODELS_SUBDIR: &str = "models";
 /// 2. `<data>/college-course-map/models/` — the standard location, portable
 ///    across machines via a copy of the data dir. This is what
 ///    `task models:install` populates.
-///
-/// The bundled-resource lookup from `tauri::resource_dir()` lands when #52
-/// wires up the build-time model embed; until then this is the only path.
 pub fn models_root() -> Result<PathBuf, String> {
     if let Ok(env) = std::env::var("COURSE_CLASSIFIER_MODELS_DIR") {
         return Ok(PathBuf::from(env));
@@ -357,11 +357,10 @@ pub fn models_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "no platform data directory available".to_owned())
 }
 
-/// Load all three digit-level models from the resolved model dir. Slow (each
-/// model is ~500 MB); call once at startup. Surfaces an actionable error if
-/// the directory is missing — `task models:install` is the install path.
-pub fn load_all_models() -> anyhow::Result<InferenceRegistry> {
-    let root = models_root().map_err(|e| anyhow::anyhow!(e))?;
+/// Load all three digit-level models from `root`. Slow (each model is
+/// ~500 MB); call once at startup. The caller resolves `root` per build
+/// flavor (`resource_dir` for airgap, [`models_root`] otherwise).
+pub fn load_all_models(root: &Path) -> anyhow::Result<InferenceRegistry> {
     if !root.exists() {
         anyhow::bail!(
             "models directory missing: {} — run `task models:install` to copy \

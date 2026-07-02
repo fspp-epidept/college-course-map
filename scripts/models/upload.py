@@ -1,11 +1,10 @@
 """Upload converted ONNX models to Hugging Face.
 
-Three repos, one per model, all under $HF_USERNAME's namespace:
-  {HF_USERNAME}/courses-two-digit-roberta-base-onnx
-  {HF_USERNAME}/courses-four-digit-roberta-base-onnx
-  {HF_USERNAME}/courses-six-digit-roberta-base-onnx
+One repo per model spec, all under $HF_USERNAME's namespace, named by each
+spec's `onnx_repo_slug` (e.g. courses-two-digit-roberta-base-onnx,
+courses-two-digit-modernbert-base-onnx).
 
-Plus an HF Collection grouping all three for discoverability, mirroring
+Plus an HF Collection grouping them for discoverability, mirroring
 annamp's pattern.
 
 Each repo gets every file in `output/<size>/` plus a generated README.md.
@@ -24,15 +23,16 @@ from _lib.models import MODELS, ModelSpec
 HERE = Path(__file__).parent
 OUTPUT_ROOT = HERE / "output"
 
-# Files optimum-cli is expected to have produced. Pre-flight check before upload.
+# Files optimum-cli is expected to have produced, across tokenizer families.
+# RoBERTa exports also emit vocab.json/merges.txt; ModernBERT's fast tokenizer
+# doesn't. Extras still upload (upload_folder pushes the whole dir) — this
+# pre-flight only guards the files every family must have.
 EXPECTED_FILES = {
     "model.onnx",
     "config.json",
     "tokenizer.json",
     "tokenizer_config.json",
     "special_tokens_map.json",
-    "vocab.json",
-    "merges.txt",
 }
 
 COLLECTION_TITLE = "Course classifiers (ONNX)"
@@ -45,7 +45,7 @@ COLLECTION_DESCRIPTION = (
 
 
 def repo_id_for(spec: ModelSpec, username: str) -> str:
-    return f"{username}/courses-{spec.output_subdir}-roberta-base-onnx"
+    return f"{username}/{spec.onnx_repo_slug}"
 
 
 def render_model_card(spec: ModelSpec) -> str:

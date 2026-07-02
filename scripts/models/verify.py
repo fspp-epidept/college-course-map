@@ -18,7 +18,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from _lib.format import CourseInput, format_input
 from _lib.inference import load_session, predict_batch
-from _lib.models import MODELS, ModelSpec
+from _lib.models import APP_ACTIVE_SUBDIRS, MODELS, ModelSpec
 from _lib.reporting import render_parity_report
 
 HERE = Path(__file__).parent
@@ -81,14 +81,16 @@ def verify_one(
             top3_matches += 1
 
         # Record per-input ONNX outputs so the Rust spike can assert byte-identical
-        # behaviour from its own ORT session against this fixture.
-        per_input.append({
-            "model_subdir": spec.output_subdir,
-            "input": text,
-            "argmax": int(ort_logits.argmax()),
-            "top3": [int(x) for x in ort_logits.argsort()[-3:][::-1].tolist()],
-            "logit_argmax_value": float(ort_logits.max()),
-        })
+        # behaviour from its own ORT session against this fixture. App-active
+        # subdirs only: check_parity.rs bails on subdirs the app doesn't ship.
+        if spec.output_subdir in APP_ACTIVE_SUBDIRS:
+            per_input.append({
+                "model_subdir": spec.output_subdir,
+                "input": text,
+                "argmax": int(ort_logits.argmax()),
+                "top3": [int(x) for x in ort_logits.argsort()[-3:][::-1].tolist()],
+                "logit_argmax_value": float(ort_logits.max()),
+            })
 
     n = len(inputs)
     argmax_agree = argmax_matches / n
