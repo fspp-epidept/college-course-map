@@ -6,10 +6,6 @@ on:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
-permissions:
-  contents: write       # commit version bump, push tags, create GitHub Releases
-  pull-requests: write  # open / update the release PR
-
 jobs:
   release-please:
     name: Release PR / tag
@@ -18,10 +14,18 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      # RELEASE_PLEASE_TOKEN is a fine-grained PAT (Contents + Pull requests
+      # RW on this repo), NOT the workflow GITHUB_TOKEN — deliberately, for
+      # two reasons: the org policy blocks GITHUB_TOKEN from creating PRs,
+      # and PRs created by GITHUB_TOKEN would never trigger the pr-title/CI
+      # workflows (GitHub's recursion guard), leaving the release PR unable
+      # to satisfy required status checks. On token expiry this job fails
+      # with a 401 until a fresh PAT is stored:
+      #   gh secret set RELEASE_PLEASE_TOKEN --repo fspp-epidept/college-course-map
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
