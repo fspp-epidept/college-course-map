@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: write       # commit version bump, push tags, create GitHub Releases
+  pull-requests: write  # open / update the release PR
+
+jobs:
+  release-please:
+    name: Release PR / tag
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Installer builds (Linux/macOS/Windows, unsigned, models fetched from the
+  # published robotastronaut HF repos) attach to the release created above —
+  # tracked as the EPI-24/EPI-31 build-matrix follow-up. Until that lands, a
+  # published release carries source archives only.

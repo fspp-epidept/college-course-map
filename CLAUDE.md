@@ -25,7 +25,14 @@ Knowledge and decisions live in the **basic-memory vault** under the `epi/` tree
 - **File issues into the right project.** New work attaches to one of the existing Linear projects; pick the one that fits (don't spawn ad-hoc projects). Set priority/state in Linear — it owns task state.
 - **New blocker, feature idea, exploration, or spike → file a Linear issue** with full context: what triggered it, what's already known, what a successful resolution looks like. Don't leave these as TODO comments in code or hope the conversation will be remembered.
 - **Issue content is the working spec.** When fleshing out an issue, copy in the relevant schema fragments, IPC contract details, code-path pointers, and ground rules so it stands alone.
-- **Closing the loop.** Reference the issue id in the PR/commit (e.g. `EPI-7`) so Linear's GitHub integration links and transitions it. If a single PR resolves multiple issues, list them all.
+- **Closing the loop.** Reference the issue id in the PR/commit (e.g. `EPI-7`) so Linear's GitHub integration links and transitions it. If a single PR resolves multiple issues, list them all. The integration does **not** reliably auto-transition issue state on merge — flip the Linear state manually after merging.
+
+**Releases & commit convention (EPI-2):**
+
+- `main` is protected: PR-only, **squash-merge only**. The squash commit's subject is the PR title, so **PR titles must be Conventional Commits** (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`, `ci:`, `perf:`) — enforced by the `pr-title.yml` workflow. Local commit messages on branches are squashed away; no commit-msg hook exists on purpose.
+- **release-please** (`release.yml`, on push to main) maintains a rolling release PR from those titles. Merging it tags `vX.Y.Z`, publishes the GitHub Release, and bumps `package.json` + `src-tauri/tauri.conf.json`. **`src-tauri/Cargo.toml`'s version is intentionally not release-managed** — the crate is never published and `tauri.conf.json` is what the bundler stamps on installers; leaving Cargo.toml static avoids Cargo.lock churn in release PRs.
+- Pre-1.0 versioning: `feat` bumps minor, `fix`/others bump patch, breaking changes bump minor (`bump-minor-pre-major`).
+- `src/bindings.ts` is committed **exactly as tauri-specta emits it** — Biome neither lints nor formats it — so `cargo test` regenerating it never dirties the tree.
 
 **Where things land:**
 
