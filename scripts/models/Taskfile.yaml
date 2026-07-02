@@ -37,6 +37,9 @@ tasks:
       - output/two-digit/model.onnx
       - output/four-digit/model.onnx
       - output/six-digit/model.onnx
+      - output/two-digit-modernbert/model.onnx
+      - output/four-digit-modernbert/model.onnx
+      - output/six-digit-modernbert/model.onnx
       - output/format_spec.json
 
   verify:
@@ -50,6 +53,9 @@ tasks:
       - output/two-digit/model.onnx
       - output/four-digit/model.onnx
       - output/six-digit/model.onnx
+      - output/two-digit-modernbert/model.onnx
+      - output/four-digit-modernbert/model.onnx
+      - output/six-digit-modernbert/model.onnx
 
   validate:
     desc: 'Validate against panel data (default: 10k sample)'
