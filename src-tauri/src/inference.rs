@@ -62,6 +62,14 @@ pub struct Classification {
 /// Build a [`LoadedModel`] from a directory containing `model.onnx`,
 /// `tokenizer.json`, and `config.json`.
 pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedModel> {
+    // Parse config.json first: it carries id2label AND pad_token_id, which
+    // the padding setup below needs. The pad token is family-specific
+    // (RoBERTa: 1/"<pad>", ModernBERT: 50283/"[PAD]") — deriving it from the
+    // model's own config instead of hardcoding keeps the loader correct for
+    // whichever family the manifest pins.
+    let config = load_hf_config(&model_dir.join("config.json"))?;
+    let id2label = id2label_table(&config)?;
+
     let mut tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("load tokenizer: {e}"))?;
     // Match the Python pipeline: `truncation=True, max_length=512`.
@@ -72,22 +80,27 @@ pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedMod
             ..Default::default()
         }))
         .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
+    let pad_token = tokenizer
+        .id_to_token(config.pad_token_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "config.json pad_token_id {} not present in tokenizer vocab",
+                config.pad_token_id
+            )
+        })?;
     // BatchLongest = pad to the longest sequence in each batch. For a single
     // input (the `classify` path and the parity fixture), the "batch" has one
     // entry so this is a no-op — outputs stay byte-identical to the un-padded
     // path. For real batches (the run worker), this gives encode_batch uniform
-    // [n, max_len] shapes ready to flatten into a tensor. pad_id/pad_token
-    // match the RoBERTa base tokenizer the annamp models are derived from.
+    // [n, max_len] shapes ready to flatten into a tensor.
     tokenizer.with_padding(Some(PaddingParams {
         strategy: PaddingStrategy::BatchLongest,
         direction: PaddingDirection::Right,
         pad_to_multiple_of: None,
-        pad_id: 1,
+        pad_id: config.pad_token_id,
         pad_type_id: 0,
-        pad_token: "<pad>".to_owned(),
+        pad_token,
     }));
-
-    let id2label = load_id2label(&model_dir.join("config.json"))?;
 
     // ort's `Error` carries a builder phantom that's not `Send + Sync`, so we
     // can't `?` it into `anyhow::Error`; stringify at the boundary.
@@ -280,15 +293,21 @@ pub fn normalize_ccm_code(label: &str, digit_level: u8) -> String {
 #[derive(Deserialize)]
 struct HfConfig {
     id2label: HashMap<String, String>,
+    /// Family-specific pad token id (RoBERTa 1, ModernBERT 50283); drives the
+    /// tokenizer padding setup in [`load_model`].
+    pad_token_id: u32,
 }
 
-/// Parse `config.json` `id2label` (string-keyed JSON object) into a Vec where
-/// the index is the class id. Indices missing from the map error loudly rather
-/// than silently leaving empty slots.
-fn load_id2label(config_path: &Path) -> anyhow::Result<Vec<String>> {
+fn load_hf_config(config_path: &Path) -> anyhow::Result<HfConfig> {
     let raw = std::fs::read_to_string(config_path)
         .map_err(|e| anyhow::anyhow!("read {}: {e}", config_path.display()))?;
-    let cfg: HfConfig = serde_json::from_str(&raw)?;
+    serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("parse {}: {e}", config_path.display()))
+}
+
+/// Convert `id2label` (string-keyed JSON object) into a Vec where the index is
+/// the class id. Indices missing from the map error loudly rather than
+/// silently leaving empty slots.
+fn id2label_table(cfg: &HfConfig) -> anyhow::Result<Vec<String>> {
     let n = cfg.id2label.len();
     let mut out = vec![String::new(); n];
     for (k, v) in &cfg.id2label {

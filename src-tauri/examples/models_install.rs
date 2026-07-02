@@ -11,7 +11,15 @@ use std::path::{Path, PathBuf};
 
 use course_classifier_lib::inference;
 
-const DIGIT_DIRS: &[&str] = &["two-digit", "four-digit", "six-digit"];
+/// (source dir under scripts/models/output, app-facing dest dir). The app's
+/// on-disk layout is family-agnostic (two/four/six-digit); the app-active
+/// family decides which converted outputs land there — ModernBERT per
+/// EPI-56. Mirrors the `app_subdir` mapping in scripts/models/_lib/models.py.
+const DIGIT_DIRS: &[(&str, &str)] = &[
+    ("two-digit-modernbert", "two-digit"),
+    ("four-digit-modernbert", "four-digit"),
+    ("six-digit-modernbert", "six-digit"),
+];
 
 fn main() -> anyhow::Result<()> {
     let dest_root = inference::models_root().map_err(|e| anyhow::anyhow!(e))?;
@@ -31,18 +39,18 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&dest_root)?;
     println!("Installing models into {}", dest_root.display());
 
-    for digit in DIGIT_DIRS {
-        let src = src_root.join(digit);
-        let dest = dest_root.join(digit);
+    for (src_dir, dest_dir) in DIGIT_DIRS {
+        let src = src_root.join(src_dir);
+        let dest = dest_root.join(dest_dir);
         if !src.exists() {
             anyhow::bail!("missing source: {}", src.display());
         }
         if dest.exists() {
-            println!("  {digit}: skipped (already present)");
+            println!("  {dest_dir}: skipped (already present)");
             continue;
         }
         copy_dir_all(&src, &dest)?;
-        println!("  {digit}: copied");
+        println!("  {dest_dir}: copied from {src_dir}");
     }
 
     println!("Done. Set COURSE_CLASSIFIER_MODELS_DIR to override this location.");
