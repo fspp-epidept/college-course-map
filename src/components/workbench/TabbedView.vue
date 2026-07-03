@@ -15,7 +15,11 @@ const tabBody = computed(() => (tab.value ? tabKindPanels[tab.value.kind] : null
   <TabStrip />
 
   <div class="flex-1 min-h-0 overflow-auto">
-    <component :is="tabBody" v-if="tab && tabBody" :tab="tab" />
+    <!-- :key forces a fresh component instance per tab. Without it, Vue reuses
+         one instance across all tabs of the same kind, and component-local
+         state (pagination cursors, view level, error banners) silently bleeds
+         from one dataset to the next (EPI-68). -->
+    <component :is="tabBody" v-if="tab && tabBody" :key="tab.id" :tab="tab" />
 
     <!-- Empty state when no tabs are open in this activity. Quietly informs;
          doesn't try to drive an action until we know which CTA is right. -->

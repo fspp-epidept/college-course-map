@@ -72,6 +72,14 @@ impl RunRegistry {
     fn remove(&self, run_id: &str) {
         self.lock().remove(run_id);
     }
+
+    /// Whether a worker is currently registered for `run_id`. Registry
+    /// membership is the in-memory truth of "actually executing" — a
+    /// `running` DB row without a registered flag is a crash leftover, not
+    /// an active run.
+    fn is_active(&self, run_id: &str) -> bool {
+        self.lock().contains_key(run_id)
+    }
 }
 
 /// Inputs are batched through the model in chunks of this size. Matches the
@@ -198,56 +206,61 @@ struct RunRow {
     execution_provider: Option<String>,
 }
 
-#[tauri::command]
-#[specta::specta]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri command arguments are deserialized by value"
-)]
-pub(crate) fn get_run(id: String, db: State<'_, AppDb>) -> Result<RunDetail, String> {
-    let conn = db.ro()?;
-    let row = conn
-        .query_row(
-            "SELECT r.id, r.dataset_id, d.title, r.description, r.state, r.model_ids,
-                    r.rows_total, r.rows_processed, r.unique_inputs_done, r.cache_hits,
-                    strftime(r.created_at, '%Y-%m-%dT%H:%M:%SZ'),
-                    strftime(r.started_at, '%Y-%m-%dT%H:%M:%SZ'),
-                    strftime(r.completed_at, '%Y-%m-%dT%H:%M:%SZ'),
-                    strftime(r.last_progress_at, '%Y-%m-%dT%H:%M:%SZ'),
-                    r.error_message, r.execution_provider
-             FROM runs r
-             JOIN datasets d ON d.id = r.dataset_id
-             WHERE r.id = ?",
-            params![id],
-            |row| {
-                Ok(RunRow {
-                    id: row.get(0)?,
-                    dataset_id: row.get(1)?,
-                    dataset_title: row.get(2)?,
-                    description: row.get(3)?,
-                    state: row.get(4)?,
-                    model_ids_json: row.get(5)?,
-                    rows_total: row.get(6)?,
-                    rows_processed: row.get(7)?,
-                    unique_inputs_done: row.get(8)?,
-                    cache_hits: row.get(9)?,
-                    created_at: row.get(10)?,
-                    started_at: row.get(11)?,
-                    completed_at: row.get(12)?,
-                    last_progress_at: row.get(13)?,
-                    error_message: row.get(14)?,
-                    execution_provider: row.get(15)?,
-                })
-            },
-        )
-        .map_err(|e| format!("run {id}: {e}"))?;
+/// Shared SELECT + row-mapping for the run-detail commands. `filter_sql` is a
+/// hardcoded WHERE/ORDER tail (never user input) with exactly one `?` bound to
+/// `param`. Returns `None` when no row matches.
+fn query_run_detail(
+    conn: &duckdb::Connection,
+    filter_sql: &str,
+    param: &str,
+) -> Result<Option<RunDetail>, String> {
+    let sql = format!(
+        "SELECT r.id, r.dataset_id, d.title, r.description, r.state, r.model_ids,
+                r.rows_total, r.rows_processed, r.unique_inputs_done, r.cache_hits,
+                strftime(r.created_at, '%Y-%m-%dT%H:%M:%SZ'),
+                strftime(r.started_at, '%Y-%m-%dT%H:%M:%SZ'),
+                strftime(r.completed_at, '%Y-%m-%dT%H:%M:%SZ'),
+                strftime(r.last_progress_at, '%Y-%m-%dT%H:%M:%SZ'),
+                r.error_message, r.execution_provider
+         FROM runs r
+         JOIN datasets d ON d.id = r.dataset_id
+         {filter_sql}"
+    );
+    let mut stmt = stmt_err(conn.prepare(&sql), "prepare run detail")?;
+    let mut rows = stmt_err(stmt.query(params![param]), "query run detail")?;
+    let Some(row) = stmt_err(rows.next(), "read run detail")? else {
+        return Ok(None);
+    };
+    let row = stmt_err(
+        (|| -> Result<RunRow, duckdb::Error> {
+            Ok(RunRow {
+                id: row.get(0)?,
+                dataset_id: row.get(1)?,
+                dataset_title: row.get(2)?,
+                description: row.get(3)?,
+                state: row.get(4)?,
+                model_ids_json: row.get(5)?,
+                rows_total: row.get(6)?,
+                rows_processed: row.get(7)?,
+                unique_inputs_done: row.get(8)?,
+                cache_hits: row.get(9)?,
+                created_at: row.get(10)?,
+                started_at: row.get(11)?,
+                completed_at: row.get(12)?,
+                last_progress_at: row.get(13)?,
+                error_message: row.get(14)?,
+                execution_provider: row.get(15)?,
+            })
+        })(),
+        "map run detail",
+    )?;
 
     // Resolve the digit level from the first id in `model_ids` (JSON array).
     // Runs always carry exactly one model id during the spike, so taking
     // first() is fine until multi-model runs land.
-    let digit_level = resolve_digit_level(&conn, &row.model_ids_json).unwrap_or(None);
+    let digit_level = resolve_digit_level(conn, &row.model_ids_json).unwrap_or(None);
 
-    Ok(RunDetail {
+    Ok(Some(RunDetail {
         id: row.id,
         dataset_id: row.dataset_id,
         dataset_title: row.dataset_title,
@@ -264,7 +277,44 @@ pub(crate) fn get_run(id: String, db: State<'_, AppDb>) -> Result<RunDetail, Str
         last_progress_at: row.last_progress_at,
         error_message: row.error_message,
         execution_provider: row.execution_provider,
-    })
+    }))
+}
+
+fn stmt_err<T, E: std::fmt::Display>(res: Result<T, E>, ctx: &str) -> Result<T, String> {
+    res.map_err(|e| format!("{ctx}: {e}"))
+}
+
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn get_run(id: String, db: State<'_, AppDb>) -> Result<RunDetail, String> {
+    let conn = db.ro()?;
+    query_run_detail(&conn, "WHERE r.id = ?", &id)?.ok_or_else(|| format!("run {id}: not found"))
+}
+
+/// Most recent run for a dataset, or `None` if the dataset has never been
+/// classified. The dataset tab's run surface card derives from this — backend
+/// state, not component memory — so it survives tab close/reopen and app
+/// restart (EPI-68).
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn get_latest_run(
+    dataset_id: String,
+    db: State<'_, AppDb>,
+) -> Result<Option<RunDetail>, String> {
+    let conn = db.ro()?;
+    query_run_detail(
+        &conn,
+        "WHERE r.dataset_id = ? ORDER BY r.created_at DESC LIMIT 1",
+        &dataset_id,
+    )
 }
 
 fn resolve_digit_level(
@@ -349,6 +399,32 @@ pub(crate) fn start_run(
             "dataset {} no longer exists (the tab may be stale — close it and reopen from the sidebar)",
             req.dataset_id
         ));
+    }
+
+    // One run at a time, app-wide (EPI-68 decision, 2026-07-03; queued runs
+    // are EPI-70). The check runs on the held RW connection, so it's atomic
+    // with the INSERT below against concurrent start_run calls. A `running`
+    // row only counts if its worker is actually registered — a row without a
+    // flag is a crash leftover, which must not wedge the app (EPI-38 sweeps
+    // those to `interrupted` at startup).
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT r.id, d.title FROM runs r
+                 JOIN datasets d ON d.id = r.dataset_id
+                 WHERE r.state = 'running'",
+            )
+            .map_err(|e| format!("prepare active-run check: {e}"))?;
+        let running: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("query active-run check: {e}"))?
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("collect active-run check: {e}"))?;
+        if let Some((_, title)) = running.into_iter().find(|(id, _)| runs.is_active(id)) {
+            return Err(format!(
+                "a classification run is already active on \u{201c}{title}\u{201d} — pause it or wait for it to finish"
+            ));
+        }
     }
 
     // Resolve the models-table row through the manifest catalog — never by
