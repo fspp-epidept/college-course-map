@@ -69,7 +69,14 @@ impl AppDb {
     /// it. The clone is taken **after** migrations and shares the same instance,
     /// so it sees the migrated schema and every subsequent committed write.
     pub fn open() -> Result<Self, String> {
-        let path = db_path()?;
+        Self::open_at(db_path()?)
+    }
+
+    /// Same as [`AppDb::open`] but at an explicit path. For tools and the
+    /// resume verification harness (`examples/check_resume.rs`), which must
+    /// run the real migration + connection setup against a scratch database
+    /// instead of the user's.
+    pub fn open_at(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }

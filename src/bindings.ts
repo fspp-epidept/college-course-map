@@ -206,6 +206,22 @@ async listRuns() : Promise<Result<RunSummary[], string>> {
 async pauseRun(runId: string) : Promise<boolean> {
     return await TAURI_INVOKE("pause_run", { runId });
 },
+/**
+ * Resume an `interrupted` run (EPI-38). Same worker, same run id: the row
+ * flips back to `running` with `resume_count` bumped, and the pipeline
+ * re-walks the whole dataset — everything already in `inference_results`
+ * is a cache hit, so only the remainder computes. Idempotent by
+ * construction. Progress restarts from row zero and races through the
+ * cached prefix.
+ */
+async resumeRun(runId: string) : Promise<Result<StartRunResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("resume_run", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
@@ -369,12 +385,29 @@ export type ModelsStateChanged = Record<string, never>
  * model digit level (resolved from the JSON `model_ids` array) and the
  * `unique_inputs_done` + `error_message` fields the summary view drops.
  */
-export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null }
+export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
  */
-export type RunSummary = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null }
+export type RunSummary = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; 
+/**
+ * Resolved from the run's first `model_ids` entry so a list row can say
+ * which model it was without a second IPC call (EPI-69).
+ */
+digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; resumeCount: number; 
+/**
+ * Whether `resume_run` would accept this run right now (EPI-69).
+ * Computed at read time — never persisted — so external changes (models
+ * swapped, files deleted) are reflected immediately.
+ */
+resumable: boolean; 
+/**
+ * Machine-stable reasons when an `interrupted` run can't resume
+ * (`model_superseded`, `model_not_loaded`). Empty when resumable, and
+ * for states resume doesn't apply to.
+ */
+resumeBlockers: string[] }
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).

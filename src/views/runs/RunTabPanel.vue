@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { usePauseRun, useRun } from "../../composables/useRuns";
+import { resumeBlockerText, usePauseRun, useResumeRun, useRun } from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -13,6 +13,11 @@ const { data: run, isPending, isError, error } = useRun(runId);
 const pauseRun = usePauseRun();
 function onPause() {
   pauseRun.mutate(runId.value);
+}
+
+const resumeRun = useResumeRun();
+function onResume() {
+  resumeRun.mutate(runId.value);
 }
 
 const progressPct = computed(() => {
@@ -82,7 +87,32 @@ function fmtTime(iso: string | null | undefined): string {
         >
           Pause
         </UButton>
+        <UButton
+          v-else-if="run.resumable"
+          class="ml-auto"
+          color="primary"
+          size="xs"
+          icon="i-lucide-play"
+          :loading="resumeRun.isPending.value"
+          @click="onResume"
+        >
+          Resume
+        </UButton>
       </div>
+
+      <div
+        v-if="run.state === 'interrupted' && !run.resumable"
+        class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-3 py-2 text-xs text-(--ui-text-muted) flex flex-col gap-1"
+      >
+        <span class="text-(--ui-text) font-medium">This run can't resume right now</span>
+        <span v-for="blocker in run.resumeBlockers" :key="blocker">
+          {{ resumeBlockerText(blocker) }}
+        </span>
+      </div>
+
+      <p v-if="resumeRun.isError.value" class="text-sm text-(--ui-color-error-500)">
+        Resume failed: {{ resumeRun.error.value?.message }}
+      </p>
 
       <div v-if="progressPct !== null" class="flex flex-col gap-1.5">
         <div class="flex items-baseline justify-between text-sm">
@@ -121,6 +151,13 @@ function fmtTime(iso: string | null | undefined): string {
 
         <dt class="text-(--ui-text-muted)">Cache hits</dt>
         <dd class="text-(--ui-text) tabular-nums">{{ run.cacheHits ?? "—" }}</dd>
+
+        <template v-if="run.resumeCount > 0">
+          <dt class="text-(--ui-text-muted)">Resumed</dt>
+          <dd class="text-(--ui-text) tabular-nums">
+            {{ run.resumeCount }} {{ run.resumeCount === 1 ? "time" : "times" }}
+          </dd>
+        </template>
 
         <dt class="text-(--ui-text-muted)">Created</dt>
         <dd class="text-(--ui-text)">{{ fmtTime(run.createdAt) }}</dd>
