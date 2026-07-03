@@ -84,6 +84,35 @@ export const useWorkspace = defineStore(
       }
     }
 
+    // Bulk closers for the tab context menu (EPI-71). VS Code semantics: a
+    // bulk action that closes the active tab hands focus to the anchor tab
+    // (the one that was right-clicked); close-all clears to the activity's
+    // empty state.
+    function closeOtherTabs(activityId: ActivityId, tabId: string): void {
+      const list = tabsByActivity.value[activityId] ?? [];
+      const keep = list.find((tab) => tab.id === tabId);
+      if (!keep) return;
+      tabsByActivity.value[activityId] = [keep];
+      activeTabIdByActivity.value[activityId] = keep.id;
+    }
+
+    function closeTabsToRight(activityId: ActivityId, tabId: string): void {
+      const list = tabsByActivity.value[activityId] ?? [];
+      const index = list.findIndex((tab) => tab.id === tabId);
+      if (index === -1) return;
+      const next = list.slice(0, index + 1);
+      tabsByActivity.value[activityId] = next;
+      const activeId = activeTabIdByActivity.value[activityId];
+      if (activeId !== undefined && !next.some((tab) => tab.id === activeId)) {
+        activeTabIdByActivity.value[activityId] = tabId;
+      }
+    }
+
+    function closeAllTabs(activityId: ActivityId): void {
+      tabsByActivity.value[activityId] = [];
+      delete activeTabIdByActivity.value[activityId];
+    }
+
     function setActiveTab(activityId: ActivityId, tabId: string): void {
       activeTabIdByActivity.value[activityId] = tabId;
     }
@@ -126,6 +155,9 @@ export const useWorkspace = defineStore(
       setActiveSettingsSection,
       openTab,
       closeTab,
+      closeOtherTabs,
+      closeTabsToRight,
+      closeAllTabs,
       setActiveTab,
       toggleSidebar,
       setSidebarWidth,
