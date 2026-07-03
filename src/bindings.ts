@@ -360,7 +360,7 @@ export type StartRunRequest = { datasetId: string;
  * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
  * spike avoids forcing the frontend to know surrogate model ids.
  */
-digitLevel: number; limit: number | null }
+digitLevel: number }
 /**
  * Response from `start_run`: the run has been queued and is already updating
  * its own row. The frontend polls `get_run(run_id)` from here.

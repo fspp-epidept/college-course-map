@@ -286,10 +286,6 @@ fn resolve_digit_level(
     Ok(model_type.and_then(|s| s.parse::<u8>().ok()))
 }
 
-/// 500 makes the progress bar move visibly without taking forever; the dialog
-/// default. The caller may override.
-const DEFAULT_LIMIT: u32 = 500;
-
 #[derive(Type, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StartRunRequest {
@@ -297,7 +293,6 @@ pub(crate) struct StartRunRequest {
     /// 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
     /// spike avoids forcing the frontend to know surrogate model ids.
     pub digit_level: u8,
-    pub limit: Option<u32>,
 }
 
 /// Response from `start_run`: the run has been queued and is already updating
@@ -323,7 +318,6 @@ pub(crate) fn start_run(
     catalog: State<'_, ModelCatalog>,
     runs: State<'_, RunRegistry>,
 ) -> Result<StartRunResponse, String> {
-    let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
     // Fail fast if models aren't ready — caller gets a synchronous error
     // rather than a "queued then mysteriously failed" run. The store starts
     // empty on a connected-build first run (EPI-56) until download + load.
@@ -364,9 +358,8 @@ pub(crate) fn start_run(
         .model_id(req.digit_level)
         .ok_or_else(|| format!("manifest has no model for digit_level {}", req.digit_level))?;
 
-    // Cap the planned row count by what the dataset actually contains; the
-    // progress meter's denominator is therefore honest even when limit
-    // exceeds the dataset size.
+    // A run always covers the whole dataset (EPI-66); the count is the
+    // progress meter's denominator.
     let course_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
@@ -380,7 +373,7 @@ pub(crate) fn start_run(
             req.dataset_id
         ));
     }
-    let rows_total = std::cmp::min(course_count, i64::from(limit));
+    let rows_total = course_count;
 
     let run_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -423,7 +416,6 @@ pub(crate) fn start_run(
         run_id: run_id.clone(),
         model_id,
         digit_level: req.digit_level,
-        limit,
         now,
         cancel,
     };
@@ -459,7 +451,6 @@ struct RunTask {
     run_id: String,
     model_id: i64,
     digit_level: u8,
-    limit: u32,
     now: String,
     /// Set true by [`pause_run`]; polled at each batch boundary to stop early.
     cancel: Arc<AtomicBool>,
@@ -624,11 +615,10 @@ impl RunTask {
                 "SELECT content_hash, subject_code, catalog_number, course_title
                  FROM courses
                  WHERE dataset_id = ?
-                 ORDER BY row_index
-                 LIMIT ?",
+                 ORDER BY row_index",
             )
             .map_err(|e| format!("prepare select courses: {e}"))?;
-        stmt.query_map(params![&self.dataset_id, i64::from(self.limit)], |row| {
+        stmt.query_map(params![&self.dataset_id], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .map_err(|e| format!("query courses: {e}"))?
