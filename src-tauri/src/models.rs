@@ -28,8 +28,9 @@ use sha2::{Digest as _, Sha256};
 #[cfg(not(feature = "airgap"))]
 use std::io::{Read as _, Write as _};
 
-/// Per-file download progress. `received`/`total` are bytes; the frontend
-/// derives percentages.
+/// Per-file download progress. `received`/`total` are bytes; `bytes_per_sec`
+/// is measured over the emission window (EPI-65). The frontend derives
+/// percentages.
 #[derive(Type, Serialize, Deserialize, Debug, Clone, Event)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelDownloadProgress {
@@ -37,6 +38,7 @@ pub(crate) struct ModelDownloadProgress {
     pub file: String,
     pub received: f64,
     pub total: f64,
+    pub bytes_per_sec: f64,
 }
 
 /// Coarse "something about model state changed" signal — emitted after a file
@@ -267,11 +269,35 @@ fn download_one(
     // Stream to a .part file; only rename into place after the hash checks
     // out, so a torn download can never be mistaken for a model.
     let part = dest.with_extension("part");
-    let mut out =
-        std::fs::File::create(&part).map_err(|e| format!("create {}: {e}", part.display()))?;
+    let mut out = std::io::BufWriter::new(
+        std::fs::File::create(&part).map_err(|e| format!("create {}: {e}", part.display()))?,
+    );
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
     let mut buf = vec![0u8; 1 << 20];
+    // Progress is rate-limited (EPI-65): `read()` returns network-sized
+    // chunks (8-16 KB), and emitting per chunk pushed tens of thousands of
+    // IPC events per file through the WebView — the event storm, not the
+    // network, was the throughput ceiling. One emit per interval also gives
+    // a stable window for the speed measurement.
+    const EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+    let started = std::time::Instant::now();
+    let mut last_emit = started;
+    let mut last_emit_bytes: u64 = 0;
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "file sizes are far below f64's 2^53 exact-integer range"
+    )]
+    let emit_progress = |received: u64, bytes_per_sec: f64| {
+        let _ = ModelDownloadProgress {
+            digit_level: entry.digit_level,
+            file: file.name.clone(),
+            received: received as f64,
+            total: file.size as f64,
+            bytes_per_sec,
+        }
+        .emit(app);
+    };
     loop {
         let n = response
             .read(&mut buf)
@@ -284,18 +310,28 @@ fn download_one(
         out.write_all(chunk)
             .map_err(|e| format!("write {}: {e}", part.display()))?;
         received += n as u64;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "file sizes are far below f64's 2^53 exact-integer range"
-        )]
-        let _ = ModelDownloadProgress {
-            digit_level: entry.digit_level,
-            file: file.name.clone(),
-            received: received as f64,
-            total: file.size as f64,
+        let window = last_emit.elapsed();
+        if window >= EMIT_INTERVAL {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "byte deltas are far below f64's 2^53 exact-integer range"
+            )]
+            let bytes_per_sec = (received - last_emit_bytes) as f64 / window.as_secs_f64();
+            emit_progress(received, bytes_per_sec);
+            last_emit = std::time::Instant::now();
+            last_emit_bytes = received;
         }
-        .emit(app);
     }
+    // Final emit so the frontend always sees 100%; speed is the whole-file
+    // average, which is also the number to compare against a curl baseline.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "byte counts are far below f64's 2^53 exact-integer range"
+    )]
+    let avg = received as f64 / started.elapsed().as_secs_f64().max(f64::EPSILON);
+    emit_progress(received, avg);
+    out.flush()
+        .map_err(|e| format!("flush {}: {e}", part.display()))?;
     drop(out);
 
     let digest = format!("{:x}", hasher.finalize());

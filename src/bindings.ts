@@ -317,10 +317,11 @@ modelId: number | null;
  */
 cursor: number | null; limit: number }
 /**
- * Per-file download progress. `received`/`total` are bytes; the frontend
- * derives percentages.
+ * Per-file download progress. `received`/`total` are bytes; `bytes_per_sec`
+ * is measured over the emission window (EPI-65). The frontend derives
+ * percentages.
  */
-export type ModelDownloadProgress = { digitLevel: number; file: string; received: number; total: number }
+export type ModelDownloadProgress = { digitLevel: number; file: string; received: number; total: number; bytesPerSec: number }
 export type ModelStatus = { digitLevel: number; displayName: string; hfRepo: string; revision: string; filesTotal: number; 
 /**
  * Files on disk with the manifest's exact size. Full sha256 verification

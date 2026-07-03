@@ -25,10 +25,20 @@ function fmtGb(bytes: number): string {
   return `${(bytes / 1e9).toFixed(2)} GB`;
 }
 
+function fmtMb(bytes: number): string {
+  return `${Math.round(bytes / 1e6)} MB`;
+}
+
 function pct(digitLevel: number): number | null {
   const p = progress.value[digitLevel];
   if (!p || p.total === 0) return null;
   return Math.round((p.received / p.total) * 100);
+}
+
+function downloadDetail(digitLevel: number): string | null {
+  const p = progress.value[digitLevel];
+  if (!p) return null;
+  return `${p.file} — ${fmtMb(p.received)} / ${fmtMb(p.total)} · ${(p.bytesPerSec / 1e6).toFixed(1)} MB/s`;
 }
 
 function statusLabel(m: { digitLevel: number; filesPresent: number; filesTotal: number }): string {
@@ -102,12 +112,14 @@ function statusLabel(m: { digitLevel: number; filesPresent: number; filesTotal: 
               {{ statusLabel(m) }}
             </span>
           </div>
-          <UProgress
+          <template
             v-if="download.isPending.value && pct(m.digitLevel) !== null && m.filesPresent < m.filesTotal"
-            :model-value="pct(m.digitLevel) ?? 0"
-            :max="100"
-            size="sm"
-          />
+          >
+            <UProgress :model-value="pct(m.digitLevel) ?? 0" :max="100" size="sm" />
+            <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
+              {{ downloadDetail(m.digitLevel) }}
+            </span>
+          </template>
           <div class="text-xs text-(--ui-text-dimmed) flex flex-wrap gap-x-4">
             <span>{{ m.hfRepo }}</span>
             <span class="font-mono">{{ m.revision.slice(0, 12) }}</span>
