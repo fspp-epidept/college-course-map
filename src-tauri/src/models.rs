@@ -158,11 +158,17 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
     let _ = ModelsStateChanged {}.emit(app);
     let result = (|| {
         let root = active_models_root(app)?;
-        // The EP priority list is read at load time, so a settings reorder
-        // takes effect by re-triggering a model load — no restart. (Switching
-        // runtime *packs* is the part that needs a relaunch; see runtime.rs.)
-        let eps = crate::config::read_settings()?.execution_providers;
-        let registry = inference::load_all_models(&root, &eps).map_err(|e| e.to_string())?;
+        // The EP priority list and CPU thread cap are read at load time, so a
+        // settings change takes effect by re-triggering a model load — no
+        // restart. (Switching runtime *packs* is the part that needs a
+        // relaunch; see runtime.rs.)
+        let settings = crate::config::read_settings()?;
+        let registry = inference::load_all_models(
+            &root,
+            &settings.execution_providers,
+            settings.max_cpu_threads,
+        )
+        .map_err(|e| e.to_string())?;
         store.set(registry)
     })();
     store.end_loading();

@@ -167,6 +167,19 @@ pub(crate) struct Settings {
     /// `deny_unknown_fields`.
     #[serde(default = "crate::runtime::default_priority")]
     pub(crate) execution_providers: Vec<crate::runtime::EpKind>,
+    /// Cap on ORT's intra-op CPU threads during inference (EPI-83).
+    /// `0` = auto (ORT default: all physical cores); any value below 1 or
+    /// above the machine's cores also behaves as auto — clamp semantics,
+    /// no error states. Applied at session build; rides `reload_models`.
+    #[serde(default)]
+    pub(crate) max_cpu_threads: u32,
+    /// Directory holding CUDA/cuDNN libraries to preload at startup (EPI-84)
+    /// — for users whose CUDA lives in a conda env or pip venv
+    /// (`site-packages/nvidia`) instead of a system install. Takes precedence
+    /// over the downloadable support-libs pack; changing it needs a relaunch
+    /// (preload is process-lifetime).
+    #[serde(default)]
+    pub(crate) cuda_library_dir: Option<String>,
 }
 
 impl Default for Settings {
@@ -174,6 +187,8 @@ impl Default for Settings {
         Self {
             active_theme: "default-light".to_owned(),
             execution_providers: crate::runtime::default_priority(),
+            max_cpu_threads: 0,
+            cuda_library_dir: None,
         }
     }
 }

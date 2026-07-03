@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { open } from "@tauri-apps/plugin-dialog";
+import { computed, ref, watchEffect } from "vue";
 import type { EpKind } from "../../bindings";
 import {
+  useApplyInferenceSettings,
   useDownloadRuntime,
-  useEpPriority,
+  useInferenceSettings,
   useRuntimeEvents,
   useRuntimeStatus,
-  useSetEpPriority,
+  useSaveRelaunchSetting,
 } from "../../composables/useRuntime";
 
 const EP_LABELS: Record<EpKind, string> = {
@@ -18,14 +20,16 @@ const EP_LABELS: Record<EpKind, string> = {
 };
 
 const runtime = useRuntimeStatus();
-const epPriority = useEpPriority();
-const setEpPriority = useSetEpPriority();
+const settings = useInferenceSettings();
+const apply = useApplyInferenceSettings();
+const saveRelaunch = useSaveRelaunchSetting();
 const downloadRuntime = useDownloadRuntime();
 const { progress } = useRuntimeEvents();
 
 // Settings order when loaded, platform default as the pre-load placeholder.
 const eps = computed<EpKind[]>(
-  () => epPriority.data.value ?? runtime.data.value?.platformDefaultPriority ?? [],
+  () =>
+    settings.data.value?.executionProviders ?? runtime.data.value?.platformDefaultPriority ?? [],
 );
 
 function move(index: number, delta: -1 | 1): void {
@@ -36,7 +40,28 @@ function move(index: number, delta: -1 | 1): void {
   if (item === undefined || other === undefined) return;
   next[index] = other;
   next[target] = item;
-  setEpPriority.mutate(next);
+  apply.mutate({ executionProviders: next });
+}
+
+// Local input state so typing doesn't fire a model reload per keystroke;
+// committed on change (blur/enter).
+const threadsInput = ref<number>(0);
+watchEffect(() => {
+  threadsInput.value = settings.data.value?.maxCpuThreads ?? 0;
+});
+function commitThreads(): void {
+  const n = Number.isFinite(threadsInput.value) ? Math.trunc(threadsInput.value) : 0;
+  if (n === (settings.data.value?.maxCpuThreads ?? 0)) return;
+  apply.mutate({ maxCpuThreads: Math.max(0, n) });
+}
+
+const cudaDir = computed(() => settings.data.value?.cudaLibraryDir ?? null);
+async function pickCudaDir(): Promise<void> {
+  const dir = await open({ directory: true, multiple: false });
+  if (typeof dir === "string") saveRelaunch.mutate({ cudaLibraryDir: dir });
+}
+function clearCudaDir(): void {
+  saveRelaunch.mutate({ cudaLibraryDir: null });
 }
 
 function fmtSize(bytes: number): string {
@@ -51,9 +76,7 @@ function fmtSize(bytes: number): string {
     <header>
       <h2 class="text-xl font-semibold text-(--ui-text-highlighted)">Inference</h2>
       <p class="mt-1 text-sm text-(--ui-text-muted)">
-        Where classification runs. Providers are tried top to bottom when
-        models load; the first one available on this machine wins, and
-        anything below CPU never runs.
+        Where and how classification runs.
       </p>
     </header>
 
@@ -84,8 +107,9 @@ function fmtSize(bytes: number): string {
     <div class="flex flex-col gap-2">
       <h3 class="text-sm font-medium text-(--ui-text)">Provider priority</h3>
       <p class="text-xs text-(--ui-text-muted)">
-        Reordering reloads the models (a few seconds). A provider that fails to
-        initialize is skipped — no configuration breaks classification.
+        Providers are tried top to bottom when models load; the first one
+        available on this machine wins, and anything below CPU never runs.
+        Reordering reloads the models (a few seconds).
       </p>
       <ul class="flex flex-col gap-1">
         <li
@@ -105,7 +129,7 @@ function fmtSize(bytes: number): string {
             variant="ghost"
             color="neutral"
             size="xs"
-            :disabled="index === 0 || setEpPriority.isPending.value"
+            :disabled="index === 0 || apply.isPending.value"
             aria-label="Move up"
             @click="move(index, -1)"
           />
@@ -114,7 +138,7 @@ function fmtSize(bytes: number): string {
             variant="ghost"
             color="neutral"
             size="xs"
-            :disabled="index === eps.length - 1 || setEpPriority.isPending.value"
+            :disabled="index === eps.length - 1 || apply.isPending.value"
             aria-label="Move down"
             @click="move(index, 1)"
           />
@@ -123,10 +147,35 @@ function fmtSize(bytes: number): string {
     </div>
 
     <div class="flex flex-col gap-2">
+      <h3 class="text-sm font-medium text-(--ui-text)">CPU</h3>
+      <div class="flex items-center gap-3">
+        <label class="text-sm text-(--ui-text)" for="max-cpu-threads">
+          Max CPU threads
+        </label>
+        <UInput
+          id="max-cpu-threads"
+          v-model.number="threadsInput"
+          type="number"
+          min="0"
+          class="w-24"
+          :disabled="apply.isPending.value"
+          @blur="commitThreads"
+          @keydown.enter="commitThreads"
+        />
+        <span class="text-xs text-(--ui-text-muted)">
+          0 = all cores. Values above the machine's core count also use all
+          cores. Applies on the next model reload (automatic on change).
+        </span>
+      </div>
+    </div>
+
+    <div class="flex flex-col gap-2">
       <h3 class="text-sm font-medium text-(--ui-text)">Runtime packs</h3>
       <p class="text-xs text-(--ui-text-muted)">
-        GPU providers need their runtime pack downloaded once. A newly
-        installed pack is used after the app is relaunched.
+        GPU providers need their runtime pack downloaded once — and CUDA needs
+        its support libraries, either the downloadable pack below or a
+        directory you point at. Newly installed packs are used after the app
+        is relaunched.
       </p>
       <ul class="flex flex-col gap-1">
         <li
@@ -135,10 +184,12 @@ function fmtSize(bytes: number): string {
           class="flex items-center gap-3 rounded border border-(--ui-border) px-3 py-2 text-sm bg-(--ui-bg-elevated)"
         >
           <div class="flex-1">
-            <span class="text-(--ui-text) font-medium">{{ pack.id }}</span>
+            <span class="text-(--ui-text) font-medium">{{ pack.displayName }}</span>
             <span class="ml-2 text-xs text-(--ui-text-muted)">
-              {{ pack.eps.map((ep) => EP_LABELS[ep as EpKind] ?? ep).join(" + ") }}
-              · {{ fmtSize(pack.sizeBytes) }}
+              <template v-if="pack.eps.length">
+                {{ pack.eps.map((ep) => EP_LABELS[ep as EpKind] ?? ep).join(" + ") }} ·
+              </template>
+              {{ fmtSize(pack.sizeBytes) }}
             </span>
           </div>
           <template v-if="progress[pack.id] && !pack.installed">
@@ -170,6 +221,32 @@ function fmtSize(bytes: number): string {
       <p v-if="downloadRuntime.error.value" class="text-xs text-(--ui-color-error-500)">
         {{ downloadRuntime.error.value.message }}
       </p>
+    </div>
+
+    <div class="flex flex-col gap-2">
+      <h3 class="text-sm font-medium text-(--ui-text)">CUDA library directory</h3>
+      <p class="text-xs text-(--ui-text-muted)">
+        Already have CUDA in a conda or Python environment? Point at its
+        <code>nvidia</code> libraries directory instead of downloading the
+        support pack. Takes effect after relaunch.
+      </p>
+      <div class="flex items-center gap-2">
+        <code
+          class="flex-1 truncate rounded border border-(--ui-border) px-3 py-1.5 text-xs bg-(--ui-bg-elevated) text-(--ui-text-muted)"
+        >
+          {{ cudaDir ?? "not set" }}
+        </code>
+        <UButton size="xs" variant="soft" @click="pickCudaDir">Browse…</UButton>
+        <UButton
+          v-if="cudaDir"
+          size="xs"
+          variant="ghost"
+          color="neutral"
+          @click="clearCudaDir"
+        >
+          Clear
+        </UButton>
+      </div>
     </div>
   </section>
 </template>

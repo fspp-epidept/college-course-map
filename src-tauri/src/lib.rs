@@ -126,6 +126,27 @@ pub fn run() {
                     &resource_dir,
                 )?;
                 runtime::init_ort(&pack_dir)?;
+                // GPU support libraries (EPI-84): preload CUDA/cuDNN dylibs
+                // so EP registration at model-load time resolves them without
+                // a system install. Precedence: the user-pointed directory
+                // (conda/venv CUDA), else the pack's downloaded companion
+                // libs pack. Failure to preload is not fatal — registration
+                // falls back exactly as when no libs exist.
+                let user_dir = settings
+                    .cuda_library_dir
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .filter(|dir| dir.is_dir());
+                let libs_dir = runtime::installed_libs_dir(&runtime_manifest, &state);
+                if let Some(dir) = user_dir.or(libs_dir.as_deref()) {
+                    match runtime::preload_support_libs(dir) {
+                        Ok(count) => eprintln!(
+                            "startup: preloaded {count} GPU support libs from {}",
+                            dir.display()
+                        ),
+                        Err(e) => eprintln!("startup: GPU support lib preload skipped: {e}"),
+                    }
+                }
                 eprintln!(
                     "startup: ONNX Runtime {} loaded from pack '{}'",
                     state.ort_version, state.pack_id

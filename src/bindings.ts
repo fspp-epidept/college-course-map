@@ -458,15 +458,21 @@ resumeBlockers: string[] }
  * Per-pack download progress, mirroring `models::ModelDownloadProgress`.
  */
 export type RuntimeDownloadProgress = { packId: string; received: number; total: number; bytesPerSec: number }
-export type RuntimePackStatus = { id: string; 
+export type RuntimePackStatus = { id: string; displayName: string; 
 /**
- * EPs the pack claims to carry (manifest metadata).
+ * EPs the pack claims to carry (manifest metadata; empty = libs pack).
  */
 eps: string[]; sizeBytes: number; installed: boolean; 
 /**
- * Whether this is the pack the running process loaded.
+ * Whether this is the pack the running process loaded (always false for
+ * libs packs — they are preloaded next to a runtime pack, not loaded as
+ * one).
  */
-active: boolean }
+active: boolean; 
+/**
+ * Companion libs pack id, when this runtime pack has one (EPI-84).
+ */
+libs: string | null }
 /**
  * Coarse "runtime pack state changed" signal — emitted when a pack install
  * finishes or fails; the frontend refetches `runtime_status`.
@@ -504,7 +510,22 @@ export type Settings = { activeTheme: string;
  * `serde(default)` keeps pre-EPI-73 settings.json files parsing under
  * `deny_unknown_fields`.
  */
-executionProviders?: EpKind[] }
+executionProviders?: EpKind[]; 
+/**
+ * Cap on ORT's intra-op CPU threads during inference (EPI-83).
+ * `0` = auto (ORT default: all physical cores); any value below 1 or
+ * above the machine's cores also behaves as auto — clamp semantics,
+ * no error states. Applied at session build; rides `reload_models`.
+ */
+maxCpuThreads?: number; 
+/**
+ * Directory holding CUDA/cuDNN libraries to preload at startup (EPI-84)
+ * — for users whose CUDA lives in a conda env or pip venv
+ * (`site-packages/nvidia`) instead of a system install. Takes precedence
+ * over the downloadable support-libs pack; changing it needs a relaunch
+ * (preload is process-lifetime).
+ */
+cudaLibraryDir?: string | null }
 export type StartRunRequest = { datasetId: string; 
 /**
  * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the

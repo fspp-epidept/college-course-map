@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
 import { onMounted, onUnmounted, ref } from "vue";
-import { type EpKind, type RuntimeStatus, type Settings, commands, events } from "../bindings";
+import { type RuntimeStatus, type Settings, commands, events } from "../bindings";
 import { patchSettings } from "./useSettings";
 
 /**
@@ -20,30 +20,32 @@ export function useRuntimeStatus() {
   });
 }
 
-/** The persisted EP priority list (settings.json). */
-export function useEpPriority() {
+/**
+ * The persisted inference-related settings (settings.json). Serde fills
+ * defaults on the Rust side, so optional fields are always present in
+ * practice — `Required<Settings>` encodes that.
+ */
+export function useInferenceSettings() {
   return useQuery({
-    queryKey: ["settings", "executionProviders"],
-    queryFn: async (): Promise<EpKind[]> => {
+    queryKey: ["settings", "inference"],
+    queryFn: async (): Promise<Required<Settings>> => {
       const result = await commands.readSettings();
       if (result.status === "error") throw new Error(result.error);
-      // The field is optional in the bindings (serde default fills it on the
-      // Rust side); a missing value means "platform default order".
-      return (result.data as Required<Settings>).executionProviders;
+      return result.data as Required<Settings>;
     },
   });
 }
 
 /**
- * Persist a reordered EP priority list, then reload models so sessions
- * re-register providers — the reorder is live once the reload finishes
- * (models_status.loading covers the interim).
+ * Persist an inference settings patch, then reload models so sessions are
+ * rebuilt with it (EP priority re-registers providers, maxCpuThreads resizes
+ * the intra-op pool) — live once the reload finishes.
  */
-export function useSetEpPriority() {
+export function useApplyInferenceSettings() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (executionProviders: EpKind[]) => {
-      await patchSettings({ executionProviders });
+    mutationFn: async (patch: Partial<Settings>) => {
+      await patchSettings(patch);
       const reload = await commands.reloadModels();
       if (reload.status === "error") throw new Error(reload.error);
     },
@@ -51,6 +53,20 @@ export function useSetEpPriority() {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["runtime"] });
       queryClient.invalidateQueries({ queryKey: ["models"] });
+    },
+  });
+}
+
+/**
+ * Persist a settings patch that only takes effect at the next launch
+ * (cudaLibraryDir — preloads are process-lifetime). No model reload.
+ */
+export function useSaveRelaunchSetting() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: Partial<Settings>) => patchSettings(patch),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
   });
 }

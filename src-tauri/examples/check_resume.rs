@@ -379,5 +379,10 @@ fn load_active_model() -> anyhow::Result<LoadedModel> {
         .find(|m| m.digit_level == DIGIT_LEVEL)
         .context("manifest has no entry for the test digit level")?;
     let root = inference::models_root().map_err(anyhow::Error::msg)?;
-    inference::load_model(&root.join(&entry.app_subdir), DIGIT_LEVEL, &[EpKind::Cpu])
+    inference::load_model(
+        &root.join(&entry.app_subdir),
+        DIGIT_LEVEL,
+        &[EpKind::Cpu],
+        0,
+    )
 }

@@ -49,10 +49,14 @@ fn main() -> anyhow::Result<()> {
             println!("{id}: skipped (already installed at {})", dest.display());
             continue;
         }
-        println!("{id}: downloading {} ({} bytes)", pack.url, pack.size);
+        let total = pack.total_size();
+        println!(
+            "{id}: downloading {} archive(s), {total} bytes total",
+            pack.archives.len()
+        );
         let mut last_pct: u64 = 0;
         runtime::install_pack(&client, pack, &dest, &mut |received, bps| {
-            let pct = received * 100 / pack.size.max(1);
+            let pct = received * 100 / total.max(1);
             if pct >= last_pct + 10 {
                 println!("  {pct}% ({:.1} MB/s)", bps / 1_000_000.0);
                 last_pct = pct;
