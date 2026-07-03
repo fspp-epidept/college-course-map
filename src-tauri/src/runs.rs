@@ -170,12 +170,35 @@ fn assess_resumability(
                 .get()
                 .is_some_and(|registry| registry.by_digit_level(level).is_some());
             if !loaded {
-                blockers.push("model_not_loaded".to_owned());
+                // Distinguish "the startup autoload is still churning" from
+                // "no models on this machine": the first resolves itself in
+                // moments and needs no user action, the second needs the
+                // Models panel. Collapsing them told users to go download
+                // models that were already loading.
+                blockers.push(
+                    if store.is_loading() {
+                        "model_loading"
+                    } else {
+                        "model_not_loaded"
+                    }
+                    .to_owned(),
+                );
             }
         }
         _ => blockers.push("model_superseded".to_owned()),
     }
     (blockers.is_empty(), blockers)
+}
+
+/// Actionable "can't run inference yet" error, matching the loading state:
+/// during the startup autoload no user action is needed; otherwise the
+/// Models panel is the fix.
+fn models_unready_message(store: &ModelStore) -> String {
+    if store.is_loading() {
+        "models are still loading — try again in a moment".to_owned()
+    } else {
+        "models not loaded — download/load them from the Models panel".to_owned()
+    }
 }
 
 #[tauri::command]
@@ -522,7 +545,7 @@ pub(crate) fn start_run(
     // rather than a "queued then mysteriously failed" run. The store starts
     // empty on a connected-build first run (EPI-56) until download + load.
     let Some(registry) = store.get() else {
-        return Err("models not loaded — download/load them from the Models panel".to_owned());
+        return Err(models_unready_message(&store));
     };
     if registry.by_digit_level(req.digit_level).is_none() {
         return Err(format!(
@@ -689,7 +712,7 @@ pub(crate) fn resume_run(
         .get()
         .is_some_and(|registry| registry.by_digit_level(digit_level).is_some());
     if !model_loaded {
-        return Err("models not loaded — download/load them from the Models panel".to_owned());
+        return Err(models_unready_message(&store));
     }
 
     let now = Utc::now().to_rfc3339();
