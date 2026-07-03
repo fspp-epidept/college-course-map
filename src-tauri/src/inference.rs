@@ -13,11 +13,14 @@ use std::{
 };
 
 use ort::{
+    ep::{self, ExecutionProvider as _},
     inputs,
     session::{Session, builder::GraphOptimizationLevel},
     value::TensorRef,
 };
 use serde::Deserialize;
+
+use crate::runtime::EpKind;
 use tokenizers::{
     PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection,
     TruncationParams,
@@ -29,6 +32,10 @@ const MAX_SEQ_LEN: usize = 512;
 /// A model loaded into ONNX Runtime with its tokenizer + class label table.
 pub struct LoadedModel {
     pub digit_level: u8,
+    /// The highest-priority execution provider that registered successfully
+    /// for this session (EPI-73); `Cpu` when none did. Recorded on runs rows
+    /// and surfaced in Settings.
+    pub resolved_ep: EpKind,
     /// The session needs `&mut self` to run; wrap so we can hold it behind an
     /// `Arc` shared from the inference registry.
     session: Mutex<Session>,
@@ -59,9 +66,48 @@ pub struct Classification {
     pub probability: f32,
 }
 
+/// Register execution providers on a session builder in priority order
+/// (EPI-73). Returns the first EP that registered successfully — the one ONNX
+/// Runtime will prefer when assigning graph nodes — or `Cpu` when none did.
+///
+/// A failed registration is the designed fallback path (EP not in the loaded
+/// pack's dylib, CUDA/cuDNN/TensorRT libs not installed on this machine, wrong
+/// platform), so it logs and continues rather than erroring. `Cpu` in the list
+/// is the fallback boundary: entries after it are below the implicit CPU EP by
+/// definition and never register.
+fn register_eps(
+    builder: &mut ort::session::builder::SessionBuilder,
+    eps: &[EpKind],
+) -> Option<EpKind> {
+    let mut resolved = None;
+    for ep in eps {
+        let result = match ep {
+            EpKind::Cpu => break,
+            EpKind::TensorRt => ep::TensorRT::default().register(builder),
+            EpKind::Cuda => ep::CUDA::default().register(builder),
+            EpKind::DirectMl => ep::DirectML::default().register(builder),
+            EpKind::CoreMl => ep::CoreML::default().register(builder),
+        };
+        match result {
+            Ok(()) => {
+                if resolved.is_none() {
+                    resolved = Some(*ep);
+                }
+            }
+            Err(e) => eprintln!("execution provider {}: not used: {e}", ep.as_str()),
+        }
+    }
+    resolved
+}
+
 /// Build a [`LoadedModel`] from a directory containing `model.onnx`,
-/// `tokenizer.json`, and `config.json`.
-pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedModel> {
+/// `tokenizer.json`, and `config.json`. `eps` is the user's execution-provider
+/// priority list (settings), applied to the session before commit.
+pub fn load_model(
+    model_dir: &Path,
+    digit_level: u8,
+    eps: &[EpKind],
+) -> anyhow::Result<LoadedModel> {
     // Parse config.json first: it carries id2label AND pad_token_id, which
     // the padding setup below needs. The pad token is family-specific
     // (RoBERTa: 1/"<pad>", ModernBERT: 50283/"[PAD]") — deriving it from the
@@ -102,15 +148,18 @@ pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedMod
 
     // ort's `Error` carries a builder phantom that's not `Send + Sync`, so we
     // can't `?` it into `anyhow::Error`; stringify at the boundary.
-    let session = Session::builder()
+    let mut builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("set opt level: {e}"))?
+        .map_err(|e| anyhow::anyhow!("set opt level: {e}"))?;
+    let resolved_ep = register_eps(&mut builder, eps).unwrap_or(EpKind::Cpu);
+    let session = builder
         .commit_from_file(model_dir.join("model.onnx"))
         .map_err(|e| anyhow::anyhow!("commit_from_file: {e}"))?;
 
     Ok(LoadedModel {
         digit_level,
+        resolved_ep,
         session: Mutex::new(session),
         tokenizer,
         id2label,
@@ -345,6 +394,14 @@ impl InferenceRegistry {
             _ => None,
         }
     }
+
+    /// The execution provider this registry's sessions run on. All three
+    /// models load with the same priority list in one `load_all_models` call,
+    /// so resolution is uniform by construction; read it from any of them.
+    #[must_use]
+    pub fn execution_provider(&self) -> EpKind {
+        self.two_digit.resolved_ep
+    }
 }
 
 /// Same product dir convention as `db.rs::PRODUCT_DIR` and `config.rs` —
@@ -376,8 +433,9 @@ pub fn models_root() -> Result<PathBuf, String> {
 
 /// Load all three digit-level models from `root`. Slow (each model is
 /// ~500 MB); call once at startup. The caller resolves `root` per build
-/// flavor (`resource_dir` for airgap, [`models_root`] otherwise).
-pub fn load_all_models(root: &Path) -> anyhow::Result<InferenceRegistry> {
+/// flavor (`resource_dir` for airgap, [`models_root`] otherwise) and passes
+/// the settings' execution-provider priority list.
+pub fn load_all_models(root: &Path, eps: &[EpKind]) -> anyhow::Result<InferenceRegistry> {
     if !root.exists() {
         anyhow::bail!(
             "models directory missing: {} — run `task models:install` to copy \
@@ -387,9 +445,9 @@ pub fn load_all_models(root: &Path) -> anyhow::Result<InferenceRegistry> {
         );
     }
     Ok(InferenceRegistry {
-        two_digit: load_model(&root.join("two-digit"), 2)?,
-        four_digit: load_model(&root.join("four-digit"), 4)?,
-        six_digit: load_model(&root.join("six-digit"), 6)?,
+        two_digit: load_model(&root.join("two-digit"), 2, eps)?,
+        four_digit: load_model(&root.join("four-digit"), 4, eps)?,
+        six_digit: load_model(&root.join("six-digit"), 6, eps)?,
     })
 }
 
@@ -429,6 +487,19 @@ impl ModelStore {
             .write()
             .map_err(|_| "model store lock poisoned".to_owned())?;
         *guard = Some(std::sync::Arc::new(registry));
+        Ok(())
+    }
+
+    /// Empty the store so the next load rebuilds sessions (EPI-73: an EP
+    /// priority reorder re-registers providers). A run in flight keeps its
+    /// `Arc` clone and finishes on the old sessions — new runs get the new
+    /// registry.
+    pub(crate) fn clear(&self) -> Result<(), String> {
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| "model store lock poisoned".to_owned())?;
+        *guard = None;
         Ok(())
     }
 

@@ -1,10 +1,11 @@
 import type { Component } from "vue";
 import AboutSettings from "../views/settings/AboutSettings.vue";
 import GeneralSettings from "../views/settings/GeneralSettings.vue";
+import InferenceSettings from "../views/settings/InferenceSettings.vue";
 import ThemeSettings from "../views/settings/ThemeSettings.vue";
 
 /** Stable id for each Settings sub-section. Persisted in the workspace store. */
-export type SettingsSectionId = "general" | "theme" | "about";
+export type SettingsSectionId = "general" | "inference" | "theme" | "about";
 
 export interface SettingsSectionDef {
   id: SettingsSectionId;
@@ -23,6 +24,12 @@ export const settingsSections: SettingsSectionDef[] = [
     label: "General",
     icon: "i-lucide-settings-2",
     component: GeneralSettings,
+  },
+  {
+    id: "inference",
+    label: "Inference",
+    icon: "i-lucide-cpu",
+    component: InferenceSettings,
   },
   {
     id: "theme",

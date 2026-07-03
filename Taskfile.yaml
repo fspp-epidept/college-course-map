@@ -32,6 +32,9 @@ tasks:
     # No-op on macOS/Windows. See also #97.
     env:
       WEBKIT_DISABLE_DMABUF_RENDERER: 1
+    # EPI-73: bundle.resources ships runtimes/cpu; tauri dev fails on the
+    # missing directory otherwise. The fetch is idempotent (marker-skipped).
+    deps: [runtimes:fetch]
     cmds:
       - pnpm tauri dev
 
@@ -43,6 +46,7 @@ tasks:
 
   build:
     desc: Build the Tauri app bundle
+    deps: [runtimes:fetch]
     cmds:
       - pnpm tauri build
 
@@ -53,6 +57,7 @@ tasks:
       # sections (modern glibc/toolchain hosts, e.g. Arch); stripping is
       # cosmetic for a 1.4 GB bundle anyway.
       NO_STRIP: "1"
+    deps: [runtimes:fetch]
     preconditions:
       - sh: test -f scripts/models/output/two-digit/model.onnx
         msg: "models missing — run `task models:convert` first"
@@ -167,6 +172,16 @@ tasks:
     desc: Copy converted ONNX models from scripts/models/output into the data dir (skips entries that already exist)
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example models_install
+
+  runtimes:fetch:
+    desc: "EPI-73: download + verify + extract ONNX Runtime packs into src-tauri/runtimes/ (default cpu; GPU pack: `task runtimes:fetch -- cuda`)"
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example runtime_install -- {{.CLI_ARGS | default "cpu"}}
+
+  check:runtime:
+    desc: "EPI-73: report which runtime pack + execution provider this machine resolves to, and time one real classification on it"
+    cmds:
+      - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example runtime_check
 
   check:parity:
     desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match

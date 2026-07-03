@@ -615,7 +615,7 @@ pub(crate) fn start_run(
          VALUES (?, ?, ?, 'running', ?,
                  ?, 0,
                  ?, 0, 0,
-                 ?, ?, ?, 'cpu')",
+                 ?, ?, ?, ?)",
         params![
             run_id,
             req.dataset_id,
@@ -626,6 +626,7 @@ pub(crate) fn start_run(
             now,
             now,
             now,
+            registry.execution_provider().as_str(),
         ],
     )
     .map_err(|e| format!("insert runs: {e}"))?;
@@ -708,19 +709,22 @@ pub(crate) fn resume_run(
                 .to_owned(),
         );
     }
-    let model_loaded = store
-        .get()
-        .is_some_and(|registry| registry.by_digit_level(digit_level).is_some());
-    if !model_loaded {
+    let Some(registry) = store.get() else {
+        return Err(models_unready_message(&store));
+    };
+    if registry.by_digit_level(digit_level).is_none() {
         return Err(models_unready_message(&store));
     }
 
     let now = Utc::now().to_rfc3339();
+    // execution_provider reflects where the run's inference *last* executed —
+    // a resume may land on a different EP than the original attempt (pack
+    // downloaded since, settings reordered), so record the current one.
     conn.execute(
         "UPDATE runs SET state = 'running', resume_count = resume_count + 1,
-                error_message = NULL, last_progress_at = ?
+                error_message = NULL, last_progress_at = ?, execution_provider = ?
          WHERE id = ?",
-        params![now, run_id],
+        params![now, registry.execution_provider().as_str(), run_id],
     )
     .map_err(|e| format!("mark run resuming: {e}"))?;
     drop(conn);

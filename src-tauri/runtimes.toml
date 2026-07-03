@@ -1,0 +1,64 @@
+# Pinned ONNX Runtime packs (EPI-73) — the dylibs `load-dynamic` loads at
+# startup via `ort::init_from`. Every pack is a repackaged official
+# microsoft/onnxruntime release asset, pinned by exact version + sha256
+# (digests from the GitHub release API). `ort_version` must stay in lockstep
+# with the ONNX Runtime version the `ort` crate targets (see Cargo.toml:
+# ort 2.0.0-rc.12 = api-24 = ONNX Runtime 1.24.x) — bumping `ort` means
+# re-pinning every pack in the same PR.
+#
+# `id` is the user-facing pack name; (id, target) is the lookup key.
+# `eps` lists the execution providers compiled into the pack, most
+# capable first — display metadata for the settings UI, not a contract;
+# ep.is_available() against the loaded dylib is the runtime truth.
+
+ort_version = "1.24.2"
+
+# --- Linux x86_64 ---
+
+[[pack]]
+id = "cpu"
+target = "x86_64-unknown-linux-gnu"
+eps = ["cpu"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz"
+sha256 = "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6"
+size = 8123282
+
+[[pack]]
+id = "cuda"
+target = "x86_64-unknown-linux-gnu"
+eps = ["cuda", "tensorrt"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu-1.24.2.tgz"
+sha256 = "bcb42da041f42192e5579de175f7410313c114740a611e230afe9d79be65cc49"
+size = 205369881
+
+# --- Windows x86_64 ---
+# The CPU zip's DirectML status is unverified (EPI-73 flag: MS historically
+# ships the DML EP only in the DirectML NuGet). eps stays ["cpu"] until a
+# Windows machine confirms otherwise.
+
+[[pack]]
+id = "cpu"
+target = "x86_64-pc-windows-msvc"
+eps = ["cpu"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip"
+sha256 = "8e3e9c826375352e29cb2614fe44f3d7a4b0ff7b8028ad7a456af9d949a7e8b0"
+size = 74075355
+
+[[pack]]
+id = "cuda"
+target = "x86_64-pc-windows-msvc"
+eps = ["cuda", "tensorrt"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu-1.24.2.zip"
+sha256 = "4152b67ea67405cf642fdc484a4e24fb1d9bfda7a78dfd5f756c73812a40bdcd"
+size = 280855316
+
+# --- macOS aarch64 ---
+# The official osx build includes the CoreML EP; there is no separate GPU pack.
+
+[[pack]]
+id = "cpu"
+target = "aarch64-apple-darwin"
+eps = ["coreml", "cpu"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-osx-arm64-1.24.2.tgz"
+sha256 = "0af4fa503e8ea285245b47ee42d0a7461b8156a81270857da0c1d4ecf858abde"
+size = 31604221

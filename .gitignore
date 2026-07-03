@@ -27,6 +27,9 @@ tmp/
 scripts/models/output/
 scripts/models/.venv/
 
+# ONNX Runtime packs fetched by `task runtimes:fetch` (EPI-73)
+src-tauri/runtimes/
+
 # Task runner checksum cache
 .task/
 

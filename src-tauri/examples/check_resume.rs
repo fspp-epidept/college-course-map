@@ -32,6 +32,7 @@ use course_classifier_lib::{
     inference::{self, LoadedModel},
     manifest,
     runs::{RunPipeline, sweep_orphaned_runs},
+    runtime::{self, EpKind},
 };
 use duckdb::params;
 
@@ -365,8 +366,12 @@ fn parent_main() -> anyhow::Result<()> {
 }
 
 /// Load the manifest-active model for the digit level under test from the
-/// same on-disk location the app uses.
+/// same on-disk location the app uses. Also loads ONNX Runtime from the dev
+/// CPU pack — deterministic across the kill/resume legs, and each process
+/// (parent, child) calls this exactly once, satisfying init-once.
 fn load_active_model() -> anyhow::Result<LoadedModel> {
+    runtime::init_ort(&runtime::dev_cpu_pack_dir())
+        .map_err(|e| anyhow::anyhow!("{e} — run `task runtimes:fetch` first"))?;
     let manifest = manifest::load().map_err(anyhow::Error::msg)?;
     let entry = manifest
         .model
@@ -374,5 +379,5 @@ fn load_active_model() -> anyhow::Result<LoadedModel> {
         .find(|m| m.digit_level == DIGIT_LEVEL)
         .context("manifest has no entry for the test digit level")?;
     let root = inference::models_root().map_err(anyhow::Error::msg)?;
-    inference::load_model(&root.join(&entry.app_subdir), DIGIT_LEVEL)
+    inference::load_model(&root.join(&entry.app_subdir), DIGIT_LEVEL, &[EpKind::Cpu])
 }

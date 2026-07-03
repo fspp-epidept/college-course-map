@@ -129,6 +129,23 @@ pub(crate) async fn load_models(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("load task panicked: {e}"))?
 }
 
+/// Clear the store and load fresh — the settings path for changes that only
+/// take effect at session build time (EPI-73: EP priority reorder). Unlike
+/// `load_models`, already-loaded is not a no-op. A run in flight finishes on
+/// its `Arc` of the old registry; new runs see the new sessions.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn reload_models(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = app.state::<ModelStore>();
+        store.clear()?;
+        let _ = ModelsStateChanged {}.emit(&app);
+        load_now(&app)
+    })
+    .await
+    .map_err(|e| format!("reload task panicked: {e}"))?
+}
+
 /// Synchronous body shared by the `load_models` command and startup autoload.
 pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
     let store = app.state::<ModelStore>();
@@ -141,7 +158,11 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
     let _ = ModelsStateChanged {}.emit(app);
     let result = (|| {
         let root = active_models_root(app)?;
-        let registry = inference::load_all_models(&root).map_err(|e| e.to_string())?;
+        // The EP priority list is read at load time, so a settings reorder
+        // takes effect by re-triggering a model load — no restart. (Switching
+        // runtime *packs* is the part that needs a relaunch; see runtime.rs.)
+        let eps = crate::config::read_settings()?.execution_providers;
+        let registry = inference::load_all_models(&root, &eps).map_err(|e| e.to_string())?;
         store.set(registry)
     })();
     store.end_loading();

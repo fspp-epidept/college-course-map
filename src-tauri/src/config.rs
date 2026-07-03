@@ -159,12 +159,21 @@ pub(crate) struct ThemeSummary {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) active_theme: String,
+    /// Execution-provider priority for inference (EPI-73), most preferred
+    /// first. `cpu` is a list entry meaning "allowed as fallback" — the one
+    /// mechanism, no separate GPU toggle. Reordering takes effect on the
+    /// next model load; switching *packs* (cpu↔cuda dylib) needs a relaunch.
+    /// `serde(default)` keeps pre-EPI-73 settings.json files parsing under
+    /// `deny_unknown_fields`.
+    #[serde(default = "crate::runtime::default_priority")]
+    pub(crate) execution_providers: Vec<crate::runtime::EpKind>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             active_theme: "default-light".to_owned(),
+            execution_providers: crate::runtime::default_priority(),
         }
     }
 }
