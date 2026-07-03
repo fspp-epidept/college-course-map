@@ -13,6 +13,11 @@ on:
         description: "Existing release tag to (re)build installers for"
         required: true
         type: string
+      platforms:
+        description: 'JSON array of runner labels to rebuild — trim to the failed leg(s) so a Windows retry does not re-bill the 10x macOS leg'
+        required: false
+        type: string
+        default: '["ubuntu-latest", "macos-latest", "windows-2022"]'
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -65,7 +70,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [ubuntu-latest, macos-latest, windows-latest]
+        # windows-2022, NOT windows-latest: the -latest image now carries the
+        # VS 18 toolset, whose STL removed stdext::checked_array_iterator —
+        # still used by the fmt vendored in libduckdb-sys' bundled DuckDB, so
+        # the native build fails (EPI-72, v0.2.0 run). Unpin when duckdb-rs
+        # bundles a DuckDB that compiles under VS 18.
+        platform: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.platforms) || fromJSON('["ubuntu-latest", "macos-latest", "windows-2022"]') }}
     runs-on: ${{ matrix.platform }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
