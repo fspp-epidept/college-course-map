@@ -24,6 +24,7 @@ export interface DownloadProgress {
   file: string;
   received: number;
   total: number;
+  bytesPerSec: number;
 }
 
 /**
@@ -49,6 +50,7 @@ export function useModelsEvents() {
             file: payload.file,
             received: payload.received,
             total: payload.total,
+            bytesPerSec: payload.bytesPerSec,
           },
         };
       }),
