@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type MaybeRefOrGetter, toValue, watch } from "vue";
-import { commands, type RunDetail, type RunSummary } from "../bindings";
+import { computed, type MaybeRefOrGetter, onMounted, onUnmounted, toValue, watch } from "vue";
+import { commands, events, type RunDetail, type RunSummary } from "../bindings";
 
 /**
  * Full runs list, server-sorted with active states first. The sidebar groups
@@ -56,6 +56,24 @@ export function useLatestRun(datasetId: MaybeRefOrGetter<string>) {
 export function useRunLifecycleRefresh() {
   const queryClient = useQueryClient();
   const { data: runs } = useRuns();
+
+  // Model lifecycle affects run resumability (the `model_loading` /
+  // `model_not_loaded` blockers are computed at read time), so a load
+  // starting or finishing must refresh the run queries — otherwise an
+  // interrupted run keeps saying "models are loading" after they've loaded.
+  // This lives here, not in useModelsEvents, because that one only mounts
+  // with the Models panel; this composable is always mounted (App.vue).
+  let unlistenModels: (() => void) | undefined;
+  onMounted(async () => {
+    unlistenModels = await events.modelsStateChanged.listen(() => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+    });
+  });
+  onUnmounted(() => {
+    unlistenModels?.();
+  });
+
   const lastStates = new Map<string, string>();
   watch(runs, (list) => {
     if (!list) return;
@@ -121,6 +139,8 @@ export function resumeBlockerText(key: string): string {
   switch (key) {
     case "model_superseded":
       return "This run used a model that is no longer the app's active model — start a new run instead. Its finished classifications stay in the cache.";
+    case "model_loading":
+      return "Models are loading — Resume will be available in a moment.";
     case "model_not_loaded":
       return "Models aren't loaded yet — download or load them from the Models panel, then resume.";
     default:
