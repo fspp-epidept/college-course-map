@@ -3,12 +3,23 @@ name: Release
 on:
   push:
     branches: [main]
+  # Retry path for the installer matrix: "Re-run failed jobs" replays the
+  # workflow as it existed at the release commit, so a workflow fix can never
+  # reach an already-created release that way. Dispatching with the release's
+  # tag builds with the CURRENT workflow and attaches to that release.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build installers for"
+        required: true
+        type: string
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
   release-please:
     name: Release PR / tag
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -46,7 +57,9 @@ jobs:
   build:
     name: Installers (${{ matrix.platform }})
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created }}
+    # !cancelled(): on dispatch the release-please job is skipped, which
+    # would otherwise skip dependents too.
+    if: ${{ !cancelled() && (needs.release-please.outputs.release_created || github.event_name == 'workflow_dispatch') }}
     permissions:
       contents: write # upload assets to the existing release
     strategy:
@@ -54,10 +67,25 @@ jobs:
       matrix:
         platform: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.platform }}
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
-      # The tag was created on this workflow's own trigger commit, so the
-      # default checkout ref IS the released commit.
+      # On push the tag was created on this workflow's own trigger commit, so
+      # the default checkout ref IS the released commit; on dispatch we must
+      # check out the tag itself (main may have moved past it).
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+
+      # Reclaim ~30 GB of preinstalled toolchains before the release-profile
+      # compile + deb/rpm/AppImage staging (same guard as ci.yml, where the
+      # first cold run exhausted the disk).
+      - name: Free runner disk space
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
 
       - uses: pnpm/action-setup@v4
 
@@ -99,4 +127,4 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ needs.release-please.outputs.tag_name }}
+          tagName: ${{ env.RELEASE_TAG }}
