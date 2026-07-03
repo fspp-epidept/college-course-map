@@ -31,6 +31,18 @@ url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxru
 sha256 = "bcb42da041f42192e5579de175f7410313c114740a611e230afe9d79be65cc49"
 size = 205369881
 
+# cuda13: same EPs built against CUDA 13 sonames (libcublas.so.13 etc.).
+# Which of cuda/cuda13 works is a property of the machine's CUDA install
+# (rolling distros like Arch ship 13); users download the matching one.
+
+[[pack]]
+id = "cuda13"
+target = "x86_64-unknown-linux-gnu"
+eps = ["cuda", "tensorrt"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu_cuda13-1.24.2.tgz"
+sha256 = "75128942ac9b22fb5001f1e1e041b473793958db016cd124a2ad981fe273ae12"
+size = 180220519
+
 # --- Windows x86_64 ---
 # The CPU zip's DirectML status is unverified (EPI-73 flag: MS historically
 # ships the DML EP only in the DirectML NuGet). eps stays ["cpu"] until a
@@ -51,6 +63,14 @@ eps = ["cuda", "tensorrt"]
 url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu-1.24.2.zip"
 sha256 = "4152b67ea67405cf642fdc484a4e24fb1d9bfda7a78dfd5f756c73812a40bdcd"
 size = 280855316
+
+[[pack]]
+id = "cuda13"
+target = "x86_64-pc-windows-msvc"
+eps = ["cuda", "tensorrt"]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu_cuda13-1.24.2.zip"
+sha256 = "72207a283ec9886e1968a4183636a7665c78e2154d4f4adc16e61193dd7a74f1"
+size = 288348147
 
 # --- macOS aarch64 ---
 # The official osx build includes the CoreML EP; there is no separate GPU pack.

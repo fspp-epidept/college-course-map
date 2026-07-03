@@ -47,15 +47,6 @@ pub enum EpKind {
 // runs.execution_provider stores.
 
 impl EpKind {
-    /// The pack id that carries this EP on the current platform.
-    #[must_use]
-    pub fn pack_id(self) -> &'static str {
-        match self {
-            Self::TensorRt | Self::Cuda => "cuda",
-            Self::DirectMl | Self::CoreMl | Self::Cpu => "cpu",
-        }
-    }
-
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -404,9 +395,12 @@ pub struct RuntimeState {
 }
 
 /// Choose the pack this process will load, from the user's EP priority list:
-/// the first EP whose pack is installed wins. `Cpu` in the list — or nothing
-/// installed — resolves to the bundled CPU pack under `resource_dir`, which
-/// ships with every build and is the terminal fallback by construction.
+/// the first EP with an *installed* pack claiming it wins (manifest order
+/// breaks ties — e.g. `cuda` before `cuda13`; only the one matching the
+/// machine's CUDA sonames will register, so users install the right one).
+/// `Cpu` in the list — or nothing installed — resolves to the bundled CPU
+/// pack under `resource_dir`, which ships with every build and is the
+/// terminal fallback by construction.
 pub fn resolve_startup_pack(
     manifest: &RuntimeManifest,
     eps: &[EpKind],
@@ -417,19 +411,21 @@ pub fn resolve_startup_pack(
         if *ep == EpKind::Cpu {
             break;
         }
-        let Some(pack) = packs.iter().find(|p| p.id == ep.pack_id()) else {
-            continue;
-        };
-        let dir = pack_dir(manifest, pack)?;
-        if installed(&dir, pack) {
-            return Ok((
-                RuntimeState {
-                    pack_id: pack.id.clone(),
-                    ort_version: manifest.ort_version.clone(),
-                    eps: pack.eps.clone(),
-                },
-                dir,
-            ));
+        for pack in packs
+            .iter()
+            .filter(|p| p.id != "cpu" && p.eps.iter().any(|e| e == ep.as_str()))
+        {
+            let dir = pack_dir(manifest, pack)?;
+            if installed(&dir, pack) {
+                return Ok((
+                    RuntimeState {
+                        pack_id: pack.id.clone(),
+                        ort_version: manifest.ort_version.clone(),
+                        eps: pack.eps.clone(),
+                    },
+                    dir,
+                ));
+            }
         }
     }
     let cpu_eps = packs
