@@ -637,10 +637,10 @@ pub(crate) fn start_run(
 
 /// Resume an `interrupted` run (EPI-38). Same worker, same run id: the row
 /// flips back to `running` with `resume_count` bumped, and the pipeline
-/// re-walks the whole dataset — everything already in `inference_results`
-/// is a cache hit, so only the remainder computes. Idempotent by
-/// construction. Progress restarts from row zero and races through the
-/// cached prefix.
+/// selects only the courses still missing a result for this model — progress
+/// continues from where it stopped (`total - remaining`), never from zero.
+/// Idempotent by construction: anything already in `inference_results` is
+/// never recomputed.
 #[tauri::command]
 #[specta::specta]
 #[expect(
@@ -777,6 +777,10 @@ impl RunTask {
     }
 }
 
+/// One selected course row: `(content_hash, subject_code, catalog_number,
+/// course_title)` — exactly the fields the loop formats and hashes against.
+type SelectedCourse = (String, String, String, String);
+
 /// The inference loop and its persistence, decoupled from Tauri managed state
 /// so the resume verification harness (`examples/check_resume.rs`, EPI-39)
 /// can drive the *real* pipeline — same batching, same flush transactions,
@@ -860,27 +864,47 @@ impl RunPipeline {
         }
     }
 
-    /// The batched inference loop. Walks the dataset in row order; every
-    /// `(model_id, content_hash)` already in `inference_results` is a cache
-    /// hit and skips compute — which is exactly what makes resume idempotent.
+    /// The batched inference loop. Selects only courses **without** a cached
+    /// result for this model (anti-join) and starts the progress counters at
+    /// `total - remaining` — everything already cached is accounted for up
+    /// front instead of re-walked row by row. This is what makes resume
+    /// *continue* from where it stopped (EPI-38) rather than visibly restart
+    /// at zero, and makes a fully-cached run complete near-instantly.
     pub fn execute(&self, db: &AppDb, model: &LoadedModel) -> Result<RunOutcome, String> {
-        let rows = self.select_courses(db)?;
-        let mut processed = 0_u64;
+        let (total, rows) = self.select_missing_courses(db)?;
+        let remaining = rows.len() as u64;
+        let mut processed = total.saturating_sub(remaining);
+        let mut cache_hits = processed;
         let mut unique_done = 0_u64;
-        let mut cache_hits = 0_u64;
+
+        // Surface the starting position immediately — before the first batch
+        // computes — so a resumed run's progress bar never reads zero.
+        {
+            let conn = db.rw()?;
+            self.flush_progress(&conn, processed, cache_hits)?;
+        }
 
         for chunk in rows.chunks(BATCH_SIZE) {
-            // 1. Bulk cache check — one IN-list query per chunk replaces N
-            //    single-row probes.
+            // 1. Bulk cache check — catches hashes computed earlier in *this*
+            //    leg (duplicate course content across chunks). The anti-join
+            //    snapshot was taken before the loop started, so it can't see
+            //    them.
             let cached = self.cache_hit_batch(db, chunk)?;
 
-            // 2. Format only the misses. `Miss` borrows `content_hash` from
-            //    `chunk` so flush_batch can pair it with its classification
-            //    without indexing back into the chunk later.
+            // 2. Format only the misses, deduplicating within the chunk: two
+            //    copies of the same course in one chunk would otherwise both
+            //    classify and collide on the cache's (model_id, content_hash)
+            //    primary key at flush. The second copy rides on the first's
+            //    result, so it counts as a hit. `Miss` borrows `content_hash`
+            //    from `chunk` so flush_batch can pair it with its
+            //    classification without indexing back into the chunk later.
+            let mut seen_in_chunk = std::collections::HashSet::new();
             let misses: Vec<Miss<'_>> = chunk
                 .iter()
                 .zip(cached.iter())
-                .filter(|&(_, &hit)| !hit)
+                .filter(|((content_hash, ..), hit)| {
+                    !**hit && seen_in_chunk.insert(content_hash.as_str())
+                })
                 .map(|((content_hash, subject, catalog, title), _)| Miss {
                     content_hash: content_hash.as_str(),
                     input: format_input(&CourseInput {
@@ -898,7 +922,7 @@ impl RunPipeline {
 
             // 4. Bulk insert via Appender + single progress UPDATE, both under
             //    one RW-mutex acquire instead of 2*N per chunk.
-            let chunk_hits = cached.iter().filter(|h| **h).count();
+            let chunk_hits = chunk.len() - misses.len();
             let processed_after = processed + chunk.len() as u64;
             let cache_hits_after = cache_hits + chunk_hits as u64;
             self.flush_batch(
@@ -934,31 +958,45 @@ impl RunPipeline {
         })
     }
 
-    fn select_courses(&self, db: &AppDb) -> Result<Vec<(String, String, String, String)>, String> {
+    /// `(dataset course count, courses with no cached result for this model)`
+    /// in row order. The anti-join is what keeps a resumed (or re-run) leg
+    /// from materializing and re-walking work that's already done; it also
+    /// shrinks the in-memory selection to the actual remainder (relevant to
+    /// EPI-67).
+    fn select_missing_courses(&self, db: &AppDb) -> Result<(u64, Vec<SelectedCourse>), String> {
         let conn = db.rw()?;
+        let total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
+                params![&self.dataset_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count courses: {e}"))?;
         let mut stmt = conn
             .prepare(
-                "SELECT content_hash, subject_code, catalog_number, course_title
-                 FROM courses
-                 WHERE dataset_id = ?
-                 ORDER BY row_index",
+                "SELECT c.content_hash, c.subject_code, c.catalog_number, c.course_title
+                 FROM courses c
+                 WHERE c.dataset_id = ?
+                   AND NOT EXISTS (
+                       SELECT 1 FROM inference_results ir
+                       WHERE ir.model_id = ? AND ir.content_hash = c.content_hash
+                   )
+                 ORDER BY c.row_index",
             )
             .map_err(|e| format!("prepare select courses: {e}"))?;
-        stmt.query_map(params![&self.dataset_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })
-        .map_err(|e| format!("query courses: {e}"))?
-        .collect::<Result<_, _>>()
-        .map_err(|e| format!("collect courses: {e}"))
+        let rows = stmt
+            .query_map(params![&self.dataset_id, &self.model_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|e| format!("query courses: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("collect courses: {e}"))?;
+        Ok((u64::try_from(total).unwrap_or(0), rows))
     }
 
     /// Returns a `Vec<bool>` aligned with `chunk`: true if the
     /// `(model_id, content_hash)` pair is already in `inference_results`.
-    fn cache_hit_batch(
-        &self,
-        db: &AppDb,
-        chunk: &[(String, String, String, String)],
-    ) -> Result<Vec<bool>, String> {
+    fn cache_hit_batch(&self, db: &AppDb, chunk: &[SelectedCourse]) -> Result<Vec<bool>, String> {
         if chunk.is_empty() {
             return Ok(Vec::new());
         }
@@ -1046,12 +1084,22 @@ impl RunPipeline {
                 .map_err(|e| format!("inference appender flush: {e}"))?;
         }
 
+        self.flush_progress(&conn, processed_after, cache_hits_after)
+    }
+
+    /// Single progress UPDATE on an already-held connection.
+    fn flush_progress(
+        &self,
+        conn: &duckdb::Connection,
+        processed: u64,
+        cache_hits: u64,
+    ) -> Result<(), String> {
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE runs SET rows_processed=?, cache_hits=?, last_progress_at=? WHERE id=?",
             params![
-                i64::try_from(processed_after).unwrap_or(i64::MAX),
-                i64::try_from(cache_hits_after).unwrap_or(i64::MAX),
+                i64::try_from(processed).unwrap_or(i64::MAX),
+                i64::try_from(cache_hits).unwrap_or(i64::MAX),
                 &now,
                 &self.run_id,
             ],
