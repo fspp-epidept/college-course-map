@@ -2,9 +2,9 @@
 import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
-import { useCourses, useModelIdForDigitLevel } from "../../composables/useCourses";
+import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useDatasets } from "../../composables/useDatasets";
-import { useRun } from "../../composables/useRuns";
+import { useLatestRun, usePauseRun, useRuns } from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -13,82 +13,120 @@ const props = defineProps<{ tab: OpenTab }>();
 // to get the dataset id this tab is bound to.
 const datasetId = computed(() => props.tab.id.replace(/^dataset:/, ""));
 
-const digitLevel = ref<2 | 4 | 6>(6);
-// Run id of the most-recently-started run on this dataset tab. The live
-// progress meter polls this id; when null nothing renders.
-const activeRunId = ref<string | null>(null);
-const startError = ref<string | null>(null);
+type DigitLevel = 2 | 4 | 6;
+const LEVELS: readonly DigitLevel[] = [2, 4, 6] as const;
+
+// Which model's results the courses table shows. Pure view state — switching
+// never starts work (EPI-68 view/action split). Fresh per tab: TabbedView
+// keys the component by tab id.
+const viewLevel = ref<DigitLevel>(6);
 
 const queryClient = useQueryClient();
 
+// --- Run state (backend-derived, EPI-68) ---
+// The run surface card renders from "the dataset's latest run" as the backend
+// reports it — not from a component-local run id — so it survives tab
+// close/reopen and app restart. Polls 250 ms while running.
+const { data: latestRun } = useLatestRun(datasetId);
+const isRunning = computed(() => latestRun.value?.state === "running");
+
+// Global runs list (1 s heartbeat while anything runs) tells this tab about
+// runs on *other* datasets: only one run may be active app-wide.
+const { data: allRuns } = useRuns();
+const activeElsewhere = computed(() => {
+  const other = allRuns.value?.find(
+    (r) => r.state === "running" && r.datasetId !== datasetId.value,
+  );
+  return other ?? null;
+});
+
+// --- Coverage (EPI-68) ---
+// Per-model classified/total counts: feeds the view-switcher chips and the
+// confirm panel's "already classified" line.
+const { data: coverage, refetch: refetchCoverage } = useCoverage(datasetId);
+function coverageFor(level: DigitLevel) {
+  return coverage.value?.find((c) => c.digitLevel === level) ?? null;
+}
+function coverageLabel(level: DigitLevel): string {
+  const c = coverageFor(level);
+  if (!c || c.total === 0 || c.classified === 0) return "—";
+  const pct = Math.floor((c.classified / c.total) * 100);
+  // A dataset that's classified-but-not-quite-100% floors to 99, never
+  // rounds up to a dishonest 100.
+  return `${c.classified >= c.total ? 100 : Math.min(pct, 99)}%`;
+}
+
+// --- Classify action ---
+
+const confirmLevel = ref<DigitLevel | null>(null);
+const startError = ref<string | null>(null);
+
 const classify = useMutation({
-  mutationFn: async (level: 2 | 4 | 6) => {
+  mutationFn: async (level: DigitLevel) => {
     const result = await commands.startRun({
       datasetId: datasetId.value,
       digitLevel: level,
     });
     if (result.status === "error") throw new Error(result.error);
-    return { ...result.data, digitLevel: level };
+    return result.data;
   },
-  onSuccess: (data) => {
-    activeRunId.value = data.runId;
+  onSuccess: () => {
+    confirmLevel.value = null;
     startError.value = null;
+    // ["runs"] prefix-matches the latest-run query, which flips the card to
+    // its running state on the next render.
+    queryClient.invalidateQueries({ queryKey: ["runs"] });
     queryClient.invalidateQueries({ queryKey: ["datasets"] });
     queryClient.invalidateQueries({ queryKey: ["metrics"] });
-    queryClient.invalidateQueries({ queryKey: ["runs"] });
   },
   onError: (err: Error) => {
     startError.value = err.message;
   },
 });
 
-// `useRun` polls every 250 ms while state === 'running'. When the run we
-// kicked off completes, also nudge the global query caches so the sidebar /
-// metrics surfaces refresh exactly once and the courses table pulls fresh
-// classification columns.
-const runQueryId = computed(() => activeRunId.value ?? "");
-const { data: activeRun } = useRun(runQueryId);
+function requestRun(level: DigitLevel): void {
+  startError.value = null;
+  confirmLevel.value = level;
+  // The confirm panel quotes cache numbers; make sure they're current at the
+  // moment of decision, not from tab-mount time.
+  refetchCoverage();
+}
 
-watch(
-  () => activeRun.value?.state,
-  (state) => {
-    if (state === "completed" || state === "failed") {
-      queryClient.invalidateQueries({ queryKey: ["datasets"] });
-      queryClient.invalidateQueries({ queryKey: ["metrics"] });
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
-      queryClient.invalidateQueries({ queryKey: ["courses"] });
-    }
-  },
+function confirmRun(): void {
+  if (confirmLevel.value === null) return;
+  classify.mutate(confirmLevel.value);
+}
+
+const dropdownItems = computed(() =>
+  LEVELS.map((level) => ({
+    label: `Classify ${level}-digit`,
+    onSelect: () => requestRun(level),
+  })),
 );
 
-// While a run is running, keep the courses table fresh so newly-written
-// classifications surface every poll cycle.
-watch(
-  () => activeRun.value?.rowsProcessed,
-  (next, prev) => {
-    if (activeRun.value?.state !== "running") return;
-    if (next === prev) return;
-    queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
-  },
-);
-
-// Note: we deliberately don't invalidate the courses query on every import
-// progress tick. That cascade (listDatasets → invalidate courses →
-// listCoursesWithResults) was hammering DuckDB while the Appender writer was
-// busy and pinning the WebView main thread. The `useCourses` query is
-// disabled outright while import_state === 'importing'; when it flips to
-// 'ready' we invalidate once below.
-
-const progressPct = computed(() => {
-  const r = activeRun.value;
-  if (!r?.rowsTotal || r.rowsProcessed === null || r.rowsProcessed === undefined) {
-    return null;
-  }
-  return Math.round((r.rowsProcessed / r.rowsTotal) * 100);
+// Confirm-panel numbers for the pending level.
+const confirmCoverage = computed(() => {
+  if (confirmLevel.value === null) return null;
+  return coverageFor(confirmLevel.value);
 });
 
-const isRunning = computed(() => activeRun.value?.state === "running");
+// --- Pause ---
 
+const pauseRun = usePauseRun();
+// `pause_run` flips a flag; the worker still drains its current batch before
+// the run flips to `interrupted`. Track the request locally so the card can
+// say "Pausing…" during that honest gap.
+const pauseRequested = ref(false);
+function onPause(): void {
+  if (!latestRun.value) return;
+  pauseRequested.value = true;
+  pauseRun.mutate(latestRun.value.id);
+}
+watch(isRunning, (running) => {
+  if (!running) pauseRequested.value = false;
+});
+
+// --- Dataset import state ---
 // Surface this dataset's import state by reusing the cached datasets query
 // (it's already polled while any import is active). No extra IPC traffic.
 const { data: datasets } = useDatasets();
@@ -96,35 +134,65 @@ const dataset = computed(() => datasets.value?.find((d) => d.id === datasetId.va
 const isImporting = computed(() => dataset.value?.importState === "importing");
 const importFailed = computed(() => dataset.value?.importState === "failed");
 
-// When import finishes (or fails), refresh the courses query exactly once so
-// the table fills in. We watch the boolean transition rather than the row
-// count so this fires at most twice per import (start + end), not per tick.
+// When import finishes (or fails), refresh the courses + coverage queries
+// exactly once so the table fills in.
 watch(isImporting, (now, before) => {
   if (before && !now) {
     queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
+    queryClient.invalidateQueries({ queryKey: ["coverage", datasetId.value] });
   }
 });
 
-// Classify never starts on the first click (EPI-66): the button opens a
-// confirmation dialog stating scope and cache semantics, and only an explicit
-// confirm starts the run. `digitLevel` (which drives the courses table's
-// joined column) also only switches on confirm, so cancelling leaves the
-// view untouched.
-const confirmLevel = ref<2 | 4 | 6 | null>(null);
-const confirmOpen = ref(false);
+const classifyDisabled = computed(
+  () =>
+    classify.isPending.value ||
+    isRunning.value ||
+    activeElsewhere.value !== null ||
+    isImporting.value ||
+    importFailed.value,
+);
 
-function requestRun(level: 2 | 4 | 6): void {
-  confirmLevel.value = level;
-  confirmOpen.value = true;
-}
+// --- Run card presentation ---
 
-function confirmRun(): void {
-  const level = confirmLevel.value;
-  if (level === null) return;
-  confirmOpen.value = false;
-  digitLevel.value = level;
-  classify.mutate(level);
-}
+const progressPct = computed(() => {
+  const r = latestRun.value;
+  if (!r?.rowsTotal || r.rowsProcessed === null || r.rowsProcessed === undefined) {
+    return null;
+  }
+  return Math.round((r.rowsProcessed / r.rowsTotal) * 100);
+});
+
+const runStateHeading = computed(() => {
+  const r = latestRun.value;
+  if (!r) return "";
+  const level = r.digitLevel ? `${r.digitLevel}-digit` : "";
+  if (r.state === "running" && pauseRequested.value)
+    return "Pausing — finishing the current batch…";
+  switch (r.state) {
+    case "running":
+      return `Classifying (${level})…`;
+    case "completed":
+      return `${level} run complete`;
+    case "interrupted":
+      return `${level} run paused`;
+    case "failed":
+      return `${level} run failed`;
+    default:
+      return `${level} run ${r.state}`;
+  }
+});
+
+// While a run is writing results for the level being viewed, keep the visible
+// table page fresh. Other levels' columns can't change, so don't refetch them.
+watch(
+  () => latestRun.value?.rowsProcessed,
+  (next, prev) => {
+    if (!isRunning.value || next === prev) return;
+    if (latestRun.value?.digitLevel === viewLevel.value) {
+      queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
+    }
+  },
+);
 
 // --- Courses table ---
 
@@ -139,12 +207,12 @@ const cursorStack = ref<number[]>([]);
 
 // Reset pagination whenever the user switches digit level (the joined column
 // changes underneath them).
-watch(digitLevel, () => {
+watch(viewLevel, () => {
   cursor.value = null;
   cursorStack.value = [];
 });
 
-const { data: modelId } = useModelIdForDigitLevel(digitLevel);
+const { data: modelId } = useModelIdForDigitLevel(viewLevel);
 const {
   data: coursePage,
   isPending: coursesPending,
@@ -253,115 +321,210 @@ async function exportCsv(): Promise<void> {
     </div>
 
     <section class="flex flex-col gap-3">
-      <h3 class="text-sm font-medium text-(--ui-text)">Classify</h3>
-      <div class="flex items-center gap-2">
-        <UButton
-          v-for="level in [2, 4, 6] as const"
-          :key="level"
-          :color="digitLevel === level ? 'primary' : 'neutral'"
-          :variant="digitLevel === level ? 'solid' : 'outline'"
-          :loading="classify.isPending.value && digitLevel === level"
-          :disabled="classify.isPending.value || isRunning || isImporting || importFailed"
-          @click="requestRun(level)"
-        >
-          Classify ({{ level }}-digit)
-        </UButton>
-      </div>
-
-      <UModal
-        v-model:open="confirmOpen"
-        :title="`Start ${confirmLevel}-digit classification`"
-        :ui="{ footer: 'justify-end' }"
-      >
-        <template #body>
-          <div class="flex flex-col gap-2 text-sm text-(--ui-text-muted)">
-            <p>
-              Classifies all
-              <span class="text-(--ui-text) tabular-nums">
-                {{ (dataset?.rowCount ?? totalRows).toLocaleString() }}
-              </span>
-              courses in
-              <span class="text-(--ui-text)">{{ tab.label }}</span> with the
-              {{ confirmLevel }}-digit CCM model.
-            </p>
-            <p>
-              Runs locally on this machine. Courses already classified by this
-              model are reused from the cache; only new course content is
-              computed. Progress shows on this tab, and you can keep working
-              while it runs.
-            </p>
-          </div>
-        </template>
-        <template #footer>
-          <UButton variant="ghost" color="neutral" @click="confirmOpen = false">
-            Cancel
+      <!-- Classify action: one split button. The main button targets the level
+           currently in view; the chevron opens the other levels. Selection of
+           what to LOOK at lives in the table header below — this control only
+           starts work, and always via the inline confirm. -->
+      <div class="flex items-center gap-3">
+        <div class="inline-flex">
+          <UButton
+            color="primary"
+            icon="i-lucide-play"
+            class="rounded-r-none"
+            :disabled="classifyDisabled"
+            @click="requestRun(viewLevel)"
+          >
+            Classify {{ viewLevel }}-digit
           </UButton>
-          <UButton color="primary" @click="confirmRun">Start run</UButton>
-        </template>
-      </UModal>
-
-      <div
-        v-if="startError"
-        class="rounded-lg border border-(--ui-color-error-500)/40 bg-(--ui-color-error-500)/10 px-3 py-2 text-sm text-(--ui-color-error-500)"
-      >
-        {{ startError }}
+          <UDropdownMenu :items="dropdownItems" :content="{ align: 'end' }">
+            <UButton
+              color="primary"
+              icon="i-lucide-chevron-down"
+              class="rounded-l-none border-l border-(--ui-bg)/30"
+              square
+              aria-label="Classify at another level"
+              :disabled="classifyDisabled"
+            />
+          </UDropdownMenu>
+        </div>
+        <span v-if="activeElsewhere" class="text-xs text-(--ui-text-muted)">
+          A run is active on
+          <span class="text-(--ui-text)">{{ activeElsewhere.datasetTitle }}</span>
+          — pause it or wait for it to finish.
+        </span>
       </div>
 
-      <div
-        v-if="activeRun"
-        class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
+      <!-- Inline confirm panel (EPI-66's confirm requirement, EPI-68's form).
+           Expands in place of the run card; the numbers sit next to the table
+           they describe. No overlay, nothing modal to dismiss. -->
+      <Transition
+        mode="out-in"
+        enter-active-class="transition duration-200 ease-out motion-reduce:transition-none"
+        enter-from-class="opacity-0 -translate-y-1"
+        leave-active-class="transition duration-150 ease-out motion-reduce:transition-none"
+        leave-to-class="opacity-0 -translate-y-1"
       >
-        <div class="flex items-center justify-between">
+        <div
+          v-if="confirmLevel !== null"
+          key="confirm"
+          class="rounded-lg border border-(--ui-border-accented) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
+        >
           <span class="text-(--ui-text) font-medium">
-            <template v-if="activeRun.state === 'running'">
-              Classifying ({{ activeRun.digitLevel }}-digit)…
-            </template>
-            <template v-else-if="activeRun.state === 'completed'">
-              {{ activeRun.digitLevel }}-digit run complete
-            </template>
-            <template v-else-if="activeRun.state === 'failed'">
-              {{ activeRun.digitLevel }}-digit run failed
+            Start {{ confirmLevel }}-digit classification of {{ tab.label }}
+          </span>
+          <p class="text-(--ui-text-muted)">
+            <template v-if="confirmCoverage && confirmCoverage.classified > 0">
+              <span class="text-(--ui-text) tabular-nums">
+                {{ (confirmCoverage.total - confirmCoverage.classified).toLocaleString() }}
+              </span>
+              of
+              <span class="text-(--ui-text) tabular-nums">
+                {{ confirmCoverage.total.toLocaleString() }}
+              </span>
+              courses need computing —
+              <span class="text-(--ui-text) tabular-nums">
+                {{ confirmCoverage.classified.toLocaleString() }}
+              </span>
+              already classified by this model are reused from the cache.
             </template>
             <template v-else>
-              {{ activeRun.state }}
+              Classifies all
+              <span class="text-(--ui-text) tabular-nums">
+                {{ (confirmCoverage?.total ?? dataset?.rowCount ?? totalRows).toLocaleString() }}
+              </span>
+              courses with the {{ confirmLevel }}-digit CCM model.
             </template>
-          </span>
-          <span v-if="progressPct !== null" class="tabular-nums text-(--ui-text-muted)">
-            {{ progressPct }}%
-          </span>
+          </p>
+          <p class="text-(--ui-text-dimmed) text-xs">
+            Runs locally on this machine. You can keep working while it runs.
+          </p>
+          <p v-if="startError" class="text-(--ui-color-error-500) text-xs">
+            {{ startError }}
+          </p>
+          <div class="flex justify-end gap-2 pt-1">
+            <UButton variant="ghost" color="neutral" @click="confirmLevel = null">
+              Cancel
+            </UButton>
+            <UButton
+              color="primary"
+              :loading="classify.isPending.value"
+              :disabled="classifyDisabled"
+              @click="confirmRun"
+            >
+              Start run
+            </UButton>
+          </div>
         </div>
 
-        <UProgress
-          v-if="progressPct !== null"
-          :model-value="progressPct"
-          :max="100"
-          :color="activeRun.state === 'failed' ? 'error' : 'primary'"
-          size="sm"
-        />
-
-        <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-(--ui-text-muted)">
-          <span>Rows processed</span>
-          <span class="text-(--ui-text) tabular-nums">
-            {{ activeRun.rowsProcessed ?? 0 }} / {{ activeRun.rowsTotal ?? 0 }}
-          </span>
-          <span>New classifications</span>
-          <span class="text-(--ui-text) tabular-nums">{{ activeRun.uniqueInputsDone ?? 0 }}</span>
-          <span>Cache hits</span>
-          <span class="text-(--ui-text) tabular-nums">{{ activeRun.cacheHits ?? 0 }}</span>
-        </div>
-
-        <p
-          v-if="activeRun.errorMessage"
-          class="text-(--ui-color-error-500) text-xs"
+        <!-- Run surface card: the dataset's latest run as the backend reports
+             it. Confirm panel takes its place while a decision is pending. -->
+        <div
+          v-else-if="latestRun"
+          key="run-card"
+          class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
         >
-          {{ activeRun.errorMessage }}
-        </p>
-      </div>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-(--ui-text) font-medium">{{ runStateHeading }}</span>
+            <div class="flex items-center gap-3">
+              <span v-if="progressPct !== null && isRunning" class="tabular-nums text-(--ui-text-muted)">
+                {{ progressPct }}%
+              </span>
+              <UButton
+                v-if="isRunning"
+                color="neutral"
+                variant="subtle"
+                size="xs"
+                icon="i-lucide-pause"
+                :disabled="pauseRequested"
+                @click="onPause"
+              >
+                {{ pauseRequested ? "Pausing…" : "Pause" }}
+              </UButton>
+            </div>
+          </div>
+
+          <UProgress
+            v-if="progressPct !== null && isRunning"
+            :model-value="progressPct"
+            :max="100"
+            color="primary"
+            size="sm"
+          />
+
+          <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-(--ui-text-muted)">
+            <span>Rows processed</span>
+            <span class="text-(--ui-text) tabular-nums">
+              {{ (latestRun.rowsProcessed ?? 0).toLocaleString() }} /
+              {{ (latestRun.rowsTotal ?? 0).toLocaleString() }}
+            </span>
+            <span>New classifications</span>
+            <span class="text-(--ui-text) tabular-nums">
+              {{ (latestRun.uniqueInputsDone ?? 0).toLocaleString() }}
+            </span>
+            <span>Cache hits</span>
+            <span class="text-(--ui-text) tabular-nums">
+              {{ (latestRun.cacheHits ?? 0).toLocaleString() }}
+            </span>
+          </div>
+
+          <p v-if="latestRun.state === 'interrupted'" class="text-(--ui-text-dimmed) text-xs">
+            Progress is saved. Classify again to resume — courses already
+            finished come straight from the cache.
+          </p>
+
+          <p v-if="latestRun.errorMessage" class="text-(--ui-color-error-500) text-xs">
+            {{ latestRun.errorMessage }}
+          </p>
+
+          <div
+            v-if="latestRun.state === 'completed' && latestRun.digitLevel && latestRun.digitLevel !== viewLevel"
+          >
+            <UButton
+              variant="link"
+              color="primary"
+              size="xs"
+              class="px-0"
+              @click="viewLevel = latestRun.digitLevel as 2 | 4 | 6"
+            >
+              View {{ latestRun.digitLevel }}-digit results
+            </UButton>
+          </div>
+        </div>
+      </Transition>
     </section>
 
     <section v-if="!isImporting" class="flex flex-col gap-3 min-h-0">
-      <div class="flex items-baseline justify-between gap-3">
-        <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
+      <div class="flex items-center justify-between gap-3 flex-wrap">
+        <div class="flex items-center gap-3">
+          <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
+          <!-- View switcher: which model's results the table shows. Safe to
+               click — never starts work. The chip is that level's coverage. -->
+          <div
+            role="group"
+            aria-label="Result digit level"
+            class="inline-flex rounded-md border border-(--ui-border) bg-(--ui-bg-muted) p-0.5"
+          >
+            <button
+              v-for="level in LEVELS"
+              :key="level"
+              type="button"
+              class="px-2.5 py-1 rounded-[5px] text-xs flex items-baseline gap-1.5 transition-colors motion-reduce:transition-none"
+              :class="
+                viewLevel === level
+                  ? 'bg-(--ui-bg) text-(--ui-text) font-medium shadow-sm'
+                  : 'text-(--ui-text-muted) hover:text-(--ui-text)'
+              "
+              :aria-pressed="viewLevel === level"
+              :aria-label="`${level}-digit results, ${coverageLabel(level) === '—' ? 'not classified' : `${coverageLabel(level)} classified`}`"
+              @click="viewLevel = level"
+            >
+              {{ level }}-digit
+              <span class="tabular-nums text-[10px] text-(--ui-text-dimmed)">
+                {{ coverageLabel(level) }}
+              </span>
+            </button>
+          </div>
+        </div>
         <div class="flex items-baseline gap-3">
           <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
             <template v-if="totalRows > 0">
@@ -404,7 +567,7 @@ async function exportCsv(): Promise<void> {
                 <th class="px-3 py-2 text-left font-medium text-(--ui-text)">Catalog</th>
                 <th class="px-3 py-2 text-left font-medium text-(--ui-text)">Title</th>
                 <th class="px-3 py-2 text-left font-medium text-(--ui-text)">
-                  {{ digitLevel }}-digit CCM
+                  {{ viewLevel }}-digit CCM
                 </th>
                 <th class="px-3 py-2 text-right font-medium text-(--ui-text) w-24">
                   Confidence
@@ -468,11 +631,11 @@ async function exportCsv(): Promise<void> {
                             </span>
                           </p>
                           <p
-                            v-if="row.ccmTitleLevel === 2 && digitLevel !== 2"
+                            v-if="row.ccmTitleLevel === 2 && viewLevel !== 2"
                             class="text-xs text-(--ui-text-dimmed)"
                           >
                             2-digit parent category — no official
-                            {{ digitLevel }}-digit title exists for this code.
+                            {{ viewLevel }}-digit title exists for this code.
                           </p>
                           <p
                             v-if="row.ccmDescription"

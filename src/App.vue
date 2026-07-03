@@ -7,9 +7,14 @@ import CommandPalette from "./components/workbench/CommandPalette.vue";
 import MainPanel from "./components/workbench/MainPanel.vue";
 import PrimarySidebar from "./components/workbench/PrimarySidebar.vue";
 import ResizeHandle from "./components/workbench/ResizeHandle.vue";
+import { useRunLifecycleRefresh } from "./composables/useRuns";
 import { useWorkspace } from "./stores/workspace";
 
 const workspace = useWorkspace();
+
+// Global run heartbeat: refreshes courses/coverage/datasets/metrics when any
+// run finishes, even if the tab that started it is no longer mounted (EPI-68).
+useRunLifecycleRefresh();
 
 // macOS keeps native chrome (decorations + global menu); Windows/Linux get the
 // custom titlebar. See decision #102.

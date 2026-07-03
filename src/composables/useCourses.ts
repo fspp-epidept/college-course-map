@@ -1,6 +1,6 @@
 import { type MaybeRefOrGetter, computed, toValue } from "vue";
 import { useQuery } from "@tanstack/vue-query";
-import { type CoursePage, commands } from "../bindings";
+import { type CoursePage, type CoverageRow, commands } from "../bindings";
 
 interface UseCoursesArgs {
   datasetId: MaybeRefOrGetter<string>;
@@ -51,6 +51,25 @@ export function useCourses(args: UseCoursesArgs) {
     // Keep prior page data visible while the next page loads so the table
     // doesn't flash empty on pagination clicks.
     placeholderData: (prev) => prev,
+  });
+}
+
+/**
+ * Per-model classification coverage for a dataset (EPI-68): one row per
+ * manifest-active model with `classified` / `total` counts. Drives the
+ * dataset tab's per-level coverage chips and the pre-run confirm panel's
+ * "already classified" line. Refreshed via the global run-lifecycle watcher
+ * (`useRunLifecycleRefresh`) rather than per-tick polling — three joined
+ * COUNTs against a 2M-row dataset are not a 250 ms query.
+ */
+export function useCoverage(datasetId: MaybeRefOrGetter<string>) {
+  return useQuery({
+    queryKey: computed(() => ["coverage", toValue(datasetId)] as const),
+    queryFn: async (): Promise<CoverageRow[]> => {
+      const result = await commands.getClassificationCoverage(toValue(datasetId));
+      if (result.status === "error") throw new Error(result.error);
+      return result.data;
+    },
   });
 }
 

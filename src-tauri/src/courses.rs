@@ -289,3 +289,66 @@ pub(crate) fn model_id_for_digit_level(
 ) -> Result<Option<i64>, String> {
     Ok(catalog.model_id(digit_level))
 }
+
+/// Per-model classification coverage for one dataset: how many of its courses
+/// already have a cached result for each manifest-active model. Drives the
+/// dataset tab's per-level coverage chips and the pre-run confirm panel's
+/// "already classified" count (EPI-68). Counts are course-level (duplicate
+/// content hashes count once per course row), matching what a run would report.
+#[derive(Type, Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CoverageRow {
+    pub model_id: i64,
+    pub digit_level: u8,
+    pub classified: i64,
+    pub total: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn get_classification_coverage(
+    dataset_id: String,
+    db: State<'_, AppDb>,
+    catalog: State<'_, crate::manifest::ModelCatalog>,
+) -> Result<Vec<CoverageRow>, String> {
+    let conn = db.ro()?;
+    // Cached row count, same rationale as the pager: COUNT(*) over a
+    // multi-million-row partition is a scan we don't need.
+    let total: i64 = conn
+        .query_row(
+            "SELECT row_count FROM datasets WHERE id = ?",
+            duckdb::params![dataset_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("dataset {dataset_id}: {e}"))?;
+
+    let mut out: Vec<CoverageRow> = Vec::with_capacity(catalog.manifest.model.len());
+    for entry in &catalog.manifest.model {
+        let Some(model_id) = catalog.model_id(entry.digit_level) else {
+            continue;
+        };
+        let classified: i64 = conn
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM courses c
+                 JOIN inference_results ir
+                   ON ir.content_hash = c.content_hash AND ir.model_id = ?
+                 WHERE c.dataset_id = ?",
+                duckdb::params![model_id, dataset_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("coverage for model {model_id}: {e}"))?;
+        out.push(CoverageRow {
+            model_id,
+            digit_level: entry.digit_level,
+            classified,
+            total,
+        });
+    }
+    out.sort_by_key(|r| r.digit_level);
+    Ok(out)
+}

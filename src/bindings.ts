@@ -52,6 +52,14 @@ async writeSettings(settings: Settings) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getClassificationCoverage(datasetId: string) : Promise<Result<CoverageRow[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_classification_coverage", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listCoursesWithResults(req: ListCoursesRequest) : Promise<Result<CoursePage, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_courses_with_results", { req }) };
@@ -153,6 +161,20 @@ async loadModels() : Promise<Result<null, string>> {
 async modelsStatus() : Promise<Result<ModelStatus[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("models_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Most recent run for a dataset, or `None` if the dataset has never been
+ * classified. The dataset tab's run surface card derives from this — backend
+ * state, not component memory — so it survives tab close/reopen and app
+ * restart (EPI-68).
+ */
+async getLatestRun(datasetId: string) : Promise<Result<RunDetail | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_latest_run", { datasetId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -262,6 +284,14 @@ ccmDescription: string | null;
  * parent fallback); `None` when no taxonomy row matched.
  */
 ccmTitleLevel: number | null }
+/**
+ * Per-model classification coverage for one dataset: how many of its courses
+ * already have a cached result for each manifest-active model. Drives the
+ * dataset tab's per-level coverage chips and the pre-run confirm panel's
+ * "already classified" count (EPI-68). Counts are course-level (duplicate
+ * content hashes count once per course row), matching what a run would report.
+ */
+export type CoverageRow = { modelId: number; digitLevel: number; classified: number; total: number }
 export type CsvPreview = { headers: string[]; sampleRows: string[][]; totalColumns: number; sizeBytes: number }
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
