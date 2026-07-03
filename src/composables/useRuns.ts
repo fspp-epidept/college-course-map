@@ -1,6 +1,6 @@
-import { type MaybeRefOrGetter, computed, toValue, watch } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { type RunDetail, type RunSummary, commands } from "../bindings";
+import { computed, type MaybeRefOrGetter, toValue, watch } from "vue";
+import { commands, type RunDetail, type RunSummary } from "../bindings";
 
 /**
  * Full runs list, server-sorted with active states first. The sidebar groups
@@ -93,6 +93,39 @@ export function useRun(id: MaybeRefOrGetter<string>) {
       return data?.state === "running" ? 250 : false;
     },
   });
+}
+
+/**
+ * Resume an interrupted run (EPI-38). Same run id: `resume_count` bumps and
+ * the pipeline re-walks the dataset, skipping everything already cached.
+ */
+export function useResumeRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (runId: string) => {
+      const result = await commands.resumeRun(runId);
+      if (result.status === "error") throw new Error(result.error);
+      return result.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+  });
+}
+
+/**
+ * Plain-language translation of the machine-stable `resume_blockers` keys the
+ * backend reports on non-resumable interrupted runs (EPI-69).
+ */
+export function resumeBlockerText(key: string): string {
+  switch (key) {
+    case "model_superseded":
+      return "This run used a model that is no longer the app's active model — start a new run instead. Its finished classifications stay in the cache.";
+    case "model_not_loaded":
+      return "Models aren't loaded yet — download or load them from the Models panel, then resume.";
+    default:
+      return key;
+  }
 }
 
 /**
