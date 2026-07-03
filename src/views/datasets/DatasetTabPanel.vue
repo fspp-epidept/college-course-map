@@ -26,7 +26,6 @@ const classify = useMutation({
     const result = await commands.startRun({
       datasetId: datasetId.value,
       digitLevel: level,
-      limit: 500,
     });
     if (result.status === "error") throw new Error(result.error);
     return { ...result.data, digitLevel: level };
@@ -277,7 +276,11 @@ async function exportCsv(): Promise<void> {
         <template #body>
           <div class="flex flex-col gap-2 text-sm text-(--ui-text-muted)">
             <p>
-              Classifies the first 500 courses in
+              Classifies all
+              <span class="text-(--ui-text) tabular-nums">
+                {{ (dataset?.rowCount ?? totalRows).toLocaleString() }}
+              </span>
+              courses in
               <span class="text-(--ui-text)">{{ tab.label }}</span> with the
               {{ confirmLevel }}-digit CCM model.
             </p>
