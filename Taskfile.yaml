@@ -175,3 +175,10 @@ tasks:
       # Python reference (which was captured with the same opt level as Rust
       # release). See examples/check_parity.rs.
       - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity
+
+  check:resume:
+    desc: "EPI-39: SIGKILL a run mid-flight against a scratch DB, sweep, resume, verify no dup/missing/recomputed results (needs the two-digit model on disk)"
+    cmds:
+      # Release for realistic inference speed; the child must still be
+      # mid-run when the kill threshold hits. See examples/check_resume.rs.
+      - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_resume

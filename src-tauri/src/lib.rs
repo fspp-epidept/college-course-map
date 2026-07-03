@@ -10,7 +10,9 @@ pub mod inference;
 pub mod manifest;
 mod metrics;
 mod models;
-mod runs;
+// Public for the resume verification harness (examples/check_resume.rs,
+// EPI-39), which drives the real RunPipeline against a scratch database.
+pub mod runs;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
@@ -43,6 +45,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             runs::get_run,
             runs::list_runs,
             runs::pause_run,
+            runs::resume_run,
             runs::start_run,
         ])
         .events(collect_events![
@@ -86,6 +89,13 @@ pub fn run() {
             // results but are never selected).
             let catalog = {
                 let conn = db.rw().map_err(|e| format!("manifest rows: {e}"))?;
+                // Crash recovery (EPI-38): a `running` row in a fresh process
+                // is an orphan from a previous one — flip it to `interrupted`
+                // (resumable) before any command can observe it.
+                let swept = runs::sweep_orphaned_runs(&conn)?;
+                if swept > 0 {
+                    eprintln!("startup: swept {swept} orphaned running run(s) to interrupted");
+                }
                 manifest::resolve_model_rows(&conn, manifest::load()?)?
             };
             app.manage(db);

@@ -4,7 +4,13 @@ import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
 import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useDatasets } from "../../composables/useDatasets";
-import { useLatestRun, usePauseRun, useRuns } from "../../composables/useRuns";
+import {
+  resumeBlockerText,
+  useLatestRun,
+  usePauseRun,
+  useResumeRun,
+  useRuns,
+} from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -125,6 +131,14 @@ function onPause(): void {
 watch(isRunning, (running) => {
   if (!running) pauseRequested.value = false;
 });
+
+// --- Resume (EPI-38) ---
+
+const resumeRun = useResumeRun();
+function onResume(): void {
+  if (!latestRun.value) return;
+  resumeRun.mutate(latestRun.value.id);
+}
 
 // --- Dataset import state ---
 // Surface this dataset's import state by reusing the cached datasets query
@@ -440,6 +454,17 @@ async function exportCsv(): Promise<void> {
               >
                 {{ pauseRequested ? "Pausing…" : "Pause" }}
               </UButton>
+              <UButton
+                v-else-if="latestRun.resumable"
+                color="primary"
+                size="xs"
+                icon="i-lucide-play"
+                :loading="resumeRun.isPending.value"
+                :disabled="activeElsewhere !== null"
+                @click="onResume"
+              >
+                Resume
+              </UButton>
             </div>
           </div>
 
@@ -467,9 +492,24 @@ async function exportCsv(): Promise<void> {
             </span>
           </div>
 
-          <p v-if="latestRun.state === 'interrupted'" class="text-(--ui-text-dimmed) text-xs">
-            Progress is saved. Classify again to resume — courses already
-            finished come straight from the cache.
+          <p
+            v-if="latestRun.state === 'interrupted' && latestRun.resumable"
+            class="text-(--ui-text-dimmed) text-xs"
+          >
+            Progress is saved. Resume picks up where it left off — courses
+            already finished come straight from the cache.
+          </p>
+          <div
+            v-else-if="latestRun.state === 'interrupted'"
+            class="text-(--ui-text-muted) text-xs flex flex-col gap-0.5"
+          >
+            <span v-for="blocker in latestRun.resumeBlockers" :key="blocker">
+              {{ resumeBlockerText(blocker) }}
+            </span>
+          </div>
+
+          <p v-if="resumeRun.isError.value" class="text-(--ui-color-error-500) text-xs">
+            Resume failed: {{ resumeRun.error.value?.message }}
           </p>
 
           <p v-if="latestRun.errorMessage" class="text-(--ui-color-error-500) text-xs">

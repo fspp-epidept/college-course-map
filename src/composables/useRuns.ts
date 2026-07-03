@@ -1,6 +1,6 @@
-import { type MaybeRefOrGetter, computed, toValue, watch } from "vue";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { type RunDetail, type RunSummary, commands } from "../bindings";
+import { computed, type MaybeRefOrGetter, onMounted, onUnmounted, toValue, watch } from "vue";
+import { commands, events, type RunDetail, type RunSummary } from "../bindings";
 
 /**
  * Full runs list, server-sorted with active states first. The sidebar groups
@@ -56,6 +56,24 @@ export function useLatestRun(datasetId: MaybeRefOrGetter<string>) {
 export function useRunLifecycleRefresh() {
   const queryClient = useQueryClient();
   const { data: runs } = useRuns();
+
+  // Model lifecycle affects run resumability (the `model_loading` /
+  // `model_not_loaded` blockers are computed at read time), so a load
+  // starting or finishing must refresh the run queries — otherwise an
+  // interrupted run keeps saying "models are loading" after they've loaded.
+  // This lives here, not in useModelsEvents, because that one only mounts
+  // with the Models panel; this composable is always mounted (App.vue).
+  let unlistenModels: (() => void) | undefined;
+  onMounted(async () => {
+    unlistenModels = await events.modelsStateChanged.listen(() => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["models"] });
+    });
+  });
+  onUnmounted(() => {
+    unlistenModels?.();
+  });
+
   const lastStates = new Map<string, string>();
   watch(runs, (list) => {
     if (!list) return;
@@ -93,6 +111,41 @@ export function useRun(id: MaybeRefOrGetter<string>) {
       return data?.state === "running" ? 250 : false;
     },
   });
+}
+
+/**
+ * Resume an interrupted run (EPI-38). Same run id: `resume_count` bumps and
+ * the pipeline re-walks the dataset, skipping everything already cached.
+ */
+export function useResumeRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (runId: string) => {
+      const result = await commands.resumeRun(runId);
+      if (result.status === "error") throw new Error(result.error);
+      return result.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+  });
+}
+
+/**
+ * Plain-language translation of the machine-stable `resume_blockers` keys the
+ * backend reports on non-resumable interrupted runs (EPI-69).
+ */
+export function resumeBlockerText(key: string): string {
+  switch (key) {
+    case "model_superseded":
+      return "This run used a model that is no longer the app's active model — start a new run instead. Its finished classifications stay in the cache.";
+    case "model_loading":
+      return "Models are loading — Resume will be available in a moment.";
+    case "model_not_loaded":
+      return "Models aren't loaded yet — download or load them from the Models panel, then resume.";
+    default:
+      return key;
+  }
 }
 
 /**

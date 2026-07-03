@@ -37,8 +37,11 @@ const groups = computed<RunGroup[]>(() => {
   const all = runs.value ?? [];
   const buckets: { label: string; states: ReadonlySet<string> }[] = [
     { label: "Active", states: new Set(["running", "pending", "paused"]) },
+    // Interrupted runs get their own group: they're the actionable ones
+    // (resumable), and burying them under "Other" hides that (EPI-69).
+    { label: "Paused", states: new Set(["interrupted"]) },
     { label: "Completed", states: new Set(["completed"]) },
-    { label: "Other", states: new Set(["failed", "cancelled", "interrupted"]) },
+    { label: "Other", states: new Set(["failed", "cancelled"]) },
   ];
   return buckets
     .map((b) => ({ ...b, runs: all.filter((r) => b.states.has(r.state)) }))
@@ -57,6 +60,7 @@ function open(run: RunSummary): void {
 }
 
 function progressLabel(run: RunSummary): string {
+  const level = run.digitLevel !== null ? `${run.digitLevel}-digit · ` : "";
   if (
     run.state === "running" &&
     run.rowsTotal !== null &&
@@ -64,12 +68,17 @@ function progressLabel(run: RunSummary): string {
     run.rowsProcessed !== null &&
     run.rowsProcessed !== undefined
   ) {
-    return `${run.rowsProcessed} / ${run.rowsTotal}`;
+    return `${level}${run.rowsProcessed} / ${run.rowsTotal}`;
   }
   if (run.state === "completed" && run.rowsProcessed !== null && run.rowsProcessed !== undefined) {
-    return `${run.rowsProcessed} rows`;
+    return `${level}${run.rowsProcessed} rows`;
   }
-  return run.state;
+  if (run.state === "interrupted") {
+    // Resumability is the actionable fact about a paused run — say it in the
+    // row, not just the detail view (EPI-69).
+    return `${level}${run.resumable ? "paused · resumable" : "paused"}`;
+  }
+  return `${level}${run.state}`;
 }
 </script>
 
