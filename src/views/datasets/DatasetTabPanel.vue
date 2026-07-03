@@ -106,7 +106,23 @@ watch(isImporting, (now, before) => {
   }
 });
 
-function runFor(level: 2 | 4 | 6): void {
+// Classify never starts on the first click (EPI-66): the button opens a
+// confirmation dialog stating scope and cache semantics, and only an explicit
+// confirm starts the run. `digitLevel` (which drives the courses table's
+// joined column) also only switches on confirm, so cancelling leaves the
+// view untouched.
+const confirmLevel = ref<2 | 4 | 6 | null>(null);
+const confirmOpen = ref(false);
+
+function requestRun(level: 2 | 4 | 6): void {
+  confirmLevel.value = level;
+  confirmOpen.value = true;
+}
+
+function confirmRun(): void {
+  const level = confirmLevel.value;
+  if (level === null) return;
+  confirmOpen.value = false;
   digitLevel.value = level;
   classify.mutate(level);
 }
@@ -239,11 +255,6 @@ async function exportCsv(): Promise<void> {
 
     <section class="flex flex-col gap-3">
       <h3 class="text-sm font-medium text-(--ui-text)">Classify</h3>
-      <p class="text-sm text-(--ui-text-muted)">
-        Run real Rust ONNX inference against the first 500 courses in this dataset.
-        Results are cached by (model, content hash) — re-running the same digit
-        level will mostly hit the cache instead of recomputing.
-      </p>
       <div class="flex items-center gap-2">
         <UButton
           v-for="level in [2, 4, 6] as const"
@@ -252,11 +263,39 @@ async function exportCsv(): Promise<void> {
           :variant="digitLevel === level ? 'solid' : 'outline'"
           :loading="classify.isPending.value && digitLevel === level"
           :disabled="classify.isPending.value || isRunning || isImporting || importFailed"
-          @click="runFor(level)"
+          @click="requestRun(level)"
         >
           Classify ({{ level }}-digit)
         </UButton>
       </div>
+
+      <UModal
+        v-model:open="confirmOpen"
+        :title="`Start ${confirmLevel}-digit classification`"
+        :ui="{ footer: 'justify-end' }"
+      >
+        <template #body>
+          <div class="flex flex-col gap-2 text-sm text-(--ui-text-muted)">
+            <p>
+              Classifies the first 500 courses in
+              <span class="text-(--ui-text)">{{ tab.label }}</span> with the
+              {{ confirmLevel }}-digit CCM model.
+            </p>
+            <p>
+              Runs locally on this machine. Courses already classified by this
+              model are reused from the cache; only new course content is
+              computed. Progress shows on this tab, and you can keep working
+              while it runs.
+            </p>
+          </div>
+        </template>
+        <template #footer>
+          <UButton variant="ghost" color="neutral" @click="confirmOpen = false">
+            Cancel
+          </UButton>
+          <UButton color="primary" @click="confirmRun">Start run</UButton>
+        </template>
+      </UModal>
 
       <div
         v-if="startError"
