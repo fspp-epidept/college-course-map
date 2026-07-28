@@ -491,7 +491,12 @@ resolvedEp: string | null;
  * Platform EPs in the shape the settings priority list stores, for the
  * settings UI to render reorderable rows without hardcoding.
  */
-platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[] }
+platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[]; 
+/**
+ * Startup runtime conditions worth a warning in Settings (EPI-87):
+ * damaged-pack fallback, missing CUDA directory, failed preloads.
+ */
+notices: string[] }
 /**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).

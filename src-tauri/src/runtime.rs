@@ -282,6 +282,48 @@ pub fn install_pack(
     Ok(())
 }
 
+/// Remove a damaged downloaded pack so `installed()` turns false and the
+/// Settings UI offers the download again (EPI-86). Best-effort: on failure
+/// the next launch retries the same invalidation.
+pub fn invalidate_pack(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        eprintln!("failed to remove damaged pack {}: {e}", dir.display());
+    }
+}
+
+/// Delete leftover `*.part` staging entries (archive files and extract dirs)
+/// under the runtimes root (EPI-88). `install_pack` only cleans up when the
+/// same pack's download is retried, so a mid-download kill would otherwise
+/// leak partial archives forever. Runs at startup, before any download can
+/// be in flight. Best-effort; returns how many entries were removed.
+#[must_use]
+pub fn sweep_partial_downloads(root: &Path) -> usize {
+    let Ok(versions) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut swept = 0usize;
+    for version_dir in versions.flatten().filter(|e| e.path().is_dir()) {
+        let Ok(entries) = std::fs::read_dir(version_dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "part") {
+                continue;
+            }
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path).is_ok()
+            } else {
+                std::fs::remove_file(&path).is_ok()
+            };
+            if removed {
+                swept += 1;
+            }
+        }
+    }
+    swept
+}
+
 /// Stream one archive to `dest`, hashing as it goes; delete and error on any
 /// mismatch so a torn or tampered download can never be extracted.
 fn download_verified(
@@ -523,6 +565,11 @@ pub struct RuntimeState {
     pub pack_id: String,
     pub ort_version: String,
     pub eps: Vec<String>,
+    /// Startup conditions the user must be able to see without a terminal
+    /// (EPI-87): damaged-pack fallback, missing CUDA library directory,
+    /// failed preloads. Fixed for the process lifetime; surfaced by
+    /// `runtime_status`.
+    pub notices: Vec<String>,
 }
 
 /// Choose the pack this process will load, from the user's EP priority list:
@@ -553,6 +600,7 @@ pub fn resolve_startup_pack(
                         pack_id: pack.id.clone(),
                         ort_version: manifest.ort_version.clone(),
                         eps: pack.eps.clone(),
+                        notices: Vec::new(),
                     },
                     dir,
                 ));
@@ -568,6 +616,7 @@ pub fn resolve_startup_pack(
             pack_id: "cpu".to_owned(),
             ort_version: manifest.ort_version.clone(),
             eps: cpu_eps,
+            notices: Vec::new(),
         },
         resource_dir.join(RUNTIMES_SUBDIR).join("cpu"),
     ))
@@ -613,6 +662,94 @@ pub fn init_ort(pack_dir: &Path) -> Result<(), String> {
         return Err("ONNX Runtime environment was already committed".to_owned());
     }
     Ok(())
+}
+
+/// Full runtime startup: sweep partial downloads (EPI-88), resolve and load
+/// the pack — falling back to the bundled CPU pack when a downloaded pack is
+/// damaged (EPI-86) — and preload GPU support libraries (EPI-84). Degraded
+/// outcomes are recorded as notices for the Settings UI (EPI-87).
+pub(crate) fn startup(
+    settings: &crate::config::Settings,
+    resource_dir: &Path,
+) -> Result<RuntimeState, String> {
+    let manifest = load_manifest()?;
+    // No download can be in flight this early — clear partial archives left
+    // by a mid-download kill.
+    let swept = runtimes_root().map_or(0, |root| sweep_partial_downloads(&root));
+    if swept > 0 {
+        eprintln!("startup: swept {swept} partial pack download(s)");
+    }
+    let (mut state, pack_dir) =
+        resolve_startup_pack(&manifest, &settings.execution_providers, resource_dir)?;
+    // A downloaded pack that fails to load is damaged (the install protocol
+    // is atomic, so this is post-install damage: disk corruption, quarantine,
+    // manual deletion). Remove it and fall through to the bundled CPU pack
+    // instead of failing startup with no UI to recover from. A failed
+    // `init_from` does not commit the environment, so the second init is
+    // valid; bundled-pack failure stays fatal — the install itself is broken.
+    if let Err(e) = init_ort(&pack_dir) {
+        if state.pack_id == "cpu" {
+            return Err(e);
+        }
+        eprintln!(
+            "startup: runtime pack '{}' failed to load: {e}",
+            state.pack_id
+        );
+        invalidate_pack(&pack_dir);
+        let failed = state.pack_id.clone();
+        let (cpu_state, cpu_dir) = resolve_startup_pack(&manifest, &[EpKind::Cpu], resource_dir)?;
+        init_ort(&cpu_dir)?;
+        state = cpu_state;
+        state.notices.push(format!(
+            "The '{failed}' runtime pack was damaged and has been removed — running \
+             on CPU. Re-download the pack to restore GPU support."
+        ));
+    }
+    // GPU support libraries: preload CUDA/cuDNN dylibs so EP registration at
+    // model-load time resolves them without a system install. Precedence: the
+    // user-pointed directory (conda/venv CUDA), else the pack's downloaded
+    // companion libs pack. Failure to preload is not fatal — registration
+    // falls back exactly as when no libs exist — but every degraded case
+    // leaves a notice.
+    let user_dir = match settings.cuda_library_dir.as_deref() {
+        Some(dir) if Path::new(dir).is_dir() => Some(Path::new(dir)),
+        Some(dir) => {
+            state.notices.push(format!(
+                "The CUDA library directory '{dir}' no longer exists and was skipped. \
+                 Update or clear it under Settings \u{2192} Inference."
+            ));
+            None
+        }
+        None => None,
+    };
+    let libs_dir = installed_libs_dir(&manifest, &state);
+    if let Some(dir) = user_dir.or(libs_dir.as_deref()) {
+        match preload_support_libs(dir) {
+            Ok(count) => eprintln!(
+                "startup: preloaded {count} GPU support libs from {}",
+                dir.display()
+            ),
+            Err(e) => {
+                eprintln!("startup: GPU support lib preload skipped: {e}");
+                state.notices.push(format!(
+                    "GPU support libraries could not be loaded from {}: {e}",
+                    dir.display()
+                ));
+            }
+        }
+    } else if packs_for_target(&manifest)
+        .iter()
+        .find(|p| p.id == state.pack_id)
+        .is_some_and(|p| p.libs.is_some())
+    {
+        state.notices.push(
+            "CUDA support libraries are not installed, so the CUDA provider cannot \
+             start. Download the support pack below or point at an existing CUDA \
+             library directory."
+                .to_owned(),
+        );
+    }
+    Ok(state)
 }
 
 // ---- IPC surface (registered in lib.rs::specta_builder) ----
@@ -662,6 +799,9 @@ pub(crate) struct RuntimeStatus {
     /// settings UI to render reorderable rows without hardcoding.
     pub platform_default_priority: Vec<EpKind>,
     pub packs: Vec<RuntimePackStatus>,
+    /// Startup runtime conditions worth a warning in Settings (EPI-87):
+    /// damaged-pack fallback, missing CUDA directory, failed preloads.
+    pub notices: Vec<String>,
 }
 
 #[tauri::command]
@@ -704,6 +844,7 @@ pub(crate) fn runtime_status(
             .map(|registry| registry.execution_provider().as_str().to_owned()),
         platform_default_priority: default_priority(),
         packs,
+        notices: state.notices.clone(),
     })
 }
 
@@ -765,6 +906,39 @@ fn download_runtime_blocking(app: &tauri::AppHandle, pack_id: &str) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::{EpKind, load_manifest};
+
+    /// The startup sweep must remove `.part` archives and staging dirs while
+    /// leaving installed pack directories untouched (EPI-88).
+    #[test]
+    fn sweep_removes_only_part_entries() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("ccm-sweep-test-{}", std::process::id()));
+        let version = root.join("1.24.2");
+        let staging = version.join("cuda13.part");
+        let archive = version.join("cuda13.archive0.part");
+        let installed = version.join("cpu");
+        for dir in [&staging, &installed] {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        for file in [
+            &staging.join("libx.so"),
+            &archive,
+            &installed.join(".sha256"),
+        ] {
+            std::fs::write(file, b"x").map_err(|e| e.to_string())?;
+        }
+
+        let swept = super::sweep_partial_downloads(&root);
+
+        assert_eq!(swept, 2, "one staging dir + one archive file");
+        assert!(!staging.exists());
+        assert!(!archive.exists());
+        assert!(
+            installed.join(".sha256").exists(),
+            "installed pack untouched"
+        );
+        std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 
     /// The committed runtimes.toml must parse into the typed manifest: every
     /// release-matrix target has a cpu pack, hashes are well-formed, and all

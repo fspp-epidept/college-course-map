@@ -64,6 +64,24 @@ function clearCudaDir(): void {
   saveRelaunch.mutate({ cudaLibraryDir: null });
 }
 
+// Backend startup notices (EPI-87: damaged pack, stale CUDA dir, missing
+// libs pack) plus the one condition only the frontend can see: a GPU pack
+// loaded but its provider failed to register at model load (driver too old,
+// wrong CUDA generation) and inference silently resolved to CPU.
+const notices = computed<string[]>(() => {
+  const status = runtime.data.value;
+  if (!status) return [];
+  const all = [...status.notices];
+  if (status.activePackId !== "cpu" && status.resolvedEp === "cpu") {
+    all.push(
+      `The "${status.activePackId}" pack is loaded but its GPU provider did not ` +
+        "register, so inference is running on CPU. Check that the NVIDIA driver " +
+        "is recent enough for this CUDA version.",
+    );
+  }
+  return all;
+});
+
 function fmtSize(bytes: number): string {
   return bytes >= 1_000_000_000
     ? `${(bytes / 1_000_000_000).toFixed(1)} GB`
@@ -103,6 +121,15 @@ function fmtSize(bytes: number): string {
       </template>
       <span v-else class="text-(--ui-text-dimmed)">Loading…</span>
     </div>
+
+    <UAlert
+      v-for="notice in notices"
+      :key="notice"
+      color="warning"
+      variant="subtle"
+      icon="i-lucide-triangle-alert"
+      :description="notice"
+    />
 
     <div class="flex flex-col gap-2">
       <h3 class="text-sm font-medium text-(--ui-text)">Provider priority</h3>
