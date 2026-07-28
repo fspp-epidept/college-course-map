@@ -36,12 +36,19 @@ use course_classifier_lib::{
 };
 use duckdb::params;
 
-/// Synthetic dataset size. Big enough that the child is still mid-run at the
-/// kill threshold on any realistic CPU; small enough that the resume leg
-/// finishes in tens of seconds.
-const ROWS: i64 = 200;
-/// Kill the child once `rows_processed` reaches this (two flushed batches).
-const KILL_AFTER_ROWS: i64 = 64;
+/// Kill the child once `rows_processed` reaches this — the first flushed
+/// super-chunk (EPI-89), so SIGKILL lands mid-second-super-chunk. Derived
+/// from the real flush cadence instead of drifting.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "FLUSH_SIZE is a small constant, far below i64::MAX"
+)]
+const KILL_AFTER_ROWS: i64 = course_classifier_lib::runs::FLUSH_SIZE as i64;
+/// Synthetic dataset size. Must exceed the flush cadence by enough that the
+/// child is still mid-run after its first flush on any realistic CPU (EPI-89:
+/// progress is only visible per super-chunk, so the kill can't land before
+/// one lands); small enough that the resume leg finishes in tens of seconds.
+const ROWS: i64 = 3 * KILL_AFTER_ROWS;
 const DIGIT_LEVEL: u8 = 2;
 const DATASET_ID: &str = "check-resume-dataset";
 

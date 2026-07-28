@@ -82,6 +82,17 @@ impl RunRegistry {
     }
 }
 
+/// Rows per DB round-trip in the run worker (EPI-89): one cache anti-join
+/// query, one Appender open + bulk insert, and one progress `UPDATE runs` per
+/// super-chunk of this many rows — the "flush ~1000 results" write-batching
+/// ground rule. Deliberately independent of `inference::batch_size` (the
+/// ONNX/GPU granularity inside a super-chunk): coupling them left the GPU
+/// idle on DB round-trips two-thirds of the time. Progress-update cadence is
+/// `FLUSH_SIZE` rows: ~0.35 s on CUDA, ~7 s worst-case on CPU.
+/// Public so `check_resume` can derive its kill threshold from the real
+/// flush cadence instead of drifting.
+pub const FLUSH_SIZE: usize = 1024;
+
 /// One row in the Runs sidebar list. Joined with the dataset title so the UI
 /// doesn't need a second IPC call to render a meaningful label.
 #[derive(Type, Serialize, Debug)]
@@ -904,25 +915,28 @@ impl RunPipeline {
             self.flush_progress(&conn, processed, cache_hits)?;
         }
 
-        // Batch size follows the resolved EP (EPI-82): one ONNX call per
-        // chunk (amortizes launch/transfer overhead — GPUs want much larger
-        // chunks than CPU) and one progress `UPDATE runs` per chunk (per-row
-        // updates were the dominant RW-mutex contention against the polling
-        // UI). The chunk boundary is also the pause/cancel checkpoint.
-        for chunk in rows.chunks(crate::inference::batch_size(model.resolved_ep)) {
+        // Two granularities, deliberately decoupled (EPI-89): DB work (cache
+        // anti-join query, Appender insert, progress UPDATE) runs once per
+        // FLUSH_SIZE super-chunk — the "~1000 results per flush"
+        // write-batching ground rule — while the ONNX call inside runs at the
+        // per-EP batch size (EPI-82). At GPU speeds, per-ONNX-chunk DB
+        // round-trips left the GPU idle most of the time (~1k rows/s in-app
+        // vs ~2.9k standalone, measured 2026-07-28).
+        let batch = crate::inference::batch_size(model.resolved_ep);
+        for chunk in rows.chunks(FLUSH_SIZE) {
             // 1. Bulk cache check — catches hashes computed earlier in *this*
-            //    leg (duplicate course content across chunks). The anti-join
-            //    snapshot was taken before the loop started, so it can't see
-            //    them.
+            //    leg (duplicate course content across super-chunks). The
+            //    anti-join snapshot was taken before the loop started, so it
+            //    can't see them.
             let cached = self.cache_hit_batch(db, chunk)?;
 
-            // 2. Format only the misses, deduplicating within the chunk: two
-            //    copies of the same course in one chunk would otherwise both
-            //    classify and collide on the cache's (model_id, content_hash)
-            //    primary key at flush. The second copy rides on the first's
-            //    result, so it counts as a hit. `Miss` borrows `content_hash`
-            //    from `chunk` so flush_batch can pair it with its
-            //    classification without indexing back into the chunk later.
+            // 2. Format only the misses, deduplicating within the super-chunk:
+            //    two copies of the same course would otherwise both classify
+            //    and collide on the cache's (model_id, content_hash) primary
+            //    key at flush. The second copy rides on the first's result, so
+            //    it counts as a hit. `Miss` borrows `content_hash` from
+            //    `chunk` so flush_batch can pair it with its classification
+            //    without indexing back into the chunk later.
             let mut seen_in_chunk = std::collections::HashSet::new();
             let misses: Vec<Miss<'_>> = chunk
                 .iter()
@@ -941,12 +955,41 @@ impl RunPipeline {
                 .collect();
             let miss_refs: Vec<&str> = misses.iter().map(|m| m.input.as_str()).collect();
 
-            // 3. One ONNX session call for the whole batch of misses.
-            let classifications =
-                classify_batch(model, &miss_refs).map_err(|e| format!("classify_batch: {e}"))?;
+            // 3. ONNX session calls in per-EP sub-batches, honoring a pause
+            //    request between calls so pause latency stays one ONNX call,
+            //    not one super-chunk.
+            let mut classifications = Vec::with_capacity(misses.len());
+            let mut cancelled = false;
+            for sub in miss_refs.chunks(batch) {
+                let batch_results =
+                    classify_batch(model, sub).map_err(|e| format!("classify_batch: {e}"))?;
+                classifications.extend(batch_results);
+                // Relaxed is fine — we only need eventual visibility of the
+                // flag, not ordering against other memory.
+                if self.cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+            }
+
+            // Pause mid-super-chunk: flush the classified prefix (the
+            // misses/classifications zip in flush_batch truncates to it)
+            // without advancing row progress — the resume anti-join re-counts
+            // those rows as cache hits, so counters stay consistent by
+            // construction, same as crash recovery.
+            if cancelled && classifications.len() < misses.len() {
+                unique_done += classifications.len() as u64;
+                self.flush_batch(db, &misses, &classifications, processed, cache_hits)?;
+                return Ok(RunOutcome {
+                    processed,
+                    unique_done,
+                    cache_hits,
+                    interrupted: true,
+                });
+            }
 
             // 4. Bulk insert via Appender + single progress UPDATE, both under
-            //    one RW-mutex acquire instead of 2*N per chunk.
+            //    one RW-mutex acquire per super-chunk.
             let chunk_hits = chunk.len() - misses.len();
             let processed_after = processed + chunk.len() as u64;
             let cache_hits_after = cache_hits + chunk_hits as u64;
@@ -962,11 +1005,7 @@ impl RunPipeline {
             cache_hits = cache_hits_after;
             unique_done += classifications.len() as u64;
 
-            // Batch boundary: the just-processed chunk is fully flushed, so this
-            // is the consistent point to honor a pause request. Relaxed is fine —
-            // we only need eventual visibility of the flag, not ordering against
-            // other memory.
-            if self.cancel.load(Ordering::Relaxed) {
+            if cancelled {
                 return Ok(RunOutcome {
                     processed,
                     unique_done,
