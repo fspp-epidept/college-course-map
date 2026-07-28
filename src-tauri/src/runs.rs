@@ -82,13 +82,6 @@ impl RunRegistry {
     }
 }
 
-/// Inputs are batched through the model in chunks of this size. Matches the
-/// Python pipeline's `predict_batch` default. Two effects: one ONNX call per
-/// chunk (amortizes graph + thread-pool overhead) and one progress
-/// `UPDATE runs` per chunk (per-row updates were the dominant RW-mutex
-/// contention against the polling UI).
-const BATCH_SIZE: usize = 32;
-
 /// One row in the Runs sidebar list. Joined with the dataset title so the UI
 /// doesn't need a second IPC call to render a meaningful label.
 #[derive(Type, Serialize, Debug)]
@@ -911,7 +904,12 @@ impl RunPipeline {
             self.flush_progress(&conn, processed, cache_hits)?;
         }
 
-        for chunk in rows.chunks(BATCH_SIZE) {
+        // Batch size follows the resolved EP (EPI-82): one ONNX call per
+        // chunk (amortizes launch/transfer overhead — GPUs want much larger
+        // chunks than CPU) and one progress `UPDATE runs` per chunk (per-row
+        // updates were the dominant RW-mutex contention against the polling
+        // UI). The chunk boundary is also the pause/cancel checkpoint.
+        for chunk in rows.chunks(crate::inference::batch_size(model.resolved_ep)) {
             // 1. Bulk cache check — catches hashes computed earlier in *this*
             //    leg (duplicate course content across chunks). The anti-join
             //    snapshot was taken before the loop started, so it can't see

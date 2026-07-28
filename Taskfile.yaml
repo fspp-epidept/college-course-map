@@ -187,6 +187,11 @@ tasks:
     cmds:
       - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example runtime_check
 
+  check:throughput:
+    desc: "EPI-82: benchmark batched inference over a CSV (default data/validation.csv) on the resolved EP; e.g. `task check:throughput -- --ep cpu --rows 100000`"
+    cmds:
+      - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example throughput_bench -- {{.CLI_ARGS}}
+
   check:parity:
     desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match
     cmds:
