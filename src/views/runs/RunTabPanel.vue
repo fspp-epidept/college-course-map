@@ -80,8 +80,8 @@ function fmtTime(iso: string | null | undefined): string {
         >
           {{ run.state }}
         </span>
-        <span v-if="run.digitLevel" class="text-sm text-(--ui-text-muted)">
-          {{ run.digitLevel }}-digit model
+        <span class="text-sm text-(--ui-text-muted)">
+          {{ run.digitLevel ? `${run.digitLevel}-digit model` : "all models" }}
         </span>
         <span v-if="run.executionProvider" class="text-sm text-(--ui-text-dimmed)">
           · {{ run.executionProvider }}

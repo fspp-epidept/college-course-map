@@ -159,15 +159,15 @@ pub(crate) struct RunDetail {
 }
 
 /// Read-time resumability check (EPI-69). A run is resumable iff it stopped
-/// as `interrupted` AND its recorded model is still the manifest-active row
-/// for its digit level AND that model is actually loaded. The model-family
-/// check matters: resuming an old-family run with the currently loaded model
-/// would write new-model outputs under the old model's cache key — silent
-/// data corruption. Blockers are machine-stable keys the frontend translates.
+/// as `interrupted` AND every recorded model is still the manifest-active row
+/// for its digit level AND all of them are actually loaded (EPI-96). The
+/// model-family check matters: resuming an old-family run with the currently
+/// loaded model would write new-model outputs under the old model's cache
+/// key — silent data corruption. Blockers are machine-stable keys the
+/// frontend translates.
 fn assess_resumability(
     state: &str,
-    model_id: Option<i64>,
-    digit_level: Option<u8>,
+    model_ids: &[i64],
     catalog: &ModelCatalog,
     store: &ModelStore,
 ) -> (bool, Vec<String>) {
@@ -175,29 +175,36 @@ fn assess_resumability(
         return (false, Vec::new());
     }
     let mut blockers = Vec::new();
-    match (model_id, digit_level) {
-        (Some(id), Some(level)) if catalog.model_id(level) == Some(id) => {
-            let loaded = store
-                .get()
-                .is_some_and(|registry| registry.by_digit_level(level).is_some());
-            if !loaded {
-                // Distinguish "the startup autoload is still churning" from
-                // "no models on this machine": the first resolves itself in
-                // moments and needs no user action, the second needs the
-                // Models panel. Collapsing them told users to go download
-                // models that were already loading.
-                blockers.push(
-                    if store.is_loading() {
-                        "model_loading"
-                    } else {
-                        "model_not_loaded"
-                    }
-                    .to_owned(),
-                );
-            }
-        }
-        _ => blockers.push("model_superseded".to_owned()),
+    if model_ids.is_empty() {
+        blockers.push("model_superseded".to_owned());
     }
+    for model_id in model_ids {
+        match catalog.level_of(*model_id) {
+            Some(level) => {
+                let loaded = store
+                    .get()
+                    .is_some_and(|registry| registry.by_digit_level(level).is_some());
+                if !loaded {
+                    // Distinguish "the startup autoload is still churning"
+                    // from "no models on this machine": the first resolves
+                    // itself in moments and needs no user action, the second
+                    // needs the Models panel. Collapsing them told users to
+                    // go download models that were already loading.
+                    blockers.push(
+                        if store.is_loading() {
+                            "model_loading"
+                        } else {
+                            "model_not_loaded"
+                        }
+                        .to_owned(),
+                    );
+                }
+            }
+            None => blockers.push("model_superseded".to_owned()),
+        }
+    }
+    blockers.sort_unstable();
+    blockers.dedup();
     (blockers.is_empty(), blockers)
 }
 
@@ -237,7 +244,7 @@ pub(crate) fn list_runs(
                     strftime(r.started_at, '%Y-%m-%dT%H:%M:%SZ'),
                     strftime(r.completed_at, '%Y-%m-%dT%H:%M:%SZ'),
                     strftime(r.last_progress_at, '%Y-%m-%dT%H:%M:%SZ'),
-                    r.resume_count, m.id, m.model_type
+                    r.resume_count, m.id, m.model_type, r.model_ids
              FROM runs r
              JOIN datasets d ON d.id = r.dataset_id
              LEFT JOIN models m
@@ -254,8 +261,9 @@ pub(crate) fn list_runs(
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
-            let model_id: Option<i64> = row.get(13)?;
+            let _model_id: Option<i64> = row.get(13)?;
             let model_type: Option<String> = row.get(14)?;
+            let model_ids_json: String = row.get(15)?;
             Ok((
                 RunSummary {
                     id: row.get(0)?,
@@ -275,21 +283,23 @@ pub(crate) fn list_runs(
                     resumable: false,
                     resume_blockers: Vec::new(),
                 },
-                model_id,
                 model_type,
+                model_ids_json,
             ))
         })
         .map_err(|e| e.to_string())?;
     rows.map(|item| {
-        let (mut summary, model_id, model_type) = item.map_err(|e| e.to_string())?;
-        summary.digit_level = model_type.and_then(|t| t.parse::<u8>().ok());
-        let (resumable, blockers) = assess_resumability(
-            &summary.state,
-            model_id,
-            summary.digit_level,
-            &catalog,
-            &store,
-        );
+        let (mut summary, model_type, model_ids_json) = item.map_err(|e| e.to_string())?;
+        let model_ids: Vec<i64> = serde_json::from_str(&model_ids_json).unwrap_or_default();
+        // A single-model run displays its level; multi-model runs (EPI-96)
+        // show no level — the UI labels them "all models".
+        summary.digit_level = if model_ids.len() == 1 {
+            model_type.and_then(|t| t.parse::<u8>().ok())
+        } else {
+            None
+        };
+        let (resumable, blockers) =
+            assess_resumability(&summary.state, &model_ids, &catalog, &store);
         summary.resumable = resumable;
         summary.resume_blockers = blockers;
         Ok(summary)
@@ -327,7 +337,7 @@ fn query_run_detail(
     conn: &duckdb::Connection,
     filter_sql: &str,
     param: &str,
-) -> Result<Option<(RunDetail, Option<i64>)>, String> {
+) -> Result<Option<(RunDetail, Vec<i64>)>, String> {
     let sql = format!(
         "SELECT r.id, r.dataset_id, d.title, r.description, r.state, r.model_ids,
                 r.rows_total, r.rows_processed, r.unique_inputs_done, r.cache_hits,
@@ -370,10 +380,14 @@ fn query_run_detail(
         "map run detail",
     )?;
 
-    // Resolve the model + digit level from the first id in `model_ids` (JSON
-    // array). Runs always carry exactly one model id during the spike, so
-    // taking first() is fine until multi-model runs land.
-    let (model_id, digit_level) = resolve_model(conn, &row.model_ids_json).unwrap_or((None, None));
+    // Single-model runs display their level; multi-model runs (EPI-96) show
+    // no level and the UI labels them "all models".
+    let model_ids: Vec<i64> = serde_json::from_str(&row.model_ids_json).unwrap_or_default();
+    let digit_level = if model_ids.len() == 1 {
+        resolve_first_model_level(conn, &row.model_ids_json)
+    } else {
+        None
+    };
 
     Ok(Some((
         RunDetail {
@@ -397,18 +411,17 @@ fn query_run_detail(
             resumable: false,
             resume_blockers: Vec::new(),
         },
-        model_id,
+        model_ids,
     )))
 }
 
 /// Stamp read-time resumability onto a mapped detail row.
 fn finish_run_detail(
-    (mut detail, model_id): (RunDetail, Option<i64>),
+    (mut detail, model_ids): (RunDetail, Vec<i64>),
     catalog: &ModelCatalog,
     store: &ModelStore,
 ) -> RunDetail {
-    let (resumable, blockers) =
-        assess_resumability(&detail.state, model_id, detail.digit_level, catalog, store);
+    let (resumable, blockers) = assess_resumability(&detail.state, &model_ids, catalog, store);
     detail.resumable = resumable;
     detail.resume_blockers = blockers;
     detail
@@ -461,33 +474,27 @@ pub(crate) fn get_latest_run(
     .map(|found| finish_run_detail(found, &catalog, &store)))
 }
 
-/// `(models.id, digit_level)` for the run's first `model_ids` entry.
-fn resolve_model(
-    conn: &duckdb::Connection,
-    model_ids_json: &str,
-) -> Result<(Option<i64>, Option<u8>), String> {
-    let ids: Vec<i64> =
-        serde_json::from_str(model_ids_json).map_err(|e| format!("parse model_ids: {e}"))?;
-    let Some(first) = ids.first() else {
-        return Ok((None, None));
-    };
-    let model_type: Option<String> = conn
+/// Digit level of the run's first `model_ids` entry, via the models table
+/// (works for superseded rows too — display only, never used for execution).
+fn resolve_first_model_level(conn: &duckdb::Connection, model_ids_json: &str) -> Option<u8> {
+    let ids: Vec<i64> = serde_json::from_str(model_ids_json).ok()?;
+    let first = ids.first()?;
+    let model_type: String = conn
         .query_row(
             "SELECT model_type FROM models WHERE id = ?",
             params![first],
             |row| row.get(0),
         )
-        .ok();
-    Ok((Some(*first), model_type.and_then(|s| s.parse::<u8>().ok())))
+        .ok()?;
+    model_type.parse::<u8>().ok()
 }
 
 #[derive(Type, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StartRunRequest {
+    /// A run always classifies the dataset with every manifest model
+    /// (EPI-96) — there is no level to pick.
     pub dataset_id: String,
-    /// 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
-    /// spike avoids forcing the frontend to know surrogate model ids.
-    pub digit_level: u8,
 }
 
 /// Response from `start_run`: the run has been queued and is already updating
@@ -558,11 +565,24 @@ pub(crate) fn start_run(
     let Some(registry) = store.get() else {
         return Err(models_unready_message(&store));
     };
-    if registry.by_digit_level(req.digit_level).is_none() {
-        return Err(format!(
-            "no model loaded for digit_level={}",
-            req.digit_level
-        ));
+    // A run covers every manifest level (EPI-96) — all of them must be
+    // loaded before any inference starts, so a run can never half-cover the
+    // dataset because one model was still downloading.
+    let mut run_models = Vec::new();
+    for digit_level in catalog.levels() {
+        if registry.by_digit_level(digit_level).is_none() {
+            return Err(format!("no model loaded for digit_level={digit_level}"));
+        }
+        let model_id = catalog
+            .model_id(digit_level)
+            .ok_or_else(|| format!("manifest has no model for digit_level {digit_level}"))?;
+        run_models.push(RunModel {
+            model_id,
+            digit_level,
+        });
+    }
+    if run_models.is_empty() {
+        return Err("manifest defines no models".to_owned());
     }
 
     let conn = db.rw()?;
@@ -590,15 +610,8 @@ pub(crate) fn start_run(
     // with the INSERT below against concurrent start_run calls.
     ensure_no_active_run(&conn, &runs)?;
 
-    // Resolve the models-table row through the manifest catalog — never by
-    // guessing with SQL, which would happily pick a stale row from an
-    // earlier model family.
-    let model_id: i64 = catalog
-        .model_id(req.digit_level)
-        .ok_or_else(|| format!("manifest has no model for digit_level {}", req.digit_level))?;
-
-    // A run always covers the whole dataset (EPI-66); the count is the
-    // progress meter's denominator.
+    // A run always covers the whole dataset (EPI-66) with every model
+    // (EPI-96); the progress denominator is rows × models.
     let course_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
@@ -612,7 +625,7 @@ pub(crate) fn start_run(
             req.dataset_id
         ));
     }
-    let rows_total = course_count;
+    let rows_total = course_count.saturating_mul(i64::try_from(run_models.len()).unwrap_or(1));
 
     let run_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
@@ -630,8 +643,9 @@ pub(crate) fn start_run(
         params![
             run_id,
             req.dataset_id,
-            format!("Spike run: {}-digit", req.digit_level),
-            serde_json::to_string(&[model_id]).map_err(|e| e.to_string())?,
+            "All models",
+            serde_json::to_string(&run_models.iter().map(|m| m.model_id).collect::<Vec<_>>())
+                .map_err(|e| e.to_string())?,
             rows_total,
             rows_total,
             now,
@@ -655,8 +669,7 @@ pub(crate) fn start_run(
         pipeline: RunPipeline {
             dataset_id: req.dataset_id,
             run_id: run_id.clone(),
-            model_id,
-            digit_level: req.digit_level,
+            models: run_models,
             computed_at: now,
             cancel,
         },
@@ -708,23 +721,32 @@ pub(crate) fn resume_run(
     ensure_no_active_run(&conn, &runs)?;
 
     // Same checks assess_resumability advertises (EPI-69) — the command is
-    // the enforcement point, the flags are the preview.
-    let (model_id, digit_level) = resolve_model(&conn, &model_ids_json)?;
-    let (Some(model_id), Some(digit_level)) = (model_id, digit_level) else {
+    // the enforcement point, the flags are the preview. Every recorded model
+    // must still be the manifest-active row for its level and be loaded.
+    let model_ids: Vec<i64> =
+        serde_json::from_str(&model_ids_json).map_err(|e| format!("parse model_ids: {e}"))?;
+    if model_ids.is_empty() {
         return Err("run has no resolvable model".to_owned());
-    };
-    if catalog.model_id(digit_level) != Some(model_id) {
-        return Err(
-            "this run's model is no longer the app-active model — start a new run instead \
-             (its finished classifications stay in the cache)"
-                .to_owned(),
-        );
     }
     let Some(registry) = store.get() else {
         return Err(models_unready_message(&store));
     };
-    if registry.by_digit_level(digit_level).is_none() {
-        return Err(models_unready_message(&store));
+    let mut run_models = Vec::with_capacity(model_ids.len());
+    for model_id in model_ids {
+        let Some(digit_level) = catalog.level_of(model_id) else {
+            return Err(
+                "this run's model is no longer the app-active model — start a new run instead \
+                 (its finished classifications stay in the cache)"
+                    .to_owned(),
+            );
+        };
+        if registry.by_digit_level(digit_level).is_none() {
+            return Err(models_unready_message(&store));
+        }
+        run_models.push(RunModel {
+            model_id,
+            digit_level,
+        });
     }
 
     let now = Utc::now().to_rfc3339();
@@ -746,8 +768,7 @@ pub(crate) fn resume_run(
         pipeline: RunPipeline {
             dataset_id,
             run_id: run_id.clone(),
-            model_id,
-            digit_level,
+            models: run_models,
             computed_at: now,
             cancel,
         },
@@ -787,24 +808,28 @@ struct RunTask {
 impl RunTask {
     fn run(self) {
         let db = self.app.state::<AppDb>();
-        let outcome = (|| {
-            // Clone the registry Arc out of the store once — the worker keeps
-            // this snapshot for the whole run even if the store changes later.
-            let registry = self
-                .app
-                .state::<ModelStore>()
-                .get()
-                .ok_or_else(|| "models not loaded (worker)".to_owned())?;
-            let model = registry
-                .by_digit_level(self.pipeline.digit_level)
-                .ok_or_else(|| {
-                    format!(
-                        "no model loaded for digit_level={} (worker)",
-                        self.pipeline.digit_level
-                    )
-                })?;
-            self.pipeline.execute(&db, model)
-        })();
+        let outcome =
+            (|| {
+                // Clone the registry Arc out of the store once — the worker keeps
+                // this snapshot for the whole run even if the store changes later.
+                let registry = self
+                    .app
+                    .state::<ModelStore>()
+                    .get()
+                    .ok_or_else(|| "models not loaded (worker)".to_owned())?;
+                let mut loaded = Vec::with_capacity(self.pipeline.models.len());
+                for run_model in &self.pipeline.models {
+                    loaded.push(registry.by_digit_level(run_model.digit_level).ok_or_else(
+                        || {
+                            format!(
+                                "no model loaded for digit_level={} (worker)",
+                                run_model.digit_level
+                            )
+                        },
+                    )?);
+                }
+                self.pipeline.execute(&db, &loaded)
+            })();
         self.pipeline.finalize(&db, outcome);
 
         // Run is terminal whichever branch ran: drop its cancel flag so the
@@ -823,16 +848,44 @@ type SelectedCourse = (String, String, String, String);
 /// so the resume verification harness (`examples/check_resume.rs`, EPI-39)
 /// can drive the *real* pipeline — same batching, same flush transactions,
 /// same pause semantics — against a scratch database.
+/// One model a run classifies with, resolved at start (EPI-96).
+#[derive(Debug, Clone, Copy)]
+pub struct RunModel {
+    pub model_id: i64,
+    pub digit_level: u8,
+}
+
 #[derive(Debug)]
 pub struct RunPipeline {
     pub dataset_id: String,
     pub run_id: String,
-    pub model_id: i64,
-    pub digit_level: u8,
+    /// Models this run covers, in classification order (EPI-96). Each level
+    /// runs to completion before the next starts, so a resumed run skips
+    /// finished levels by construction — their anti-join selects nothing.
+    pub models: Vec<RunModel>,
     /// Stamped as `computed_at` on every inference row this leg writes.
     pub computed_at: String,
     /// Set true by [`pause_run`]; polled at each batch boundary to stop early.
     pub cancel: Arc<AtomicBool>,
+}
+
+/// Progress counters written by every flush, kept together so the flush path
+/// takes one coherent snapshot instead of a parameter list.
+struct ProgressSnapshot {
+    processed: u64,
+    cache_hits: u64,
+    unique_done: u64,
+    unique_total: u64,
+}
+
+/// Per-level missing-work stats, measured once at leg start (EPI-91): rows
+/// referencing a not-yet-cached hash, and the distinct hashes themselves.
+/// Row-level progress within a level is interpolated from these (exact at
+/// level boundaries) instead of walked row by row.
+#[derive(Clone, Copy)]
+struct LevelPlan {
+    missing_rows: u64,
+    missing_unique: u64,
 }
 
 impl RunPipeline {
@@ -863,7 +916,7 @@ impl RunPipeline {
                      WHERE id=?",
                     params![
                         i64::try_from(o.processed).unwrap_or(i64::MAX),
-                        i64::try_from(o.unique_done + o.cache_hits).unwrap_or(i64::MAX),
+                        i64::try_from(o.unique_total).unwrap_or(i64::MAX),
                         i64::try_from(o.unique_done).unwrap_or(i64::MAX),
                         i64::try_from(o.cache_hits).unwrap_or(i64::MAX),
                         &finished_at,
@@ -882,7 +935,7 @@ impl RunPipeline {
                      WHERE id=?",
                     params![
                         i64::try_from(o.processed).unwrap_or(i64::MAX),
-                        i64::try_from(o.unique_done + o.cache_hits).unwrap_or(i64::MAX),
+                        i64::try_from(o.unique_total).unwrap_or(i64::MAX),
                         i64::try_from(o.unique_done).unwrap_or(i64::MAX),
                         i64::try_from(o.cache_hits).unwrap_or(i64::MAX),
                         &finished_at,
@@ -902,176 +955,183 @@ impl RunPipeline {
         }
     }
 
-    /// The batched inference loop. Selects only courses **without** a cached
-    /// result for this model (anti-join) and starts the progress counters at
-    /// `total - remaining` — everything already cached is accounted for up
-    /// front instead of re-walked row by row. This is what makes resume
-    /// *continue* from where it stopped (EPI-38) rather than visibly restart
-    /// at zero, and makes a fully-cached run complete near-instantly.
-    pub fn execute(&self, db: &AppDb, model: &LoadedModel) -> Result<RunOutcome, String> {
-        let (total, rows) = self.select_missing_courses(db)?;
-        let remaining = rows.len() as u64;
-        let mut processed = total.saturating_sub(remaining);
-        // Counters accumulate across resume legs (EPI-90): the persisted
-        // `unique_inputs_done` is by definition the rows *this run* computed
-        // in earlier legs (every flush writes it), so it seeds the unique
-        // counter, and those rows are subtracted from the cache-hit seed —
-        // keeping the `done + hits = processed` identity cumulative instead
-        // of re-labeling earlier legs' work as cache hits.
+    /// The batched inference loop (EPI-91/96). Per model, the *distinct*
+    /// missing inputs are materialized once (anti-join + GROUP BY hash into a
+    /// temp table) and consumed in content-hash keyset windows of
+    /// `FLUSH_SIZE`, so the Rust heap never holds more than one window and no
+    /// duplicate input is ever walked, formatted, or re-checked against the
+    /// cache. Row-level progress is interpolated from per-level stats
+    /// measured at leg start — exact at level boundaries — instead of walked.
+    /// Resume continues where it stopped by construction: finished levels
+    /// (and finished hashes within a level) drop out of the anti-join.
+    ///
+    /// `loaded` must align with `self.models`, one loaded model per entry.
+    pub fn execute(&self, db: &AppDb, loaded: &[&LoadedModel]) -> Result<RunOutcome, String> {
+        if loaded.len() != self.models.len() {
+            return Err("loaded models do not align with the run's models".to_owned());
+        }
+        let course_count = self.course_count(db)?;
+        let mut plans = Vec::with_capacity(self.models.len());
+        for run_model in &self.models {
+            plans.push(self.level_stats(db, run_model.model_id)?);
+        }
+        // Unique counters accumulate across resume legs (EPI-90): the
+        // persisted `unique_inputs_done` is by definition what this run
+        // computed in earlier legs (every flush writes it). Row counters are
+        // derived: covered rows per level + the classified fraction of its
+        // missing rows; `cache_hits` keeps the historical identity
+        // `processed = unique_done + cache_hits`.
         let mut unique_done = self.prior_unique_done(db)?;
-        let mut cache_hits = processed.saturating_sub(unique_done);
+        let unique_total = unique_done + plans.iter().map(|p| p.missing_unique).sum::<u64>();
+        let mut level_done: Vec<u64> = vec![0; self.models.len()];
+        let processed_rows = |level_done: &[u64]| -> u64 {
+            plans
+                .iter()
+                .zip(level_done)
+                .map(|(plan, done)| {
+                    let covered = course_count.saturating_sub(plan.missing_rows);
+                    let advanced = (plan.missing_rows * done)
+                        .checked_div(plan.missing_unique)
+                        .unwrap_or(0);
+                    covered + advanced
+                })
+                .sum()
+        };
+        let snapshot = |level_done: &[u64], unique_done: u64| -> ProgressSnapshot {
+            let processed = processed_rows(level_done);
+            ProgressSnapshot {
+                processed,
+                cache_hits: processed.saturating_sub(unique_done),
+                unique_done,
+                unique_total,
+            }
+        };
 
         // Surface the starting position immediately — before the first batch
         // computes — so a resumed run's progress bar never reads zero.
         {
             let conn = db.rw()?;
-            self.flush_progress(&conn, processed, cache_hits, unique_done)?;
+            self.flush_progress(&conn, &snapshot(&level_done, unique_done))?;
         }
 
-        // Two granularities, deliberately decoupled (EPI-89): DB work (cache
-        // anti-join query, Appender insert, progress UPDATE) runs once per
-        // FLUSH_SIZE super-chunk — the "~1000 results per flush"
-        // write-batching ground rule — while the ONNX call inside runs at the
-        // per-EP batch size (EPI-82). At GPU speeds, per-ONNX-chunk DB
-        // round-trips left the GPU idle most of the time (~1k rows/s in-app
-        // vs ~2.9k standalone, measured 2026-07-28).
-        let batch = crate::inference::batch_size(model.resolved_ep);
         let mut last_checkpoint = std::time::Instant::now();
-        for chunk in rows.chunks(FLUSH_SIZE) {
-            // 1. Bulk cache check — catches hashes computed earlier in *this*
-            //    leg (duplicate course content across super-chunks). The
-            //    anti-join snapshot was taken before the loop started, so it
-            //    can't see them.
-            let cached = self.cache_hit_batch(db, chunk)?;
-
-            // 2. Format only the misses, deduplicating within the super-chunk:
-            //    two copies of the same course would otherwise both classify
-            //    and collide on the cache's (model_id, content_hash) primary
-            //    key at flush. The second copy rides on the first's result, so
-            //    it counts as a hit. `Miss` borrows `content_hash` from
-            //    `chunk` so flush_batch can pair it with its classification
-            //    without indexing back into the chunk later.
-            let mut seen_in_chunk = std::collections::HashSet::new();
-            let misses: Vec<Miss<'_>> = chunk
-                .iter()
-                .zip(cached.iter())
-                .filter(|((content_hash, ..), hit)| {
-                    !**hit && seen_in_chunk.insert(content_hash.as_str())
-                })
-                .map(|((content_hash, subject, catalog, title), _)| Miss {
-                    content_hash: content_hash.as_str(),
-                    input: format_input(&CourseInput {
-                        subject_code: subject.clone(),
-                        catalog_number: catalog.clone(),
-                        course_title: title.clone(),
-                    }),
-                })
-                .collect();
-            let mut misses = misses;
-            // Length-bucket the super-chunk (EPI-82): sorted inputs make each
-            // ONNX sub-batch near-uniform in length, so BatchLongest padding
-            // does almost no wasted work (+14% CUDA, +16% CPU measured).
-            // Results pair by index (flush zips misses↔classifications) and
-            // cache keys are content hashes, so order is semantically free.
-            misses.sort_by_key(|m| m.input.len());
-            let miss_refs: Vec<&str> = misses.iter().map(|m| m.input.as_str()).collect();
-
-            // 3. ONNX session calls in per-EP sub-batches, honoring a pause
-            //    request between calls so pause latency stays one ONNX call,
-            //    not one super-chunk.
-            let mut classifications = Vec::with_capacity(misses.len());
-            let mut cancelled = false;
-            for sub in miss_refs.chunks(batch) {
-                let batch_results =
-                    classify_batch(model, sub).map_err(|e| format!("classify_batch: {e}"))?;
-                classifications.extend(batch_results);
-                // Relaxed is fine — we only need eventual visibility of the
-                // flag, not ordering against other memory.
-                if self.cancel.load(Ordering::Relaxed) {
-                    cancelled = true;
+        for (index, (run_model, model)) in self.models.iter().zip(loaded).enumerate() {
+            let Some(plan) = plans.get(index).copied() else {
+                continue;
+            };
+            if plan.missing_unique == 0 {
+                continue;
+            }
+            let batch = crate::inference::batch_size(model.resolved_ep);
+            self.materialize_misses(db, run_model.model_id)?;
+            let mut cursor = String::new();
+            loop {
+                // One window = one flush unit (EPI-89): a single DB
+                // round-trip for the read and one for the write per
+                // FLUSH_SIZE distinct inputs, while the ONNX calls inside run
+                // at the per-EP batch size (EPI-82).
+                let window = next_miss_window(db, &cursor)?;
+                let Some(last) = window.last() else {
                     break;
-                }
-            }
+                };
+                let next_cursor = last.0.clone();
+                let (misses, classifications, cancelled) =
+                    self.classify_window(model, batch, &window)?;
 
-            // Pause mid-super-chunk: flush the classified prefix (the
-            // misses/classifications zip in flush_batch truncates to it)
-            // without advancing row progress — the resume anti-join re-counts
-            // those rows as cache hits, so counters stay consistent by
-            // construction, same as crash recovery.
-            if cancelled && classifications.len() < misses.len() {
+                // Flush whatever classified — on pause that's a prefix of the
+                // window (the misses/classifications zip truncates to it);
+                // the skipped remainder stays missing and the next leg's
+                // anti-join picks it up.
                 unique_done += classifications.len() as u64;
-                self.flush_batch(
-                    db,
-                    &misses,
-                    &classifications,
-                    processed,
-                    cache_hits,
-                    unique_done,
-                )?;
-                return Ok(RunOutcome {
-                    processed,
-                    unique_done,
-                    cache_hits,
-                    interrupted: true,
-                });
-            }
-
-            // 4. Bulk insert via Appender + single progress UPDATE, both under
-            //    one RW-mutex acquire per super-chunk.
-            let chunk_hits = chunk.len() - misses.len();
-            let processed_after = processed + chunk.len() as u64;
-            let cache_hits_after = cache_hits + chunk_hits as u64;
-            let unique_done_after = unique_done + classifications.len() as u64;
-            self.flush_batch(
-                db,
-                &misses,
-                &classifications,
-                processed_after,
-                cache_hits_after,
-                unique_done_after,
-            )?;
-
-            processed = processed_after;
-            cache_hits = cache_hits_after;
-            unique_done = unique_done_after;
-
-            // Periodic WAL compaction (EPI-92), best-effort: a plain
-            // CHECKPOINT errors harmlessly if a concurrent read transaction
-            // is open — the next boundary retries.
-            if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-                let result = db
-                    .rw()
-                    .and_then(|conn| conn.execute_batch("CHECKPOINT").map_err(|e| e.to_string()));
-                if let Err(e) = result {
-                    eprintln!("run {}: periodic checkpoint skipped: {e}", self.run_id);
+                if let Some(done) = level_done.get_mut(index) {
+                    *done += classifications.len() as u64;
                 }
-                last_checkpoint = std::time::Instant::now();
-            }
+                let progress = snapshot(&level_done, unique_done);
+                self.flush_batch(db, run_model.model_id, &misses, &classifications, &progress)?;
+                if cancelled {
+                    return Ok(RunOutcome {
+                        processed: progress.processed,
+                        unique_done,
+                        unique_total,
+                        cache_hits: progress.cache_hits,
+                        interrupted: true,
+                    });
+                }
 
-            if cancelled {
-                return Ok(RunOutcome {
-                    processed,
-                    unique_done,
-                    cache_hits,
-                    interrupted: true,
-                });
+                // Periodic WAL compaction (EPI-92), best-effort: a plain
+                // CHECKPOINT errors harmlessly if a concurrent read
+                // transaction is open — the next boundary retries.
+                if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+                    let result = db.rw().and_then(|conn| {
+                        conn.execute_batch("CHECKPOINT").map_err(|e| e.to_string())
+                    });
+                    if let Err(e) = result {
+                        eprintln!("run {}: periodic checkpoint skipped: {e}", self.run_id);
+                    }
+                    last_checkpoint = std::time::Instant::now();
+                }
+
+                cursor = next_cursor;
             }
+            self.drop_misses(db);
         }
+        let progress = snapshot(&level_done, unique_done);
         Ok(RunOutcome {
-            processed,
+            processed: progress.processed,
             unique_done,
-            cache_hits,
+            unique_total,
+            cache_hits: progress.cache_hits,
             interrupted: false,
         })
     }
 
-    /// `(dataset course count, courses with no cached result for this model)`
-    /// in row order. The anti-join is what keeps a resumed (or re-run) leg
-    /// from materializing and re-walking work that's already done; it also
-    /// shrinks the in-memory selection to the actual remainder (relevant to
-    /// EPI-67).
-    fn select_missing_courses(&self, db: &AppDb) -> Result<(u64, Vec<SelectedCourse>), String> {
-        let conn = db.rw()?;
+    /// Format, length-bucket, and classify one window of distinct missing
+    /// inputs. The window is distinct by construction — no cache check, no
+    /// dedupe set. Length-bucketing (EPI-82): sorted inputs make each ONNX
+    /// sub-batch near-uniform so `BatchLongest` padding does almost no wasted
+    /// work (+14% CUDA, +16% CPU measured); order is semantically free
+    /// because flush pairs by index and cache keys are content hashes. The
+    /// pause flag is honored between sub-batches, so pause latency stays one
+    /// ONNX call; on pause the returned classifications are a prefix of the
+    /// returned misses.
+    fn classify_window<'w>(
+        &self,
+        model: &LoadedModel,
+        batch: usize,
+        window: &'w [SelectedCourse],
+    ) -> Result<(Vec<Miss<'w>>, Vec<crate::inference::Classification>, bool), String> {
+        let mut misses: Vec<Miss<'w>> = window
+            .iter()
+            .map(|(content_hash, subject, catalog, title)| Miss {
+                content_hash: content_hash.as_str(),
+                input: format_input(&CourseInput {
+                    subject_code: subject.clone(),
+                    catalog_number: catalog.clone(),
+                    course_title: title.clone(),
+                }),
+            })
+            .collect();
+        misses.sort_by_key(|m| m.input.len());
+        let miss_refs: Vec<&str> = misses.iter().map(|m| m.input.as_str()).collect();
+
+        let mut classifications = Vec::with_capacity(misses.len());
+        let mut cancelled = false;
+        for sub in miss_refs.chunks(batch) {
+            let batch_results =
+                classify_batch(model, sub).map_err(|e| format!("classify_batch: {e}"))?;
+            classifications.extend(batch_results);
+            // Relaxed is fine — we only need eventual visibility of the flag,
+            // not ordering against other memory.
+            if self.cancel.load(Ordering::Relaxed) {
+                cancelled = true;
+                break;
+            }
+        }
+        Ok((misses, classifications, cancelled))
+    }
+
+    fn course_count(&self, db: &AppDb) -> Result<u64, String> {
+        let conn = db.ro()?;
         let total: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
@@ -1079,26 +1139,65 @@ impl RunPipeline {
                 |row| row.get(0),
             )
             .map_err(|e| format!("count courses: {e}"))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT c.content_hash, c.subject_code, c.catalog_number, c.course_title
+        Ok(u64::try_from(total).unwrap_or(0))
+    }
+
+    /// Missing-work stats for one model, measured once at leg start (EPI-91).
+    fn level_stats(&self, db: &AppDb, model_id: i64) -> Result<LevelPlan, String> {
+        let conn = db.ro()?;
+        let (rows, unique): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(DISTINCT c.content_hash)
                  FROM courses c
                  WHERE c.dataset_id = ?
                    AND NOT EXISTS (
                        SELECT 1 FROM inference_results ir
                        WHERE ir.model_id = ? AND ir.content_hash = c.content_hash
-                   )
-                 ORDER BY c.row_index",
+                   )",
+                params![&self.dataset_id, model_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .map_err(|e| format!("prepare select courses: {e}"))?;
-        let rows = stmt
-            .query_map(params![&self.dataset_id, &self.model_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })
-            .map_err(|e| format!("query courses: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("collect courses: {e}"))?;
-        Ok((u64::try_from(total).unwrap_or(0), rows))
+            .map_err(|e| format!("level stats: {e}"))?;
+        Ok(LevelPlan {
+            missing_rows: u64::try_from(rows).unwrap_or(0),
+            missing_unique: u64::try_from(unique).unwrap_or(0),
+        })
+    }
+
+    /// Materialize one level's distinct missing inputs into a temp table on
+    /// the RW connection (EPI-91/67) — one anti-join pass, then windowed
+    /// reads keep the Rust heap bounded by `FLUSH_SIZE`. `arg_min` takes all
+    /// representative fields from the same (lowest `row_index`) row, so the
+    /// formatted input is exactly what that row would produce.
+    fn materialize_misses(&self, db: &AppDb, model_id: i64) -> Result<(), String> {
+        let conn = db.rw()?;
+        conn.execute(
+            "CREATE OR REPLACE TEMP TABLE run_misses AS
+             SELECT c.content_hash,
+                    arg_min(c.subject_code, c.row_index) AS subject_code,
+                    arg_min(c.catalog_number, c.row_index) AS catalog_number,
+                    arg_min(c.course_title, c.row_index) AS course_title
+             FROM courses c
+             WHERE c.dataset_id = ?
+               AND NOT EXISTS (
+                   SELECT 1 FROM inference_results ir
+                   WHERE ir.model_id = ? AND ir.content_hash = c.content_hash
+               )
+             GROUP BY c.content_hash",
+            params![&self.dataset_id, model_id],
+        )
+        .map_err(|e| format!("materialize misses: {e}"))?;
+        Ok(())
+    }
+
+    /// Best-effort cleanup of the level's temp table; the next
+    /// `materialize_misses` replaces it anyway.
+    fn drop_misses(&self, db: &AppDb) {
+        if let Ok(conn) = db.rw()
+            && let Err(e) = conn.execute_batch("DROP TABLE IF EXISTS run_misses")
+        {
+            eprintln!("run {}: drop misses temp table: {e}", self.run_id);
+        }
     }
 
     /// The run row's persisted `unique_inputs_done` — the resume-safe count
@@ -1115,57 +1214,26 @@ impl RunPipeline {
         Ok(u64::try_from(done).unwrap_or(0))
     }
 
-    /// Returns a `Vec<bool>` aligned with `chunk`: true if the
-    /// `(model_id, content_hash)` pair is already in `inference_results`.
-    fn cache_hit_batch(&self, db: &AppDb, chunk: &[SelectedCourse]) -> Result<Vec<bool>, String> {
-        if chunk.is_empty() {
-            return Ok(Vec::new());
-        }
-        let conn = db.ro()?;
-        let mut placeholders = String::with_capacity(chunk.len() * 2);
-        for i in 0..chunk.len() {
-            if i > 0 {
-                placeholders.push(',');
-            }
-            placeholders.push('?');
-        }
-        let sql = format!(
-            "SELECT content_hash FROM inference_results
-             WHERE model_id = ? AND content_hash IN ({placeholders})"
-        );
-        let mut sql_params: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(chunk.len() + 1);
-        sql_params.push(&self.model_id);
-        for (h, ..) in chunk {
-            sql_params.push(h);
-        }
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| format!("prepare cache_hit_batch: {e}"))?;
-        let hits: std::collections::HashSet<String> = stmt
-            .query_map(duckdb::params_from_iter(sql_params), |r| {
-                r.get::<_, String>(0)
-            })
-            .map_err(|e| format!("query cache_hit_batch: {e}"))?
-            .collect::<Result<_, _>>()
-            .map_err(|e| format!("collect cache_hit_batch: {e}"))?;
-        Ok(chunk.iter().map(|(h, ..)| hits.contains(h)).collect())
-    }
-
-    /// Single RW-mutex acquire per batch: insert all miss classifications via
-    /// the Appender, then tick run progress. `processed_after` /
-    /// `cache_hits_after` are the post-batch running totals, written verbatim
-    /// to the runs row.
+    /// Single RW-mutex acquire per window: insert the window's
+    /// classifications for `model_id` via the Appender, then tick run
+    /// progress. The `misses`/`classifications` zip truncates to the
+    /// classified prefix, which is exactly right for a pause landing mid-
+    /// window.
     fn flush_batch(
         &self,
         db: &AppDb,
+        model_id: i64,
         misses: &[Miss<'_>],
         classifications: &[crate::inference::Classification],
-        processed_after: u64,
-        cache_hits_after: u64,
-        unique_done_after: u64,
+        progress: &ProgressSnapshot,
     ) -> Result<(), String> {
         let conn = db.rw()?;
 
+        let digit_level = self
+            .models
+            .iter()
+            .find(|m| m.model_id == model_id)
+            .map_or(0, |m| m.digit_level);
         if !classifications.is_empty() {
             let mut appender = conn
                 .appender_with_columns(
@@ -1188,12 +1256,9 @@ impl RunPipeline {
                 // see docs/model-confidence.md.
                 appender
                     .append_row(params![
-                        self.model_id,
+                        model_id,
                         miss.content_hash,
-                        crate::inference::normalize_ccm_code(
-                            &classification.label,
-                            self.digit_level
-                        ),
+                        crate::inference::normalize_ccm_code(&classification.label, digit_level),
                         f64::from(classification.probability),
                         f64::from(classification.logit_argmax),
                         self.computed_at.as_str(),
@@ -1206,28 +1271,28 @@ impl RunPipeline {
                 .map_err(|e| format!("inference appender flush: {e}"))?;
         }
 
-        self.flush_progress(&conn, processed_after, cache_hits_after, unique_done_after)
+        self.flush_progress(&conn, progress)
     }
 
-    /// Single progress UPDATE on an already-held connection. Writes
-    /// `unique_inputs_done` too (EPI-90) so "New classifications" ticks live
-    /// and each flush persists the cumulative resume-safe count in the same
-    /// transaction as the cache inserts.
+    /// Single progress UPDATE on an already-held connection. Writes the whole
+    /// snapshot — including `unique_inputs_done` (EPI-90) and
+    /// `unique_inputs_total` (EPI-91) — in the same transaction as the cache
+    /// inserts, so every flush persists a resume-safe, crash-consistent
+    /// state.
     fn flush_progress(
         &self,
         conn: &duckdb::Connection,
-        processed: u64,
-        cache_hits: u64,
-        unique_done: u64,
+        progress: &ProgressSnapshot,
     ) -> Result<(), String> {
         let now = Utc::now().to_rfc3339();
         conn.execute(
             "UPDATE runs SET rows_processed=?, cache_hits=?, unique_inputs_done=?,
-                last_progress_at=? WHERE id=?",
+                unique_inputs_total=?, last_progress_at=? WHERE id=?",
             params![
-                i64::try_from(processed).unwrap_or(i64::MAX),
-                i64::try_from(cache_hits).unwrap_or(i64::MAX),
-                i64::try_from(unique_done).unwrap_or(i64::MAX),
+                i64::try_from(progress.processed).unwrap_or(i64::MAX),
+                i64::try_from(progress.cache_hits).unwrap_or(i64::MAX),
+                i64::try_from(progress.unique_done).unwrap_or(i64::MAX),
+                i64::try_from(progress.unique_total).unwrap_or(i64::MAX),
                 &now,
                 &self.run_id,
             ],
@@ -1244,14 +1309,37 @@ impl RunPipeline {
 pub struct RunOutcome {
     pub processed: u64,
     pub unique_done: u64,
+    /// Total distinct inputs this run must compute across all its models:
+    /// prior legs' done + what was missing at this leg's start (EPI-91).
+    pub unique_total: u64,
     pub cache_hits: u64,
     pub interrupted: bool,
 }
 
 /// Per-row state for a cache-missed input within one batch. Borrows the
-/// content hash from the worker's owned `rows` Vec so `flush_batch` can pair it
-/// with the corresponding classification without an extra clone.
+/// content hash from the worker's owned window Vec so `flush_batch` can pair
+/// it with the corresponding classification without an extra clone.
 struct Miss<'a> {
     content_hash: &'a str,
     input: String,
+}
+
+/// Next `FLUSH_SIZE` distinct missing inputs past `cursor`. Reads on the RW
+/// connection — temp tables are per-connection, and the RO handle is a
+/// different connection.
+fn next_miss_window(db: &AppDb, cursor: &str) -> Result<Vec<SelectedCourse>, String> {
+    let conn = db.rw()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT content_hash, subject_code, catalog_number, course_title
+             FROM run_misses WHERE content_hash > ? ORDER BY content_hash LIMIT ?",
+        )
+        .map_err(|e| format!("prepare miss window: {e}"))?;
+    stmt.query_map(
+        params![cursor, i64::try_from(FLUSH_SIZE).unwrap_or(i64::MAX)],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )
+    .map_err(|e| format!("query miss window: {e}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|e| format!("collect miss window: {e}"))
 }

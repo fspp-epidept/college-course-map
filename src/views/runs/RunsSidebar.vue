@@ -60,7 +60,7 @@ function open(run: RunSummary): void {
 }
 
 function progressLabel(run: RunSummary): string {
-  const level = run.digitLevel !== null ? `${run.digitLevel}-digit · ` : "";
+  const level = run.digitLevel !== null ? `${run.digitLevel}-digit · ` : "all models · ";
   if (
     run.state === "running" &&
     run.rowsTotal !== null &&

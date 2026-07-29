@@ -531,12 +531,12 @@ maxCpuThreads?: number;
  * (preload is process-lifetime).
  */
 cudaLibraryDir?: string | null }
-export type StartRunRequest = { datasetId: string; 
+export type StartRunRequest = { 
 /**
- * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
- * spike avoids forcing the frontend to know surrogate model ids.
+ * A run always classifies the dataset with every manifest model
+ * (EPI-96) — there is no level to pick.
  */
-digitLevel: number }
+datasetId: string }
 /**
  * Response from `start_run`: the run has been queued and is already updating
  * its own row. The frontend polls `get_run(run_id)` from here.

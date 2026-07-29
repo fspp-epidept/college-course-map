@@ -31,7 +31,7 @@ use course_classifier_lib::{
     format::{CourseInput, format_input},
     inference::{self, LoadedModel},
     manifest,
-    runs::{RunPipeline, sweep_orphaned_runs},
+    runs::{RunModel, RunPipeline, sweep_orphaned_runs},
     runtime::{self, EpKind},
 };
 use duckdb::params;
@@ -78,8 +78,10 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     let pipeline = RunPipeline {
         dataset_id: DATASET_ID.to_owned(),
         run_id: run_id.clone(),
-        model_id,
-        digit_level: DIGIT_LEVEL,
+        models: vec![RunModel {
+            model_id,
+            digit_level: DIGIT_LEVEL,
+        }],
         computed_at: Utc::now().to_rfc3339(),
         cancel: Arc::new(AtomicBool::new(false)),
     };
@@ -88,7 +90,7 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     let done = AtomicBool::new(false);
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let worker = scope.spawn(|| {
-            let outcome = pipeline.execute(&db, &model);
+            let outcome = pipeline.execute(&db, &[&model]);
             pipeline.finalize(&db, outcome);
         });
         // Progress reporter: reads the run row through the RO clone while the
@@ -283,12 +285,14 @@ fn parent_main() -> anyhow::Result<()> {
     let pipeline = RunPipeline {
         dataset_id: DATASET_ID.to_owned(),
         run_id: run_id.clone(),
-        model_id,
-        digit_level: DIGIT_LEVEL,
+        models: vec![RunModel {
+            model_id,
+            digit_level: DIGIT_LEVEL,
+        }],
         computed_at: Utc::now().to_rfc3339(),
         cancel: Arc::new(AtomicBool::new(false)),
     };
-    let outcome = pipeline.execute(&db, &model);
+    let outcome = pipeline.execute(&db, &[&model]);
     pipeline.finalize(&db, outcome);
 
     // --- Verify ---
