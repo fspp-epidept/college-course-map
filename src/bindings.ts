@@ -193,6 +193,13 @@ async downloadRuntime(packId: string) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Restart the app (EPI-94): the one way to switch runtime packs, since ONNX
+ * Runtime loads exactly once per process.
+ */
+async relaunchApp() : Promise<void> {
+    await TAURI_INVOKE("relaunch_app");
+},
 async runtimeStatus() : Promise<Result<RuntimeStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("runtime_status") };
@@ -530,7 +537,16 @@ maxCpuThreads?: number;
  * over the downloadable support-libs pack; changing it needs a relaunch
  * (preload is process-lifetime).
  */
-cudaLibraryDir?: string | null }
+cudaLibraryDir?: string | null; 
+/**
+ * Runtime pack the user explicitly activated in Settings → Compute
+ * (EPI-94). Checked before the EP-priority scan at startup, so an
+ * explicit choice can never be shadowed by manifest order. `None` — or a
+ * pack that is no longer installed — falls back to the scan, whose
+ * terminal fallback is the bundled CPU pack. Switching packs requires a
+ * relaunch (ONNX Runtime is init-once).
+ */
+preferredPack?: string | null }
 export type StartRunRequest = { 
 /**
  * A run always classifies the dataset with every manifest model

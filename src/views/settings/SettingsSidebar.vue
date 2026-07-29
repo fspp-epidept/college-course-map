@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { settingsSections } from "../../config/settingsSections";
+import { type SettingsSectionId, settingsSections } from "../../config/settingsSections";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
+
+// The panel is one scrolling page (EPI-95); a sidebar entry scrolls to its
+// section anchor rather than swapping panels. Direct-in-handler so clicking
+// the already-active entry still scrolls.
+function goTo(id: SettingsSectionId): void {
+  workspace.setActiveSettingsSection(id);
+  document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 </script>
 
 <template>
@@ -20,7 +28,7 @@ const workspace = useWorkspace();
           ? 'bg-(--ui-bg-muted) text-(--ui-text)'
           : 'text-(--ui-text-muted) hover:bg-(--ui-bg-muted)'
       "
-      @click="workspace.setActiveSettingsSection(section.id)"
+      @click="goTo(section.id)"
     >
       <UIcon :name="section.icon" class="size-4" />
       <span>{{ section.label }}</span>

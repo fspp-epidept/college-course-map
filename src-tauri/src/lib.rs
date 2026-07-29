@@ -45,6 +45,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             models::models_status,
             models::reload_models,
             runtime::download_runtime,
+            runtime::relaunch_app,
             runtime::runtime_status,
             runs::get_latest_run,
             runs::get_run,

@@ -572,19 +572,41 @@ pub struct RuntimeState {
     pub notices: Vec<String>,
 }
 
-/// Choose the pack this process will load, from the user's EP priority list:
-/// the first EP with an *installed* pack claiming it wins (manifest order
-/// breaks ties — e.g. `cuda` before `cuda13`; only the one matching the
-/// machine's CUDA sonames will register, so users install the right one).
-/// `Cpu` in the list — or nothing installed — resolves to the bundled CPU
-/// pack under `resource_dir`, which ships with every build and is the
-/// terminal fallback by construction.
+/// Choose the pack this process will load. An explicitly preferred pack
+/// (EPI-94, Settings → Compute "Make active") wins when installed — an
+/// explicit choice can never be shadowed by manifest order. Otherwise the
+/// user's EP priority list is scanned: the first EP with an *installed* pack
+/// claiming it wins (manifest order breaks ties). `Cpu` — preferred, in the
+/// list, or nothing installed — resolves to the bundled CPU pack under
+/// `resource_dir`, which ships with every build and is the terminal fallback
+/// by construction.
 pub fn resolve_startup_pack(
     manifest: &RuntimeManifest,
+    preferred_pack: Option<&str>,
     eps: &[EpKind],
     resource_dir: &Path,
 ) -> Result<(RuntimeState, PathBuf), String> {
     let packs = packs_for_target(manifest);
+    let state_for = |pack: &RuntimePack| RuntimeState {
+        pack_id: pack.id.clone(),
+        ort_version: manifest.ort_version.clone(),
+        eps: pack.eps.clone(),
+        notices: Vec::new(),
+    };
+    match preferred_pack {
+        Some("cpu") => return Ok(bundled_cpu(manifest, &packs, resource_dir)),
+        Some(id) => {
+            // Runtime packs only (`eps` non-empty) — a libs pack carries no
+            // ONNX Runtime. Not-installed falls through to the scan.
+            if let Some(pack) = packs.iter().find(|p| p.id == id && !p.eps.is_empty()) {
+                let dir = pack_dir(manifest, pack)?;
+                if installed(&dir, pack) {
+                    return Ok((state_for(pack), dir));
+                }
+            }
+        }
+        None => {}
+    }
     for ep in eps {
         if *ep == EpKind::Cpu {
             break;
@@ -595,23 +617,24 @@ pub fn resolve_startup_pack(
         {
             let dir = pack_dir(manifest, pack)?;
             if installed(&dir, pack) {
-                return Ok((
-                    RuntimeState {
-                        pack_id: pack.id.clone(),
-                        ort_version: manifest.ort_version.clone(),
-                        eps: pack.eps.clone(),
-                        notices: Vec::new(),
-                    },
-                    dir,
-                ));
+                return Ok((state_for(pack), dir));
             }
         }
     }
+    Ok(bundled_cpu(manifest, &packs, resource_dir))
+}
+
+/// The bundled CPU pack — always present, the terminal fallback.
+fn bundled_cpu(
+    manifest: &RuntimeManifest,
+    packs: &[&RuntimePack],
+    resource_dir: &Path,
+) -> (RuntimeState, PathBuf) {
     let cpu_eps = packs
         .iter()
         .find(|p| p.id == "cpu")
         .map_or_else(|| vec!["cpu".to_owned()], |p| p.eps.clone());
-    Ok((
+    (
         RuntimeState {
             pack_id: "cpu".to_owned(),
             ort_version: manifest.ort_version.clone(),
@@ -619,7 +642,7 @@ pub fn resolve_startup_pack(
             notices: Vec::new(),
         },
         resource_dir.join(RUNTIMES_SUBDIR).join("cpu"),
-    ))
+    )
 }
 
 /// The installed companion libs-pack directory for the pack this process
@@ -679,8 +702,12 @@ pub(crate) fn startup(
     if swept > 0 {
         eprintln!("startup: swept {swept} partial pack download(s)");
     }
-    let (mut state, pack_dir) =
-        resolve_startup_pack(&manifest, &settings.execution_providers, resource_dir)?;
+    let (mut state, pack_dir) = resolve_startup_pack(
+        &manifest,
+        settings.preferred_pack.as_deref(),
+        &settings.execution_providers,
+        resource_dir,
+    )?;
     // A downloaded pack that fails to load is damaged (the install protocol
     // is atomic, so this is post-install damage: disk corruption, quarantine,
     // manual deletion). Remove it and fall through to the bundled CPU pack
@@ -697,7 +724,8 @@ pub(crate) fn startup(
         );
         invalidate_pack(&pack_dir);
         let failed = state.pack_id.clone();
-        let (cpu_state, cpu_dir) = resolve_startup_pack(&manifest, &[EpKind::Cpu], resource_dir)?;
+        let (cpu_state, cpu_dir) =
+            resolve_startup_pack(&manifest, Some("cpu"), &[EpKind::Cpu], resource_dir)?;
         init_ort(&cpu_dir)?;
         state = cpu_state;
         state.notices.push(format!(
@@ -869,28 +897,58 @@ pub(crate) async fn download_runtime(app: tauri::AppHandle, pack_id: String) -> 
 
 #[cfg(not(feature = "airgap"))]
 fn download_runtime_blocking(app: &tauri::AppHandle, pack_id: &str) -> Result<(), String> {
-    use tauri_specta::Event as _;
-
     let manifest = load_manifest()?;
-    let pack = packs_for_target(&manifest)
-        .into_iter()
+    let packs = packs_for_target(&manifest);
+    let pack = packs
+        .iter()
         .find(|p| p.id == pack_id)
         .ok_or_else(|| format!("no pack '{pack_id}' for this platform"))?;
-    let dest = pack_dir(&manifest, pack)?;
-    if installed(&dest, pack) {
-        return Ok(());
-    }
     let client = reqwest::blocking::Client::builder()
         .user_agent("college-course-map")
         .timeout(None) // GPU/libs packs are 200 MB - 1.2 GB; no global deadline
         .build()
         .map_err(|e| format!("build http client: {e}"))?;
+    let result = install_pack_with_progress(app, &client, &manifest, pack).and_then(|()| {
+        // One Download action fetches everything the backend needs (EPI-94):
+        // a runtime pack's companion support-libs pack rides along, so users
+        // never learn they were two files.
+        match &pack.libs {
+            Some(libs_id) => {
+                let libs = packs
+                    .iter()
+                    .find(|p| &p.id == libs_id)
+                    .ok_or_else(|| format!("manifest names missing libs pack '{libs_id}'"))?;
+                install_pack_with_progress(app, &client, &manifest, libs)
+            }
+            None => Ok(()),
+        }
+    });
+    use tauri_specta::Event as _;
+    let _ = RuntimeStateChanged {}.emit(app);
+    result
+}
+
+/// Install one pack (skipping if already installed), streaming progress
+/// events keyed by its id.
+#[cfg(not(feature = "airgap"))]
+fn install_pack_with_progress(
+    app: &tauri::AppHandle,
+    client: &reqwest::blocking::Client,
+    manifest: &RuntimeManifest,
+    pack: &RuntimePack,
+) -> Result<(), String> {
+    use tauri_specta::Event as _;
+
+    let dest = pack_dir(manifest, pack)?;
+    if installed(&dest, pack) {
+        return Ok(());
+    }
     let total = pack.total_size();
     #[expect(
         clippy::cast_precision_loss,
         reason = "pack sizes are far below f64's 2^53 exact-integer range"
     )]
-    let result = install_pack(&client, pack, &dest, &mut |received, bytes_per_sec| {
+    install_pack(client, pack, &dest, &mut |received, bytes_per_sec| {
         let _ = RuntimeDownloadProgress {
             pack_id: pack.id.clone(),
             received: received as f64,
@@ -898,9 +956,19 @@ fn download_runtime_blocking(app: &tauri::AppHandle, pack_id: &str) -> Result<()
             bytes_per_sec,
         }
         .emit(app);
-    });
-    let _ = RuntimeStateChanged {}.emit(app);
-    result
+    })
+}
+
+/// Restart the app (EPI-94): the one way to switch runtime packs, since ONNX
+/// Runtime loads exactly once per process.
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn relaunch_app(app: tauri::AppHandle) {
+    app.restart();
 }
 
 #[cfg(test)]

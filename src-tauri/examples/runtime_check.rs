@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
     // The example has no Tauri resource dir; the dev fetch location plays
     // that role (same layout the bundle ships).
     let (state, pack_dir) =
-        runtime::resolve_startup_pack(&manifest, &eps, Path::new(env!("CARGO_MANIFEST_DIR")))
+        runtime::resolve_startup_pack(&manifest, None, &eps, Path::new(env!("CARGO_MANIFEST_DIR")))
             .map_err(anyhow::Error::msg)?;
     println!(
         "resolved pack        : {} (ONNX Runtime {}, claims {:?})",

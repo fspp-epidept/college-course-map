@@ -180,6 +180,14 @@ pub(crate) struct Settings {
     /// (preload is process-lifetime).
     #[serde(default)]
     pub(crate) cuda_library_dir: Option<String>,
+    /// Runtime pack the user explicitly activated in Settings → Compute
+    /// (EPI-94). Checked before the EP-priority scan at startup, so an
+    /// explicit choice can never be shadowed by manifest order. `None` — or a
+    /// pack that is no longer installed — falls back to the scan, whose
+    /// terminal fallback is the bundled CPU pack. Switching packs requires a
+    /// relaunch (ONNX Runtime is init-once).
+    #[serde(default)]
+    pub(crate) preferred_pack: Option<String>,
 }
 
 impl Default for Settings {
@@ -189,6 +197,7 @@ impl Default for Settings {
             execution_providers: crate::runtime::default_priority(),
             max_cpu_threads: 0,
             cuda_library_dir: None,
+            preferred_pack: None,
         }
     }
 }

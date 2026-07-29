@@ -138,6 +138,7 @@ fn main() -> anyhow::Result<()> {
     };
     let (state, pack_dir) = runtime::resolve_startup_pack(
         &manifest,
+        None,
         &eps,
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
     )
