@@ -113,6 +113,9 @@ pub(crate) struct RunSummary {
     /// Resolved from the run's first `model_ids` entry so a list row can say
     /// which model it was without a second IPC call (EPI-69).
     pub digit_level: Option<u8>,
+    /// How many models the run covers (EPI-96). Row counters are in
+    /// row×model units — the UI divides by this to talk about dataset rows.
+    pub model_count: i64,
     pub rows_total: Option<i64>,
     pub rows_processed: Option<i64>,
     pub cache_hits: Option<i64>,
@@ -143,6 +146,9 @@ pub(crate) struct RunDetail {
     pub description: Option<String>,
     pub state: String,
     pub digit_level: Option<u8>,
+    /// How many models the run covers (EPI-96). Row counters are in
+    /// row×model units — the UI divides by this to talk about dataset rows.
+    pub model_count: i64,
     pub rows_total: Option<i64>,
     pub rows_processed: Option<i64>,
     pub unique_inputs_done: Option<i64>,
@@ -272,6 +278,7 @@ pub(crate) fn list_runs(
                     description: row.get(3)?,
                     state: row.get(4)?,
                     digit_level: None,
+                    model_count: 1,
                     rows_total: row.get(5)?,
                     rows_processed: row.get(6)?,
                     cache_hits: row.get(7)?,
@@ -298,6 +305,7 @@ pub(crate) fn list_runs(
         } else {
             None
         };
+        summary.model_count = i64::try_from(model_ids.len().max(1)).unwrap_or(1);
         let (resumable, blockers) =
             assess_resumability(&summary.state, &model_ids, &catalog, &store);
         summary.resumable = resumable;
@@ -397,6 +405,7 @@ fn query_run_detail(
             description: row.description,
             state: row.state,
             digit_level,
+            model_count: i64::try_from(model_ids.len().max(1)).unwrap_or(1),
             rows_total: row.rows_total,
             rows_processed: row.rows_processed,
             unique_inputs_done: row.unique_inputs_done,

@@ -3,6 +3,7 @@ import { computed, watch } from "vue";
 import type { RunSummary } from "../../bindings";
 import { useRuns } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
+import { runStateMeta } from "./runState";
 
 const workspace = useWorkspace();
 const { data: runs, isPending, isError, error } = useRuns();
@@ -68,10 +69,11 @@ function progressLabel(run: RunSummary): string {
     run.rowsProcessed !== null &&
     run.rowsProcessed !== undefined
   ) {
-    return `${level}${run.rowsProcessed} / ${run.rowsTotal}`;
+    return `${level}${run.rowsProcessed.toLocaleString()} / ${run.rowsTotal.toLocaleString()}`;
   }
   if (run.state === "completed" && run.rowsProcessed !== null && run.rowsProcessed !== undefined) {
-    return `${level}${run.rowsProcessed} rows`;
+    // Row×model units (EPI-96) — "classifications", never "rows".
+    return `${level}${run.rowsProcessed.toLocaleString()} classifications`;
   }
   if (run.state === "interrupted") {
     // Resumability is the actionable fact about a paused run — say it in the
@@ -79,6 +81,20 @@ function progressLabel(run: RunSummary): string {
     return `${level}${run.resumable ? "paused · resumable" : "paused"}`;
   }
   return `${level}${run.state}`;
+}
+
+function progressPct(run: RunSummary): number | null {
+  if (
+    run.state !== "running" ||
+    run.rowsTotal === null ||
+    run.rowsTotal === undefined ||
+    run.rowsTotal === 0 ||
+    run.rowsProcessed === null ||
+    run.rowsProcessed === undefined
+  ) {
+    return null;
+  }
+  return Math.min(100, (run.rowsProcessed / run.rowsTotal) * 100);
 }
 </script>
 
@@ -97,16 +113,33 @@ function progressLabel(run: RunSummary): string {
         <p class="px-2 text-xs uppercase tracking-wide text-(--ui-text-dimmed)">
           {{ group.label }}
         </p>
+        <!-- State is carried per-row by icon shape + semantic color (EPI-97),
+             not just the group header — headers scroll away; rows don't. -->
         <button
           v-for="run in group.runs"
           :key="run.id"
           type="button"
-          class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex flex-col"
+          class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex items-start gap-2"
           @click="open(run)"
         >
-          <span class="text-sm text-(--ui-text) truncate">{{ run.datasetTitle }}</span>
-          <span class="text-xs text-(--ui-text-dimmed)">
-            {{ progressLabel(run) }}
+          <UIcon
+            :name="runStateMeta(run.state).icon"
+            class="size-4 mt-0.5 shrink-0"
+            :class="runStateMeta(run.state).iconClass"
+            :aria-label="runStateMeta(run.state).label"
+          />
+          <span class="flex min-w-0 flex-1 flex-col">
+            <span class="text-sm text-(--ui-text) truncate">{{ run.datasetTitle }}</span>
+            <span class="text-xs text-(--ui-text-dimmed)">
+              {{ progressLabel(run) }}
+            </span>
+            <UProgress
+              v-if="progressPct(run) !== null"
+              :model-value="progressPct(run)!"
+              :max="100"
+              size="xs"
+              class="mt-1"
+            />
           </span>
         </button>
       </section>

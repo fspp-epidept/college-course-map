@@ -453,10 +453,17 @@ async function exportCsv(): Promise<void> {
           />
 
           <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-(--ui-text-muted)">
-            <span>Rows processed</span>
+            <span>Classifications</span>
             <span class="text-(--ui-text) tabular-nums">
               {{ (latestRun.rowsProcessed ?? 0).toLocaleString() }} /
               {{ (latestRun.rowsTotal ?? 0).toLocaleString() }}
+              <span
+                v-if="latestRun.modelCount > 1 && latestRun.rowsTotal"
+                class="text-(--ui-text-dimmed)"
+              >
+                ({{ Math.round(latestRun.rowsTotal / latestRun.modelCount).toLocaleString() }}
+                rows × {{ latestRun.modelCount }} models)
+              </span>
             </span>
             <span>New classifications</span>
             <span class="text-(--ui-text) tabular-nums">

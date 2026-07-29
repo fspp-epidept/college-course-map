@@ -7,6 +7,7 @@ import {
   useRun,
   useRunRate,
 } from "../../composables/useRuns";
+import { runStateMeta } from "./runState";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -28,7 +29,7 @@ function onResume() {
 
 const rate = useRunRate(run);
 const rateLabel = computed(() =>
-  rate.value === null ? null : `≈ ${Math.round(rate.value).toLocaleString()} rows/s`,
+  rate.value === null ? null : `≈ ${Math.round(rate.value).toLocaleString()} classifications/s`,
 );
 
 const progressPct = computed(() => {
@@ -39,20 +40,14 @@ const progressPct = computed(() => {
   return Math.round((r.rowsProcessed / r.rowsTotal) * 100);
 });
 
-function stateBadgeClass(state: string | undefined): string {
-  switch (state) {
-    case "running":
-      return "bg-(--ui-color-info-500)/15 text-(--ui-color-info-500)";
-    case "completed":
-      return "bg-(--ui-color-success-500)/15 text-(--ui-color-success-500)";
-    case "failed":
-      return "bg-(--ui-color-error-500)/15 text-(--ui-color-error-500)";
-    case "interrupted":
-      return "bg-(--ui-color-warning-500)/15 text-(--ui-color-warning-500)";
-    default:
-      return "bg-(--ui-bg-muted) text-(--ui-text-muted)";
-  }
-}
+// Dataset rows behind the row×model progress units (EPI-96): the counters
+// sum across models, so a 999,999-row dataset legitimately totals ~3M
+// classifications — say so instead of calling them "rows".
+const rowsBreakdown = computed(() => {
+  const r = run.value;
+  if (!r?.rowsTotal || r.modelCount <= 1) return null;
+  return `${Math.round(r.rowsTotal / r.modelCount).toLocaleString()} rows × ${r.modelCount} models`;
+});
 
 function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -75,10 +70,11 @@ function fmtTime(iso: string | null | undefined): string {
     <template v-else-if="run">
       <div class="flex items-center gap-3">
         <span
-          class="rounded-full px-2 py-0.5 text-xs uppercase tracking-wide"
-          :class="stateBadgeClass(run.state)"
+          class="rounded-full px-2 py-0.5 text-xs uppercase tracking-wide inline-flex items-center gap-1"
+          :class="runStateMeta(run.state).badgeClass"
         >
-          {{ run.state }}
+          <UIcon :name="runStateMeta(run.state).icon" class="size-3" />
+          {{ runStateMeta(run.state).label }}
         </span>
         <span class="text-sm text-(--ui-text-muted)">
           {{ run.digitLevel ? `${run.digitLevel}-digit model` : "all models" }}
@@ -128,7 +124,8 @@ function fmtTime(iso: string | null | undefined): string {
       <div v-if="progressPct !== null" class="flex flex-col gap-1.5">
         <div class="flex items-baseline justify-between text-sm">
           <span class="text-(--ui-text-muted)">
-            {{ run.rowsProcessed }} / {{ run.rowsTotal }} rows
+            {{ run.rowsProcessed?.toLocaleString() }} /
+            {{ run.rowsTotal?.toLocaleString() }} classifications
           </span>
           <span class="text-(--ui-text) tabular-nums">{{ progressPct }}%</span>
         </div>
@@ -154,8 +151,13 @@ function fmtTime(iso: string | null | undefined): string {
         <dt class="text-(--ui-text-muted)">Description</dt>
         <dd class="text-(--ui-text)">{{ run.description ?? "—" }}</dd>
 
-        <dt class="text-(--ui-text-muted)">Rows processed</dt>
-        <dd class="text-(--ui-text) tabular-nums">{{ run.rowsProcessed ?? "—" }}</dd>
+        <dt class="text-(--ui-text-muted)">Classifications</dt>
+        <dd class="text-(--ui-text) tabular-nums">
+          {{ run.rowsProcessed?.toLocaleString() ?? "—" }}
+          <span v-if="rowsBreakdown" class="text-(--ui-text-dimmed)">
+            ({{ rowsBreakdown }})
+          </span>
+        </dd>
 
         <template v-if="rateLabel">
           <dt class="text-(--ui-text-muted)">Throughput</dt>
@@ -163,10 +165,14 @@ function fmtTime(iso: string | null | undefined): string {
         </template>
 
         <dt class="text-(--ui-text-muted)">New classifications</dt>
-        <dd class="text-(--ui-text) tabular-nums">{{ run.uniqueInputsDone ?? "—" }}</dd>
+        <dd class="text-(--ui-text) tabular-nums">
+          {{ run.uniqueInputsDone?.toLocaleString() ?? "—" }}
+        </dd>
 
         <dt class="text-(--ui-text-muted)">Cache hits</dt>
-        <dd class="text-(--ui-text) tabular-nums">{{ run.cacheHits ?? "—" }}</dd>
+        <dd class="text-(--ui-text) tabular-nums">
+          {{ run.cacheHits?.toLocaleString() ?? "—" }}
+        </dd>
 
         <template v-if="run.resumeCount > 0">
           <dt class="text-(--ui-text-muted)">Resumed</dt>

@@ -438,7 +438,12 @@ export type ModelsStateChanged = Record<string, never>
  * model digit level (resolved from the JSON `model_ids` array) and the
  * `unique_inputs_done` + `error_message` fields the summary view drops.
  */
-export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
+export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; 
+/**
+ * How many models the run covers (EPI-96). Row counters are in
+ * row×model units — the UI divides by this to talk about dataset rows.
+ */
+modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
@@ -448,7 +453,12 @@ export type RunSummary = { id: string; datasetId: string; datasetTitle: string; 
  * Resolved from the run's first `model_ids` entry so a list row can say
  * which model it was without a second IPC call (EPI-69).
  */
-digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; resumeCount: number; 
+digitLevel: number | null; 
+/**
+ * How many models the run covers (EPI-96). Row counters are in
+ * row×model units — the UI divides by this to talk about dataset rows.
+ */
+modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; resumeCount: number; 
 /**
  * Whether `resume_run` would accept this run right now (EPI-69).
  * Computed at read time — never persisted — so external changes (models
