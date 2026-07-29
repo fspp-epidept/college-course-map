@@ -85,11 +85,16 @@ const TITLE_ALIASES: &[&str] = &[
     "course_name",
 ];
 
-#[derive(Clone, Copy)]
-struct ColumnMap {
-    subject: usize,
-    catalog: usize,
-    title: usize,
+/// Indexes of the mapped columns in the CSV's header order. Persisted to
+/// `source_files.column_mapping` so export can reconstruct the original row
+/// layout (mapped cells live in the structured `courses` columns, everything
+/// else in `extra_columns`). Indexes, not header names: CSVs may repeat a
+/// header name, and indexes stay unambiguous.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct ColumnMap {
+    pub subject: usize,
+    pub catalog: usize,
+    pub title: usize,
 }
 
 fn detect_mapping(headers: &[String]) -> Result<ColumnMap, String> {
@@ -171,19 +176,30 @@ pub(crate) fn import_csv(
     let now = Utc::now().to_rfc3339();
     let dataset_id = Uuid::new_v4().to_string();
 
+    // Persist the header order + mapping for round-trip export (EPI-79):
+    // together they let export_results emit a column-identical copy of the
+    // input with the ccm_* columns appended.
+    let headers_json =
+        serde_json::to_string(&headers).map_err(|e| format!("serialize headers: {e}"))?;
+    let mapping_json =
+        serde_json::to_string(&mapping).map_err(|e| format!("serialize mapping: {e}"))?;
+
     let source_file_id: i64 = {
         let conn = db.rw()?;
         let source_file_id: i64 = conn
             .query_row(
                 "INSERT INTO source_files
-                    (path, display_name, imported_at, imported_hash, size_bytes)
-                 VALUES (?, ?, ?, ?, ?) RETURNING id",
+                    (path, display_name, imported_at, imported_hash, size_bytes,
+                     original_headers, column_mapping)
+                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 params![
                     path_str,
                     &display_name,
                     &now,
                     &imported_hash,
                     i64::try_from(size_bytes).unwrap_or(i64::MAX),
+                    &headers_json,
+                    &mapping_json,
                 ],
                 |row| row.get(0),
             )
@@ -291,6 +307,7 @@ impl ImportTask {
                 catalog,
                 title,
                 content_hash,
+                extra_columns: extra_columns_json(&record, self.mapping)?,
             });
             imported += 1;
             row_index += 1;
@@ -313,8 +330,8 @@ impl ImportTask {
 
     /// Bulk-insert one batch via the `DuckDB` Appender. `appender_with_columns`
     /// lets us omit the `id` (sequence default) + `is_classifiable` (TRUE
-    /// default) + the nullable description / school / `extra_columns` / parse
-    /// fields, so we only push the six columns we actually care about.
+    /// default) + the nullable description / school / parse fields, so we only
+    /// push the columns we actually care about.
     fn flush(&self, batch: &[BatchRow]) -> Result<(), String> {
         if batch.is_empty() {
             return Ok(());
@@ -331,6 +348,7 @@ impl ImportTask {
                     "catalog_number",
                     "course_title",
                     "content_hash",
+                    "extra_columns",
                 ],
             )
             .map_err(|e| format!("open appender: {e}"))?;
@@ -343,6 +361,7 @@ impl ImportTask {
                     row.catalog.as_str(),
                     row.title.as_str(),
                     row.content_hash.as_str(),
+                    row.extra_columns.as_deref(),
                 ])
                 .map_err(|e| format!("appender append_row: {e}"))?;
         }
@@ -421,6 +440,38 @@ struct BatchRow {
     catalog: String,
     title: String,
     content_hash: String,
+    /// JSON object of the row's unmapped cells keyed by column index
+    /// (`{"3": "…"}`), `None` when the file has no unmapped columns. See
+    /// [`extra_columns_json`].
+    extra_columns: Option<String>,
+}
+
+/// Serialize the unmapped cells of one record as a JSON object keyed by
+/// column index (as a string — JSON object keys are strings). Mapped cells
+/// (subject/catalog/title) are excluded: they live in the structured
+/// `courses` columns and export reconstructs them from there. Cells pass the
+/// same [`truncate`] bound as mapped fields; untrusted content is neutralized
+/// at export time (CSV-injection escaping), not here.
+fn extra_columns_json(
+    record: &csv::StringRecord,
+    mapping: ColumnMap,
+) -> Result<Option<String>, String> {
+    let mut map = serde_json::Map::new();
+    for (i, field) in record.iter().enumerate() {
+        if i == mapping.subject || i == mapping.catalog || i == mapping.title {
+            continue;
+        }
+        map.insert(
+            i.to_string(),
+            serde_json::Value::String(truncate(field.to_owned())),
+        );
+    }
+    if map.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(&serde_json::Value::Object(map))
+        .map(Some)
+        .map_err(|e| format!("serialize extra columns: {e}"))
 }
 
 fn read_headers(path: &Path) -> Result<Vec<String>, String> {
@@ -462,4 +513,86 @@ fn truncate(mut s: String) -> String {
         s.truncate(cut);
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ColumnMap, extra_columns_json};
+
+    /// Unmapped cells are keyed by column index; mapped cells are excluded;
+    /// a file with only mapped columns produces `None` (NULL in the DB).
+    #[test]
+    fn extra_columns_keyed_by_index_excluding_mapped() -> Result<(), String> {
+        let mapping = ColumnMap {
+            subject: 0,
+            catalog: 2,
+            title: 3,
+        };
+        let record = csv::StringRecord::from(vec!["ECON", "Fall 2024", "101", "Micro", ""]);
+        let json = extra_columns_json(&record, mapping)?
+            .ok_or_else(|| "expected extra columns".to_owned())?;
+        let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        assert_eq!(
+            value,
+            serde_json::json!({ "1": "Fall 2024", "4": "" }),
+            "got {value}"
+        );
+
+        let all_mapped = csv::StringRecord::from(vec!["ECON", "x", "101", "Micro"]);
+        let mapping_all = ColumnMap {
+            subject: 0,
+            catalog: 2,
+            title: 3,
+        };
+        // Column 1 is unmapped, so this still yields a map…
+        assert!(extra_columns_json(&all_mapped, mapping_all)?.is_some());
+        // …but a three-column file that maps everything yields None.
+        let three = csv::StringRecord::from(vec!["ECON", "101", "Micro"]);
+        let mapping_three = ColumnMap {
+            subject: 0,
+            catalog: 1,
+            title: 2,
+        };
+        assert!(extra_columns_json(&three, mapping_three)?.is_none());
+        Ok(())
+    }
+
+    /// The Appender path used by `flush` accepts JSON strings (and NULL) into
+    /// a JSON column, and the values read back via `json_extract_string` —
+    /// the same access pattern export uses.
+    #[test]
+    fn appender_writes_json_column() -> Result<(), String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        conn.execute_batch("CREATE TABLE t (row_index BIGINT, extra_columns JSON)")
+            .map_err(|e| e.to_string())?;
+        {
+            let mut appender = conn
+                .appender_with_columns("t", &["row_index", "extra_columns"])
+                .map_err(|e| e.to_string())?;
+            appender
+                .append_row(duckdb::params![0_i64, Some(r#"{"1": "Fall 2024"}"#)])
+                .map_err(|e| e.to_string())?;
+            appender
+                .append_row(duckdb::params![1_i64, None::<&str>])
+                .map_err(|e| e.to_string())?;
+            appender.flush().map_err(|e| e.to_string())?;
+        }
+        let val: Option<String> = conn
+            .query_row(
+                "SELECT json_extract_string(extra_columns, '$.\"1\"') FROM t WHERE row_index = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert_eq!(val.as_deref(), Some("Fall 2024"));
+        let null_row: Option<String> = conn
+            .query_row(
+                "SELECT extra_columns FROM t WHERE row_index = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert_eq!(null_row, None);
+        Ok(())
+    }
 }

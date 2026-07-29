@@ -81,7 +81,14 @@ fn main() -> anyhow::Result<()> {
                 max_logit_diff = logit_diff;
             }
             let argmax_ok = result.label_index == entry.argmax;
-            let top3_ok = result.top3 == entry.top3;
+            // The fixture predates top-5 extraction and records three ranks;
+            // compare against the first three of the Rust top-5.
+            let top3_ok = result
+                .top5
+                .iter()
+                .take(3)
+                .map(|c| c.index)
+                .eq(entry.top3.iter().copied());
             if argmax_ok {
                 argmax_matches += 1;
             } else {
