@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { resumeBlockerText, usePauseRun, useResumeRun, useRun } from "../../composables/useRuns";
+import {
+  resumeBlockerText,
+  usePauseRun,
+  useResumeRun,
+  useRun,
+  useRunRate,
+} from "../../composables/useRuns";
 import type { OpenTab } from "../../stores/workspace";
 
 const props = defineProps<{ tab: OpenTab }>();
@@ -19,6 +25,11 @@ const resumeRun = useResumeRun();
 function onResume() {
   resumeRun.mutate(runId.value);
 }
+
+const rate = useRunRate(run);
+const rateLabel = computed(() =>
+  rate.value === null ? null : `≈ ${Math.round(rate.value).toLocaleString()} rows/s`,
+);
 
 const progressPct = computed(() => {
   const r = run.value;
@@ -145,6 +156,11 @@ function fmtTime(iso: string | null | undefined): string {
 
         <dt class="text-(--ui-text-muted)">Rows processed</dt>
         <dd class="text-(--ui-text) tabular-nums">{{ run.rowsProcessed ?? "—" }}</dd>
+
+        <template v-if="rateLabel">
+          <dt class="text-(--ui-text-muted)">Throughput</dt>
+          <dd class="text-(--ui-text) tabular-nums">{{ rateLabel }}</dd>
+        </template>
 
         <dt class="text-(--ui-text-muted)">New classifications</dt>
         <dd class="text-(--ui-text) tabular-nums">{{ run.uniqueInputsDone ?? "—" }}</dd>

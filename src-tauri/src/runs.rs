@@ -1,7 +1,8 @@
 //! Async run pipeline. `start_run` inserts a runs row in `running` state,
-//! returns the run id immediately, and offloads the per-row inference loop to
-//! a blocking task that ticks `runs.rows_processed` after each row so the
-//! frontend can poll progress via `get_run` (see `useRun`).
+//! returns the run id immediately, and offloads the batched inference loop to
+//! a blocking task that ticks `runs.rows_processed` per flushed super-chunk
+//! (`FLUSH_SIZE`, EPI-89) so the frontend can poll progress via `get_run`
+//! (see `useRun`).
 //!
 //! Polling-based progress is intentional: `TanStack` Query already drives
 //! everything else, and the same data flow that powers the static run detail
@@ -92,6 +93,12 @@ impl RunRegistry {
 /// Public so `check_resume` can derive its kill threshold from the real
 /// flush cadence instead of drifting.
 pub const FLUSH_SIZE: usize = 1024;
+
+/// Compact the WAL this often during a run (EPI-92), at a flushed super-chunk
+/// boundary. 60 s of GPU-rate results is a few tens of MB of WAL — compaction
+/// costs tens of ms (<0.1% of throughput); without it the WAL grows until app
+/// exit and crash-recovery time scales with it.
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// One row in the Runs sidebar list. Joined with the dataset title so the UI
 /// doesn't need a second IPC call to render a meaningful label.
@@ -929,6 +936,7 @@ impl RunPipeline {
         // round-trips left the GPU idle most of the time (~1k rows/s in-app
         // vs ~2.9k standalone, measured 2026-07-28).
         let batch = crate::inference::batch_size(model.resolved_ep);
+        let mut last_checkpoint = std::time::Instant::now();
         for chunk in rows.chunks(FLUSH_SIZE) {
             // 1. Bulk cache check — catches hashes computed earlier in *this*
             //    leg (duplicate course content across super-chunks). The
@@ -1026,6 +1034,19 @@ impl RunPipeline {
             processed = processed_after;
             cache_hits = cache_hits_after;
             unique_done = unique_done_after;
+
+            // Periodic WAL compaction (EPI-92), best-effort: a plain
+            // CHECKPOINT errors harmlessly if a concurrent read transaction
+            // is open — the next boundary retries.
+            if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+                let result = db
+                    .rw()
+                    .and_then(|conn| conn.execute_batch("CHECKPOINT").map_err(|e| e.to_string()));
+                if let Err(e) = result {
+                    eprintln!("run {}: periodic checkpoint skipped: {e}", self.run_id);
+                }
+                last_checkpoint = std::time::Instant::now();
+            }
 
             if cancelled {
                 return Ok(RunOutcome {
