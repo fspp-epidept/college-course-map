@@ -959,6 +959,13 @@ impl RunPipeline {
                     }),
                 })
                 .collect();
+            let mut misses = misses;
+            // Length-bucket the super-chunk (EPI-82): sorted inputs make each
+            // ONNX sub-batch near-uniform in length, so BatchLongest padding
+            // does almost no wasted work (+14% CUDA, +16% CPU measured).
+            // Results pair by index (flush zips misses↔classifications) and
+            // cache keys are content hashes, so order is semantically free.
+            misses.sort_by_key(|m| m.input.len());
             let miss_refs: Vec<&str> = misses.iter().map(|m| m.input.as_str()).collect();
 
             // 3. ONNX session calls in per-EP sub-batches, honoring a pause

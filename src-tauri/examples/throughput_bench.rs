@@ -10,6 +10,8 @@
 //! - `--ep NAME`    force the EP priority head (`cpu`, `cuda`, `tensorrt`, …)
 //!   instead of the platform default
 //! - `--level D`    digit level 2/4/6 (default 2; model must be on disk)
+//! - `--bucket`     sort inputs by length before batching, so `BatchLongest`
+//!   padding within each sub-batch is near-zero (EPI-82 length-bucketing)
 //!
 //! Measures the model side only — CSV parse + dedupe are reported separately
 //! and the DB flush is deliberately excluded (EPI-82 ranked it second-order,
@@ -31,6 +33,7 @@ struct Args {
     batch: Option<usize>,
     ep: Option<EpKind>,
     level: u8,
+    bucket: bool,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
@@ -40,6 +43,7 @@ fn parse_args() -> anyhow::Result<Args> {
         batch: None,
         ep: None,
         level: 2,
+        bucket: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -52,6 +56,7 @@ fn parse_args() -> anyhow::Result<Args> {
             "--rows" => args.rows = Some(value()?.parse()?),
             "--batch" => args.batch = Some(value()?.parse()?),
             "--level" => args.level = value()?.parse()?,
+            "--bucket" => args.bucket = true,
             "--ep" => {
                 let name = value()?;
                 let ep = serde_json::from_value(serde_json::Value::String(name.clone()))
@@ -150,7 +155,13 @@ fn main() -> anyhow::Result<()> {
 
     // CSV parse + dedupe, timed separately from inference.
     let parse_started = Instant::now();
-    let (rows_read, unique) = read_inputs(&args)?;
+    let (rows_read, mut unique) = read_inputs(&args)?;
+    // Byte length is a good-enough proxy for token length on course strings;
+    // sorted input makes every sub-batch near-uniform so BatchLongest pads
+    // almost nothing.
+    if args.bucket {
+        unique.sort_by_key(String::len);
+    }
     println!(
         "csv                  : {rows_read} rows, {} unique inputs, parsed in {:.1?}",
         unique.len(),

@@ -33,17 +33,19 @@ const MAX_SEQ_LEN: usize = 512;
 /// `session.run` call. Besides the ONNX call, this is also the run worker's
 /// progress/flush/cancel granularity.
 ///
-/// Measured 2026-07-28 on the validation panel (RTX 4070 SUPER, ONNX Runtime
-/// 1.24.2 cuda13 pack, two-digit model, `task check:throughput`): CUDA peaks
-/// at 64 (~3.9k unique rows/s; 128 ≈ −2%, 256 ≈ −20%, 512 ≈ −36%) because
-/// `BatchLongest` padding waste grows with chunk size faster than
-/// launch-amortization pays; CPU is flat across 32–64 (~143 rows/s). The EP
-/// parameter is the tuning seam — DirectML/CoreML are unmeasured and inherit
-/// the measured optimum until benchmarked. Tune via `task check:throughput`
-/// (`--batch` override), not ad hoc.
+/// Measured 2026-07-28/29 on the validation panel (RTX 4070 SUPER, ONNX
+/// Runtime 1.24.2 cuda13 pack, two-digit model, `task check:throughput`).
+/// These constants assume the run worker's length-bucketing (EPI-82: inputs
+/// sorted by length within a super-chunk, so `BatchLongest` pads almost
+/// nothing): bucketed batch 128 is the optimum on *both* CUDA (4,514 unique
+/// rows/s; 64 ≈ −3%, 256 ≈ −18%) and CPU (166 rows/s; +16% over the old
+/// unbucketed 64). Unbucketed, larger batches lose badly to padding waste —
+/// don't raise this without re-measuring via `task check:throughput
+/// --bucket --batch N`. The EP parameter is the tuning seam; DirectML/CoreML
+/// are unmeasured and inherit the measured optimum.
 #[must_use]
 pub fn batch_size(_ep: EpKind) -> usize {
-    64
+    128
 }
 
 /// A model loaded into ONNX Runtime with its tokenizer + class label table.
