@@ -905,14 +905,20 @@ impl RunPipeline {
         let (total, rows) = self.select_missing_courses(db)?;
         let remaining = rows.len() as u64;
         let mut processed = total.saturating_sub(remaining);
-        let mut cache_hits = processed;
-        let mut unique_done = 0_u64;
+        // Counters accumulate across resume legs (EPI-90): the persisted
+        // `unique_inputs_done` is by definition the rows *this run* computed
+        // in earlier legs (every flush writes it), so it seeds the unique
+        // counter, and those rows are subtracted from the cache-hit seed —
+        // keeping the `done + hits = processed` identity cumulative instead
+        // of re-labeling earlier legs' work as cache hits.
+        let mut unique_done = self.prior_unique_done(db)?;
+        let mut cache_hits = processed.saturating_sub(unique_done);
 
         // Surface the starting position immediately — before the first batch
         // computes — so a resumed run's progress bar never reads zero.
         {
             let conn = db.rw()?;
-            self.flush_progress(&conn, processed, cache_hits)?;
+            self.flush_progress(&conn, processed, cache_hits, unique_done)?;
         }
 
         // Two granularities, deliberately decoupled (EPI-89): DB work (cache
@@ -979,7 +985,14 @@ impl RunPipeline {
             // construction, same as crash recovery.
             if cancelled && classifications.len() < misses.len() {
                 unique_done += classifications.len() as u64;
-                self.flush_batch(db, &misses, &classifications, processed, cache_hits)?;
+                self.flush_batch(
+                    db,
+                    &misses,
+                    &classifications,
+                    processed,
+                    cache_hits,
+                    unique_done,
+                )?;
                 return Ok(RunOutcome {
                     processed,
                     unique_done,
@@ -993,17 +1006,19 @@ impl RunPipeline {
             let chunk_hits = chunk.len() - misses.len();
             let processed_after = processed + chunk.len() as u64;
             let cache_hits_after = cache_hits + chunk_hits as u64;
+            let unique_done_after = unique_done + classifications.len() as u64;
             self.flush_batch(
                 db,
                 &misses,
                 &classifications,
                 processed_after,
                 cache_hits_after,
+                unique_done_after,
             )?;
 
             processed = processed_after;
             cache_hits = cache_hits_after;
-            unique_done += classifications.len() as u64;
+            unique_done = unique_done_after;
 
             if cancelled {
                 return Ok(RunOutcome {
@@ -1058,6 +1073,20 @@ impl RunPipeline {
         Ok((u64::try_from(total).unwrap_or(0), rows))
     }
 
+    /// The run row's persisted `unique_inputs_done` — the resume-safe count
+    /// of rows this run computed in earlier legs (EPI-90).
+    fn prior_unique_done(&self, db: &AppDb) -> Result<u64, String> {
+        let conn = db.ro()?;
+        let done: i64 = conn
+            .query_row(
+                "SELECT unique_inputs_done FROM runs WHERE id = ?",
+                params![&self.run_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("read unique_inputs_done: {e}"))?;
+        Ok(u64::try_from(done).unwrap_or(0))
+    }
+
     /// Returns a `Vec<bool>` aligned with `chunk`: true if the
     /// `(model_id, content_hash)` pair is already in `inference_results`.
     fn cache_hit_batch(&self, db: &AppDb, chunk: &[SelectedCourse]) -> Result<Vec<bool>, String> {
@@ -1105,6 +1134,7 @@ impl RunPipeline {
         classifications: &[crate::inference::Classification],
         processed_after: u64,
         cache_hits_after: u64,
+        unique_done_after: u64,
     ) -> Result<(), String> {
         let conn = db.rw()?;
 
@@ -1148,22 +1178,28 @@ impl RunPipeline {
                 .map_err(|e| format!("inference appender flush: {e}"))?;
         }
 
-        self.flush_progress(&conn, processed_after, cache_hits_after)
+        self.flush_progress(&conn, processed_after, cache_hits_after, unique_done_after)
     }
 
-    /// Single progress UPDATE on an already-held connection.
+    /// Single progress UPDATE on an already-held connection. Writes
+    /// `unique_inputs_done` too (EPI-90) so "New classifications" ticks live
+    /// and each flush persists the cumulative resume-safe count in the same
+    /// transaction as the cache inserts.
     fn flush_progress(
         &self,
         conn: &duckdb::Connection,
         processed: u64,
         cache_hits: u64,
+        unique_done: u64,
     ) -> Result<(), String> {
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "UPDATE runs SET rows_processed=?, cache_hits=?, last_progress_at=? WHERE id=?",
+            "UPDATE runs SET rows_processed=?, cache_hits=?, unique_inputs_done=?,
+                last_progress_at=? WHERE id=?",
             params![
                 i64::try_from(processed).unwrap_or(i64::MAX),
                 i64::try_from(cache_hits).unwrap_or(i64::MAX),
+                i64::try_from(unique_done).unwrap_or(i64::MAX),
                 &now,
                 &self.run_id,
             ],
