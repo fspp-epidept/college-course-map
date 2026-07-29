@@ -93,17 +93,60 @@ pub struct RuntimeManifest {
     pub pack: Vec<RuntimePack>,
 }
 
+/// How a pack's archives unpack into its directory.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PackLayout {
+    /// Official onnxruntime archive: strip the single top-level directory so
+    /// contents land at `<pack>/lib/...`.
+    Onnxruntime,
+    /// Support-library wheels (EPI-84): extract only dynamic libraries,
+    /// flattened into `<pack>/lib/` regardless of nesting.
+    FlatDylibs,
+}
+
 #[derive(Deserialize, Debug, Clone)]
-pub struct RuntimePack {
-    pub id: String,
-    /// Rust target triple this pack's archive is built for.
-    pub target: String,
-    /// EPs compiled into the pack, most capable first. Display metadata —
-    /// `is_available()` against the loaded dylib is the runtime truth.
-    pub eps: Vec<String>,
+pub struct PackArchive {
     pub url: String,
     pub sha256: String,
     pub size: u64,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct RuntimePack {
+    pub id: String,
+    pub display_name: String,
+    /// Rust target triple this pack's archives are built for.
+    pub target: String,
+    /// EPs compiled into a runtime pack, most capable first (display
+    /// metadata — `is_available()` against the loaded dylib is the runtime
+    /// truth). Empty for libs packs, which carry no ONNX Runtime.
+    pub eps: Vec<String>,
+    pub layout: PackLayout,
+    /// Companion libs pack (by id) that satisfies this runtime pack's EP
+    /// system dependencies when no system-wide install exists (EPI-84).
+    #[serde(default)]
+    pub libs: Option<String>,
+    pub archives: Vec<PackArchive>,
+}
+
+impl RuntimePack {
+    #[must_use]
+    pub fn total_size(&self) -> u64 {
+        self.archives.iter().map(|a| a.size).sum()
+    }
+
+    /// Marker content identifying this exact pack build: every archive hash,
+    /// newline-joined in manifest order. Any re-pin changes it, invalidating
+    /// installed copies.
+    #[must_use]
+    pub fn marker_value(&self) -> String {
+        self.archives
+            .iter()
+            .map(|a| a.sha256.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Parse the manifest embedded at compile time. Errors only on a malformed
@@ -180,19 +223,23 @@ pub fn dylib_file(pack_dir: &Path) -> PathBuf {
     pack_dir.join("lib").join(name)
 }
 
-/// An installed pack = dylib present + `.sha256` marker matching the
-/// manifest archive hash. The marker is written only after a completed,
-/// verified extract, and naturally invalidates a pack when the pinned
-/// version changes.
+/// An installed pack = expected payload present + `.sha256` marker matching
+/// every pinned archive hash. The marker is written only after a completed,
+/// verified extract, and naturally invalidates a pack when the pin changes.
 #[must_use]
 pub fn installed(dir: &Path, pack: &RuntimePack) -> bool {
-    dylib_file(dir).exists()
-        && std::fs::read_to_string(dir.join(MARKER)).is_ok_and(|m| m.trim() == pack.sha256)
+    let payload_present = match pack.layout {
+        PackLayout::Onnxruntime => dylib_file(dir).exists(),
+        PackLayout::FlatDylibs => dir.join("lib").is_dir(),
+    };
+    payload_present
+        && std::fs::read_to_string(dir.join(MARKER)).is_ok_and(|m| m.trim() == pack.marker_value())
 }
 
-/// Download a pack archive, verify its sha256 as it streams, extract it, and
-/// rename the result into `dest`. `progress(received_bytes, bytes_per_sec)`
-/// is invoked at most every 100 ms. Blocking — callers run it inside
+/// Download every archive of a pack, verifying each sha256 as it streams,
+/// extract per the pack's layout, and rename the result into `dest`.
+/// `progress(received_bytes, bytes_per_sec)` is cumulative across archives
+/// and invoked at most every 100 ms. Blocking — callers run it inside
 /// `spawn_blocking` (the command) or a plain main (the dev fetch example).
 pub fn install_pack(
     client: &reqwest::blocking::Client,
@@ -205,18 +252,27 @@ pub fn install_pack(
         .ok_or_else(|| format!("pack dir {} has no parent", dest.display()))?;
     std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
 
-    let archive = parent.join(format!("{}.archive.part", pack.id));
-    download_verified(client, pack, &archive, progress)?;
-
     let staging = parent.join(format!("{}.part", pack.id));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)
             .map_err(|e| format!("clear stale staging dir {}: {e}", staging.display()))?;
     }
-    extract_archive(&archive, &staging)?;
-    let _ = std::fs::remove_file(&archive);
 
-    std::fs::write(staging.join(MARKER), &pack.sha256)
+    let mut done_bytes: u64 = 0;
+    for (index, archive) in pack.archives.iter().enumerate() {
+        let archive_file = parent.join(format!("{}.archive{index}.part", pack.id));
+        download_verified(client, archive, &archive_file, &mut |received, bps| {
+            progress(done_bytes + received, bps);
+        })?;
+        let is_zip = Path::new(&archive.url)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("whl"));
+        extract_archive(&archive_file, &staging, pack.layout, is_zip)?;
+        let _ = std::fs::remove_file(&archive_file);
+        done_bytes += archive.size;
+    }
+
+    std::fs::write(staging.join(MARKER), pack.marker_value())
         .map_err(|e| format!("write pack marker: {e}"))?;
     if dest.exists() {
         std::fs::remove_dir_all(dest)
@@ -226,11 +282,53 @@ pub fn install_pack(
     Ok(())
 }
 
-/// Stream the archive to `dest`, hashing as it goes; delete and error on any
+/// Remove a damaged downloaded pack so `installed()` turns false and the
+/// Settings UI offers the download again (EPI-86). Best-effort: on failure
+/// the next launch retries the same invalidation.
+pub fn invalidate_pack(dir: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        eprintln!("failed to remove damaged pack {}: {e}", dir.display());
+    }
+}
+
+/// Delete leftover `*.part` staging entries (archive files and extract dirs)
+/// under the runtimes root (EPI-88). `install_pack` only cleans up when the
+/// same pack's download is retried, so a mid-download kill would otherwise
+/// leak partial archives forever. Runs at startup, before any download can
+/// be in flight. Best-effort; returns how many entries were removed.
+#[must_use]
+pub fn sweep_partial_downloads(root: &Path) -> usize {
+    let Ok(versions) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut swept = 0usize;
+    for version_dir in versions.flatten().filter(|e| e.path().is_dir()) {
+        let Ok(entries) = std::fs::read_dir(version_dir.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "part") {
+                continue;
+            }
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path).is_ok()
+            } else {
+                std::fs::remove_file(&path).is_ok()
+            };
+            if removed {
+                swept += 1;
+            }
+        }
+    }
+    swept
+}
+
+/// Stream one archive to `dest`, hashing as it goes; delete and error on any
 /// mismatch so a torn or tampered download can never be extracted.
 fn download_verified(
     client: &reqwest::blocking::Client,
-    pack: &RuntimePack,
+    archive: &PackArchive,
     dest: &Path,
     progress: &mut dyn FnMut(u64, f64),
 ) -> Result<(), String> {
@@ -239,10 +337,10 @@ fn download_verified(
     const EMIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
     let mut response = client
-        .get(&pack.url)
+        .get(&archive.url)
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|e| format!("GET {}: {e}", pack.url))?;
+        .map_err(|e| format!("GET {}: {e}", archive.url))?;
 
     let mut out = std::io::BufWriter::new(
         std::fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?,
@@ -256,7 +354,7 @@ fn download_verified(
     loop {
         let n = response
             .read(&mut buf)
-            .map_err(|e| format!("read {}: {e}", pack.url))?;
+            .map_err(|e| format!("read {}: {e}", archive.url))?;
         if n == 0 {
             break;
         }
@@ -288,34 +386,59 @@ fn download_verified(
     progress(received, avg);
 
     let digest = format!("{:x}", hasher.finalize());
-    if received != pack.size || digest != pack.sha256 {
+    if received != archive.size || digest != archive.sha256 {
         let _ = std::fs::remove_file(dest);
         return Err(format!(
-            "pack {} failed verification (got {received} bytes, sha256 {digest}; \
+            "{} failed verification (got {received} bytes, sha256 {digest}; \
              manifest says {} bytes, {}) — archive deleted, retry the download",
-            pack.id, pack.size, pack.sha256
+            archive.url, archive.size, archive.sha256
         ));
     }
     Ok(())
 }
 
-/// Extract the archive into `dest`, stripping the archive's single top-level
-/// directory (`onnxruntime-<platform>-<version>/`) so pack contents land at
-/// `dest/lib/...` uniformly.
-fn extract_archive(archive: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
-    #[cfg(target_os = "windows")]
-    {
-        extract_zip(archive, dest)
+fn is_dylib_name(name: &std::ffi::OsStr) -> bool {
+    let lossy = name.to_string_lossy();
+    lossy.contains(".so") || lossy.ends_with(".dll") || lossy.ends_with(".dylib")
+}
+
+/// Where an archive entry lands under the pack dir, per layout. `None` =
+/// skip the entry.
+fn entry_target(path: &Path, layout: PackLayout) -> Option<PathBuf> {
+    match layout {
+        // Strip the archive's single top-level directory
+        // (`onnxruntime-<platform>-<version>/`) so contents land at `lib/...`.
+        PackLayout::Onnxruntime => {
+            let stripped: PathBuf = path.components().skip(1).collect();
+            (!stripped.as_os_str().is_empty()).then_some(stripped)
+        }
+        // Wheels nest libs per component (`nvidia/<comp>/lib/...`); keep only
+        // dynamic libraries, flattened into `lib/`.
+        PackLayout::FlatDylibs => {
+            let name = path.file_name()?;
+            is_dylib_name(name).then(|| Path::new("lib").join(name))
+        }
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        extract_tgz(archive, dest)
+}
+
+/// Extract an archive into `dest` per the pack layout. Wheels and Windows
+/// onnxruntime releases are zips; Linux/macOS onnxruntime releases are tgz.
+fn extract_archive(
+    archive: &Path,
+    dest: &Path,
+    layout: PackLayout,
+    is_zip: bool,
+) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    if is_zip {
+        extract_zip(archive, dest, layout)
+    } else {
+        extract_tgz(archive, dest, layout)
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn extract_tgz(archive: &Path, dest: &Path) -> Result<(), String> {
+fn extract_tgz(archive: &Path, dest: &Path, layout: PackLayout) -> Result<(), String> {
     let file =
         std::fs::File::open(archive).map_err(|e| format!("open {}: {e}", archive.display()))?;
     let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)));
@@ -328,11 +451,10 @@ fn extract_tgz(archive: &Path, dest: &Path) -> Result<(), String> {
             .path()
             .map_err(|e| format!("archive entry path: {e}"))?
             .into_owned();
-        let stripped: PathBuf = path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
+        let Some(relative) = entry_target(&path, layout) else {
             continue;
-        }
-        let target = dest.join(stripped);
+        };
+        let target = dest.join(relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -346,8 +468,17 @@ fn extract_tgz(archive: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The Windows onnxruntime release is a zip and never a tgz; compiling the
+/// tar/flate2 path out keeps the dependency tree honest.
 #[cfg(target_os = "windows")]
-fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
+fn extract_tgz(archive: &Path, _dest: &Path, _layout: PackLayout) -> Result<(), String> {
+    Err(format!(
+        "tgz archive {} unsupported on Windows — the manifest should pin zips here",
+        archive.display()
+    ))
+}
+
+fn extract_zip(archive: &Path, dest: &Path, layout: PackLayout) -> Result<(), String> {
     let file =
         std::fs::File::open(archive).map_err(|e| format!("open {}: {e}", archive.display()))?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))
@@ -356,21 +487,18 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| format!("read archive entry {i}: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
         // enclosed_name() is the zip-slip guard: entries that would escape
         // the destination resolve to None and are skipped.
         let Some(path) = entry.enclosed_name() else {
             continue;
         };
-        let stripped: PathBuf = path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
+        let Some(relative) = entry_target(&path, layout) else {
             continue;
-        }
-        let target = dest.join(stripped);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&target)
-                .map_err(|e| format!("create {}: {e}", target.display()))?;
-            continue;
-        }
+        };
+        let target = dest.join(relative);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -379,6 +507,51 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
             .map_err(|e| format!("create {}: {e}", target.display()))?;
         std::io::copy(&mut entry, &mut out)
             .map_err(|e| format!("extract {}: {e}", target.display()))?;
+    }
+    Ok(())
+}
+
+/// Preload every dynamic library under `dir` (recursively) into the process
+/// so a subsequently-registered EP's `NEEDED` deps resolve without a system
+/// install or `LD_LIBRARY_PATH` (EPI-84). Load order is discovered by
+/// fixpoint: each pass retries what failed (deps not loaded yet); a pass
+/// with no progress stops. Returns how many libraries loaded. Must run
+/// before EP registration (i.e. before models load); handles stay loaded
+/// for the process lifetime by design.
+pub fn preload_support_libs(dir: &Path) -> Result<usize, String> {
+    let mut pending = Vec::new();
+    collect_dylibs(dir, 0, &mut pending)?;
+    let mut loaded = 0usize;
+    loop {
+        let before = pending.len();
+        pending.retain(|path| ort::util::preload_dylib(path.as_os_str()).is_err());
+        loaded += before - pending.len();
+        if pending.is_empty() || pending.len() == before {
+            break;
+        }
+    }
+    for path in &pending {
+        eprintln!("support lib not preloaded: {}", path.display());
+    }
+    Ok(loaded)
+}
+
+/// Recursively gather dynamic-library files. Depth-capped: pack layouts are
+/// `lib/*.so`, and user-pointed CUDA dirs (venv `site-packages/nvidia`) nest
+/// at most `component/lib/…`.
+fn collect_dylibs(dir: &Path, depth: u8, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    if depth > 3 {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("read dir {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read dir entry in {}: {e}", dir.display()))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dylibs(&path, depth + 1, out)?;
+        } else if path.file_name().is_some_and(is_dylib_name) {
+            out.push(path);
+        }
     }
     Ok(())
 }
@@ -392,21 +565,48 @@ pub struct RuntimeState {
     pub pack_id: String,
     pub ort_version: String,
     pub eps: Vec<String>,
+    /// Startup conditions the user must be able to see without a terminal
+    /// (EPI-87): damaged-pack fallback, missing CUDA library directory,
+    /// failed preloads. Fixed for the process lifetime; surfaced by
+    /// `runtime_status`.
+    pub notices: Vec<String>,
 }
 
-/// Choose the pack this process will load, from the user's EP priority list:
-/// the first EP with an *installed* pack claiming it wins (manifest order
-/// breaks ties — e.g. `cuda` before `cuda13`; only the one matching the
-/// machine's CUDA sonames will register, so users install the right one).
-/// `Cpu` in the list — or nothing installed — resolves to the bundled CPU
-/// pack under `resource_dir`, which ships with every build and is the
-/// terminal fallback by construction.
+/// Choose the pack this process will load. An explicitly preferred pack
+/// (EPI-94, Settings → Compute "Make active") wins when installed — an
+/// explicit choice can never be shadowed by manifest order. Otherwise the
+/// user's EP priority list is scanned: the first EP with an *installed* pack
+/// claiming it wins (manifest order breaks ties). `Cpu` — preferred, in the
+/// list, or nothing installed — resolves to the bundled CPU pack under
+/// `resource_dir`, which ships with every build and is the terminal fallback
+/// by construction.
 pub fn resolve_startup_pack(
     manifest: &RuntimeManifest,
+    preferred_pack: Option<&str>,
     eps: &[EpKind],
     resource_dir: &Path,
 ) -> Result<(RuntimeState, PathBuf), String> {
     let packs = packs_for_target(manifest);
+    let state_for = |pack: &RuntimePack| RuntimeState {
+        pack_id: pack.id.clone(),
+        ort_version: manifest.ort_version.clone(),
+        eps: pack.eps.clone(),
+        notices: Vec::new(),
+    };
+    match preferred_pack {
+        Some("cpu") => return Ok(bundled_cpu(manifest, &packs, resource_dir)),
+        Some(id) => {
+            // Runtime packs only (`eps` non-empty) — a libs pack carries no
+            // ONNX Runtime. Not-installed falls through to the scan.
+            if let Some(pack) = packs.iter().find(|p| p.id == id && !p.eps.is_empty()) {
+                let dir = pack_dir(manifest, pack)?;
+                if installed(&dir, pack) {
+                    return Ok((state_for(pack), dir));
+                }
+            }
+        }
+        None => {}
+    }
     for ep in eps {
         if *ep == EpKind::Cpu {
             break;
@@ -417,29 +617,48 @@ pub fn resolve_startup_pack(
         {
             let dir = pack_dir(manifest, pack)?;
             if installed(&dir, pack) {
-                return Ok((
-                    RuntimeState {
-                        pack_id: pack.id.clone(),
-                        ort_version: manifest.ort_version.clone(),
-                        eps: pack.eps.clone(),
-                    },
-                    dir,
-                ));
+                return Ok((state_for(pack), dir));
             }
         }
     }
+    Ok(bundled_cpu(manifest, &packs, resource_dir))
+}
+
+/// The bundled CPU pack — always present, the terminal fallback.
+fn bundled_cpu(
+    manifest: &RuntimeManifest,
+    packs: &[&RuntimePack],
+    resource_dir: &Path,
+) -> (RuntimeState, PathBuf) {
     let cpu_eps = packs
         .iter()
         .find(|p| p.id == "cpu")
         .map_or_else(|| vec!["cpu".to_owned()], |p| p.eps.clone());
-    Ok((
+    (
         RuntimeState {
             pack_id: "cpu".to_owned(),
             ort_version: manifest.ort_version.clone(),
             eps: cpu_eps,
+            notices: Vec::new(),
         },
         resource_dir.join(RUNTIMES_SUBDIR).join("cpu"),
-    ))
+    )
+}
+
+/// The installed companion libs-pack directory for the pack this process
+/// loaded, if the manifest names one and it's downloaded. `None` for CPU
+/// packs, libs-less GPU packs, or a not-yet-downloaded companion.
+#[must_use]
+pub fn installed_libs_dir(manifest: &RuntimeManifest, state: &RuntimeState) -> Option<PathBuf> {
+    let packs = packs_for_target(manifest);
+    let libs_id = packs
+        .iter()
+        .find(|p| p.id == state.pack_id)?
+        .libs
+        .as_deref()?;
+    let libs_pack = packs.iter().find(|p| p.id == libs_id)?;
+    let dir = pack_dir(manifest, libs_pack).ok()?;
+    installed(&dir, libs_pack).then_some(dir)
 }
 
 /// Dev/check-harness location of the fetched CPU pack (`task runtimes:fetch`):
@@ -468,6 +687,99 @@ pub fn init_ort(pack_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Full runtime startup: sweep partial downloads (EPI-88), resolve and load
+/// the pack — falling back to the bundled CPU pack when a downloaded pack is
+/// damaged (EPI-86) — and preload GPU support libraries (EPI-84). Degraded
+/// outcomes are recorded as notices for the Settings UI (EPI-87).
+pub(crate) fn startup(
+    settings: &crate::config::Settings,
+    resource_dir: &Path,
+) -> Result<RuntimeState, String> {
+    let manifest = load_manifest()?;
+    // No download can be in flight this early — clear partial archives left
+    // by a mid-download kill.
+    let swept = runtimes_root().map_or(0, |root| sweep_partial_downloads(&root));
+    if swept > 0 {
+        eprintln!("startup: swept {swept} partial pack download(s)");
+    }
+    let (mut state, pack_dir) = resolve_startup_pack(
+        &manifest,
+        settings.preferred_pack.as_deref(),
+        &settings.execution_providers,
+        resource_dir,
+    )?;
+    // A downloaded pack that fails to load is damaged (the install protocol
+    // is atomic, so this is post-install damage: disk corruption, quarantine,
+    // manual deletion). Remove it and fall through to the bundled CPU pack
+    // instead of failing startup with no UI to recover from. A failed
+    // `init_from` does not commit the environment, so the second init is
+    // valid; bundled-pack failure stays fatal — the install itself is broken.
+    if let Err(e) = init_ort(&pack_dir) {
+        if state.pack_id == "cpu" {
+            return Err(e);
+        }
+        eprintln!(
+            "startup: runtime pack '{}' failed to load: {e}",
+            state.pack_id
+        );
+        invalidate_pack(&pack_dir);
+        let failed = state.pack_id.clone();
+        let (cpu_state, cpu_dir) =
+            resolve_startup_pack(&manifest, Some("cpu"), &[EpKind::Cpu], resource_dir)?;
+        init_ort(&cpu_dir)?;
+        state = cpu_state;
+        state.notices.push(format!(
+            "The '{failed}' runtime pack was damaged and has been removed — running \
+             on CPU. Re-download the pack to restore GPU support."
+        ));
+    }
+    // GPU support libraries: preload CUDA/cuDNN dylibs so EP registration at
+    // model-load time resolves them without a system install. Precedence: the
+    // user-pointed directory (conda/venv CUDA), else the pack's downloaded
+    // companion libs pack. Failure to preload is not fatal — registration
+    // falls back exactly as when no libs exist — but every degraded case
+    // leaves a notice.
+    let user_dir = match settings.cuda_library_dir.as_deref() {
+        Some(dir) if Path::new(dir).is_dir() => Some(Path::new(dir)),
+        Some(dir) => {
+            state.notices.push(format!(
+                "The CUDA library directory '{dir}' no longer exists and was skipped. \
+                 Update or clear it under Settings \u{2192} Inference."
+            ));
+            None
+        }
+        None => None,
+    };
+    let libs_dir = installed_libs_dir(&manifest, &state);
+    if let Some(dir) = user_dir.or(libs_dir.as_deref()) {
+        match preload_support_libs(dir) {
+            Ok(count) => eprintln!(
+                "startup: preloaded {count} GPU support libs from {}",
+                dir.display()
+            ),
+            Err(e) => {
+                eprintln!("startup: GPU support lib preload skipped: {e}");
+                state.notices.push(format!(
+                    "GPU support libraries could not be loaded from {}: {e}",
+                    dir.display()
+                ));
+            }
+        }
+    } else if packs_for_target(&manifest)
+        .iter()
+        .find(|p| p.id == state.pack_id)
+        .is_some_and(|p| p.libs.is_some())
+    {
+        state.notices.push(
+            "CUDA support libraries are not installed, so the CUDA provider cannot \
+             start. Download the support pack below or point at an existing CUDA \
+             library directory."
+                .to_owned(),
+        );
+    }
+    Ok(state)
+}
+
 // ---- IPC surface (registered in lib.rs::specta_builder) ----
 
 /// Per-pack download progress, mirroring `models::ModelDownloadProgress`.
@@ -490,12 +802,17 @@ pub(crate) struct RuntimeStateChanged {}
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RuntimePackStatus {
     pub id: String,
-    /// EPs the pack claims to carry (manifest metadata).
+    pub display_name: String,
+    /// EPs the pack claims to carry (manifest metadata; empty = libs pack).
     pub eps: Vec<String>,
     pub size_bytes: f64,
     pub installed: bool,
-    /// Whether this is the pack the running process loaded.
+    /// Whether this is the pack the running process loaded (always false for
+    /// libs packs — they are preloaded next to a runtime pack, not loaded as
+    /// one).
     pub active: bool,
+    /// Companion libs pack id, when this runtime pack has one (EPI-84).
+    pub libs: Option<String>,
 }
 
 #[derive(Type, Serialize, Debug)]
@@ -510,6 +827,9 @@ pub(crate) struct RuntimeStatus {
     /// settings UI to render reorderable rows without hardcoding.
     pub platform_default_priority: Vec<EpKind>,
     pub packs: Vec<RuntimePackStatus>,
+    /// Startup runtime conditions worth a warning in Settings (EPI-87):
+    /// damaged-pack fallback, missing CUDA directory, failed preloads.
+    pub notices: Vec<String>,
 }
 
 #[tauri::command]
@@ -528,19 +848,19 @@ pub(crate) fn runtime_status(
         .map(|pack| {
             // The bundled CPU pack ships with every build: always installed.
             let installed = pack.id == "cpu"
-                || pack_dir(&manifest, pack)
-                    .map(|dir| installed(&dir, pack))
-                    .unwrap_or(false);
+                || pack_dir(&manifest, pack).is_ok_and(|dir| installed(&dir, pack));
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "pack sizes are far below f64's 2^53 exact-integer range"
             )]
             RuntimePackStatus {
                 id: pack.id.clone(),
+                display_name: pack.display_name.clone(),
                 eps: pack.eps.clone(),
-                size_bytes: pack.size as f64,
+                size_bytes: pack.total_size() as f64,
                 installed,
                 active: pack.id == state.pack_id,
+                libs: pack.libs.clone(),
             }
         })
         .collect();
@@ -552,6 +872,7 @@ pub(crate) fn runtime_status(
             .map(|registry| registry.execution_provider().as_str().to_owned()),
         platform_default_priority: default_priority(),
         packs,
+        notices: state.notices.clone(),
     })
 }
 
@@ -576,42 +897,116 @@ pub(crate) async fn download_runtime(app: tauri::AppHandle, pack_id: String) -> 
 
 #[cfg(not(feature = "airgap"))]
 fn download_runtime_blocking(app: &tauri::AppHandle, pack_id: &str) -> Result<(), String> {
-    use tauri_specta::Event as _;
-
     let manifest = load_manifest()?;
-    let pack = packs_for_target(&manifest)
-        .into_iter()
+    let packs = packs_for_target(&manifest);
+    let pack = packs
+        .iter()
         .find(|p| p.id == pack_id)
         .ok_or_else(|| format!("no pack '{pack_id}' for this platform"))?;
-    let dest = pack_dir(&manifest, pack)?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("college-course-map")
+        .timeout(None) // GPU/libs packs are 200 MB - 1.2 GB; no global deadline
+        .build()
+        .map_err(|e| format!("build http client: {e}"))?;
+    let result = install_pack_with_progress(app, &client, &manifest, pack).and_then(|()| {
+        // One Download action fetches everything the backend needs (EPI-94):
+        // a runtime pack's companion support-libs pack rides along, so users
+        // never learn they were two files.
+        match &pack.libs {
+            Some(libs_id) => {
+                let libs = packs
+                    .iter()
+                    .find(|p| &p.id == libs_id)
+                    .ok_or_else(|| format!("manifest names missing libs pack '{libs_id}'"))?;
+                install_pack_with_progress(app, &client, &manifest, libs)
+            }
+            None => Ok(()),
+        }
+    });
+    use tauri_specta::Event as _;
+    let _ = RuntimeStateChanged {}.emit(app);
+    result
+}
+
+/// Install one pack (skipping if already installed), streaming progress
+/// events keyed by its id.
+#[cfg(not(feature = "airgap"))]
+fn install_pack_with_progress(
+    app: &tauri::AppHandle,
+    client: &reqwest::blocking::Client,
+    manifest: &RuntimeManifest,
+    pack: &RuntimePack,
+) -> Result<(), String> {
+    use tauri_specta::Event as _;
+
+    let dest = pack_dir(manifest, pack)?;
     if installed(&dest, pack) {
         return Ok(());
     }
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("college-course-map")
-        .timeout(None) // GPU packs are ~200-280 MB; no global deadline
-        .build()
-        .map_err(|e| format!("build http client: {e}"))?;
+    let total = pack.total_size();
     #[expect(
         clippy::cast_precision_loss,
         reason = "pack sizes are far below f64's 2^53 exact-integer range"
     )]
-    let result = install_pack(&client, pack, &dest, &mut |received, bytes_per_sec| {
+    install_pack(client, pack, &dest, &mut |received, bytes_per_sec| {
         let _ = RuntimeDownloadProgress {
             pack_id: pack.id.clone(),
             received: received as f64,
-            total: pack.size as f64,
+            total: total as f64,
             bytes_per_sec,
         }
         .emit(app);
-    });
-    let _ = RuntimeStateChanged {}.emit(app);
-    result
+    })
+}
+
+/// Restart the app (EPI-94): the one way to switch runtime packs, since ONNX
+/// Runtime loads exactly once per process.
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn relaunch_app(app: tauri::AppHandle) {
+    app.restart();
 }
 
 #[cfg(test)]
 mod tests {
     use super::{EpKind, load_manifest};
+
+    /// The startup sweep must remove `.part` archives and staging dirs while
+    /// leaving installed pack directories untouched (EPI-88).
+    #[test]
+    fn sweep_removes_only_part_entries() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("ccm-sweep-test-{}", std::process::id()));
+        let version = root.join("1.24.2");
+        let staging = version.join("cuda13.part");
+        let archive = version.join("cuda13.archive0.part");
+        let installed = version.join("cpu");
+        for dir in [&staging, &installed] {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        for file in [
+            &staging.join("libx.so"),
+            &archive,
+            &installed.join(".sha256"),
+        ] {
+            std::fs::write(file, b"x").map_err(|e| e.to_string())?;
+        }
+
+        let swept = super::sweep_partial_downloads(&root);
+
+        assert_eq!(swept, 2, "one staging dir + one archive file");
+        assert!(!staging.exists());
+        assert!(!archive.exists());
+        assert!(
+            installed.join(".sha256").exists(),
+            "installed pack untouched"
+        );
+        std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
+        Ok(())
+    }
 
     /// The committed runtimes.toml must parse into the typed manifest: every
     /// release-matrix target has a cpu pack, hashes are well-formed, and all
@@ -634,17 +1029,44 @@ mod tests {
             );
         }
         for pack in &manifest.pack {
-            assert_eq!(pack.sha256.len(), 64, "{}: malformed sha256", pack.url);
-            assert!(pack.size > 0);
-            assert!(
-                pack.url.contains(&manifest.ort_version),
-                "{}: url not pinned to ort_version {}",
-                pack.url,
-                manifest.ort_version
-            );
+            assert!(!pack.archives.is_empty(), "{}: no archives", pack.id);
+            for archive in &pack.archives {
+                assert_eq!(
+                    archive.sha256.len(),
+                    64,
+                    "{}: malformed sha256",
+                    archive.url
+                );
+                assert!(archive.size > 0);
+            }
+            // Runtime packs (they carry EPs) must pin the lockstep ONNX
+            // Runtime version in their URLs; libs packs pin NVIDIA versions.
+            if !pack.eps.is_empty() {
+                assert_eq!(pack.layout, super::PackLayout::Onnxruntime, "{}", pack.id);
+                for archive in &pack.archives {
+                    assert!(
+                        archive.url.contains(&manifest.ort_version),
+                        "{}: url not pinned to ort_version {}",
+                        archive.url,
+                        manifest.ort_version
+                    );
+                }
+            }
             for ep in &pack.eps {
                 serde_json::from_value::<EpKind>(serde_json::Value::String(ep.clone()))
                     .map_err(|e| format!("{}: unknown ep {ep}: {e}", pack.id))?;
+            }
+            // A `libs` reference must point at a real libs pack for the same
+            // target.
+            if let Some(libs_id) = &pack.libs {
+                assert!(
+                    manifest.pack.iter().any(|p| &p.id == libs_id
+                        && p.target == pack.target
+                        && p.layout == super::PackLayout::FlatDylibs),
+                    "{}: libs pack '{libs_id}' missing for target {}",
+                    pack.id,
+                    pack.target
+                );
             }
         }
         Ok(())

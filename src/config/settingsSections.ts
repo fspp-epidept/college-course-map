@@ -27,13 +27,13 @@ export const settingsSections: SettingsSectionDef[] = [
   },
   {
     id: "inference",
-    label: "Inference",
+    label: "Compute",
     icon: "i-lucide-cpu",
     component: InferenceSettings,
   },
   {
     id: "theme",
-    label: "Theme",
+    label: "Appearance",
     icon: "i-lucide-palette",
     component: ThemeSettings,
   },

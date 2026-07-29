@@ -1,6 +1,46 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/vue-query";
-import { computed, type MaybeRefOrGetter, onMounted, onUnmounted, toValue, watch } from "vue";
+import {
+  type ComputedRef,
+  computed,
+  type MaybeRefOrGetter,
+  onMounted,
+  onUnmounted,
+  ref,
+  toValue,
+  watch,
+} from "vue";
 import { commands, events, type RunDetail, type RunSummary } from "../bindings";
+
+/**
+ * Live rows/s for a running run, derived purely from the polling the run
+ * surfaces already do (EPI-93) — zero extra IPC. Keeps a short ring of
+ * `(time, rowsProcessed)` samples, skipping polls where the counter hasn't
+ * moved (progress lands per super-chunk), and reports the rate across the
+ * ring. `null` until two flush boundaries have been observed, and whenever
+ * the run isn't `running`.
+ */
+export function useRunRate(
+  run: MaybeRefOrGetter<RunDetail | null | undefined>,
+): ComputedRef<number | null> {
+  const samples = ref<Array<{ t: number; rows: number }>>([]);
+  watch(
+    () => [toValue(run)?.state, toValue(run)?.rowsProcessed] as const,
+    ([state, rows]) => {
+      if (state !== "running" || rows === null || rows === undefined) {
+        samples.value = [];
+        return;
+      }
+      if (samples.value[samples.value.length - 1]?.rows === rows) return;
+      samples.value = [...samples.value.slice(-7), { t: Date.now(), rows }];
+    },
+  );
+  return computed(() => {
+    const first = samples.value[0];
+    const last = samples.value[samples.value.length - 1];
+    if (!first || !last || last.t <= first.t || last.rows <= first.rows) return null;
+    return ((last.rows - first.rows) * 1000) / (last.t - first.t);
+  });
+}
 
 /**
  * Full runs list, server-sorted with active states first. The sidebar groups

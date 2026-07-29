@@ -176,12 +176,21 @@ tasks:
   runtimes:fetch:
     desc: "EPI-73: download + verify + extract ONNX Runtime packs into src-tauri/runtimes/ (default cpu; GPU pack: `task runtimes:fetch -- cuda`)"
     cmds:
+      # tauri-build refuses to compile while the bundle.resources path
+      # `runtimes/cpu` is absent — pre-create it so the installer example
+      # (and any cargo invocation on a fresh clone) can build at all.
+      - mkdir -p src-tauri/runtimes/cpu
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example runtime_install -- {{.CLI_ARGS | default "cpu"}}
 
   check:runtime:
     desc: "EPI-73: report which runtime pack + execution provider this machine resolves to, and time one real classification on it"
     cmds:
       - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example runtime_check
+
+  check:throughput:
+    desc: "EPI-82: benchmark batched inference over a CSV (default data/validation.csv) on the resolved EP; e.g. `task check:throughput -- --ep cpu --rows 100000`"
+    cmds:
+      - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example throughput_bench -- {{.CLI_ARGS}}
 
   check:parity:
     desc: Run Rust ONNX inference against the Python parity fixture and assert argmax/top-3 match

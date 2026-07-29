@@ -31,17 +31,24 @@ use course_classifier_lib::{
     format::{CourseInput, format_input},
     inference::{self, LoadedModel},
     manifest,
-    runs::{RunPipeline, sweep_orphaned_runs},
+    runs::{RunModel, RunPipeline, sweep_orphaned_runs},
     runtime::{self, EpKind},
 };
 use duckdb::params;
 
-/// Synthetic dataset size. Big enough that the child is still mid-run at the
-/// kill threshold on any realistic CPU; small enough that the resume leg
-/// finishes in tens of seconds.
-const ROWS: i64 = 200;
-/// Kill the child once `rows_processed` reaches this (two flushed batches).
-const KILL_AFTER_ROWS: i64 = 64;
+/// Kill the child once `rows_processed` reaches this — the first flushed
+/// super-chunk (EPI-89), so SIGKILL lands mid-second-super-chunk. Derived
+/// from the real flush cadence instead of drifting.
+#[expect(
+    clippy::cast_possible_wrap,
+    reason = "FLUSH_SIZE is a small constant, far below i64::MAX"
+)]
+const KILL_AFTER_ROWS: i64 = course_classifier_lib::runs::FLUSH_SIZE as i64;
+/// Synthetic dataset size. Must exceed the flush cadence by enough that the
+/// child is still mid-run after its first flush on any realistic CPU (EPI-89:
+/// progress is only visible per super-chunk, so the kill can't land before
+/// one lands); small enough that the resume leg finishes in tens of seconds.
+const ROWS: i64 = 3 * KILL_AFTER_ROWS;
 const DIGIT_LEVEL: u8 = 2;
 const DATASET_ID: &str = "check-resume-dataset";
 
@@ -71,8 +78,10 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     let pipeline = RunPipeline {
         dataset_id: DATASET_ID.to_owned(),
         run_id: run_id.clone(),
-        model_id,
-        digit_level: DIGIT_LEVEL,
+        models: vec![RunModel {
+            model_id,
+            digit_level: DIGIT_LEVEL,
+        }],
         computed_at: Utc::now().to_rfc3339(),
         cancel: Arc::new(AtomicBool::new(false)),
     };
@@ -81,7 +90,7 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     let done = AtomicBool::new(false);
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let worker = scope.spawn(|| {
-            let outcome = pipeline.execute(&db, &model);
+            let outcome = pipeline.execute(&db, &[&model]);
             pipeline.finalize(&db, outcome);
         });
         // Progress reporter: reads the run row through the RO clone while the
@@ -276,12 +285,14 @@ fn parent_main() -> anyhow::Result<()> {
     let pipeline = RunPipeline {
         dataset_id: DATASET_ID.to_owned(),
         run_id: run_id.clone(),
-        model_id,
-        digit_level: DIGIT_LEVEL,
+        models: vec![RunModel {
+            model_id,
+            digit_level: DIGIT_LEVEL,
+        }],
         computed_at: Utc::now().to_rfc3339(),
         cancel: Arc::new(AtomicBool::new(false)),
     };
-    let outcome = pipeline.execute(&db, &model);
+    let outcome = pipeline.execute(&db, &[&model]);
     pipeline.finalize(&db, outcome);
 
     // --- Verify ---
@@ -379,5 +390,10 @@ fn load_active_model() -> anyhow::Result<LoadedModel> {
         .find(|m| m.digit_level == DIGIT_LEVEL)
         .context("manifest has no entry for the test digit level")?;
     let root = inference::models_root().map_err(anyhow::Error::msg)?;
-    inference::load_model(&root.join(&entry.app_subdir), DIGIT_LEVEL, &[EpKind::Cpu])
+    inference::load_model(
+        &root.join(&entry.app_subdir),
+        DIGIT_LEVEL,
+        &[EpKind::Cpu],
+        0,
+    )
 }

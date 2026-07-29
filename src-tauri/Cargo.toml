@@ -64,13 +64,13 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 sha2 = "0.10"
 
 # Runtime-pack extraction (runtime.rs): official ONNX Runtime release archives
-# are .tgz on Linux/macOS and .zip on Windows.
+# are .tgz on Linux/macOS and .zip on Windows; GPU support-library packs
+# (EPI-84) are PyPI wheels — zips — on every platform.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 flate2 = "1"
 tar = "0.4"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [lints.rust]
 unsafe_code = "deny"

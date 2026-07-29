@@ -45,6 +45,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             models::models_status,
             models::reload_models,
             runtime::download_runtime,
+            runtime::relaunch_app,
             runtime::runtime_status,
             runs::get_latest_run,
             runs::get_run,
@@ -115,17 +116,11 @@ pub fn run() {
             {
                 let settings =
                     config::read_settings().map_err(|e| format!("read settings: {e}"))?;
-                let runtime_manifest = runtime::load_manifest()?;
                 let resource_dir = app
                     .path()
                     .resource_dir()
                     .map_err(|e| format!("resolve bundle resource dir: {e}"))?;
-                let (state, pack_dir) = runtime::resolve_startup_pack(
-                    &runtime_manifest,
-                    &settings.execution_providers,
-                    &resource_dir,
-                )?;
-                runtime::init_ort(&pack_dir)?;
+                let state = runtime::startup(&settings, &resource_dir)?;
                 eprintln!(
                     "startup: ONNX Runtime {} loaded from pack '{}'",
                     state.ort_version, state.pack_id

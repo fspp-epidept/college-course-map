@@ -29,6 +29,25 @@ use tokenizers::{
 /// Matches `max_length=512` in `scripts/models/_lib/inference.py::predict_batch`.
 const MAX_SEQ_LEN: usize = 512;
 
+/// Per-EP inference batch size (EPI-82): how many inputs go through one
+/// `session.run` call. Besides the ONNX call, this is also the run worker's
+/// progress/flush/cancel granularity.
+///
+/// Measured 2026-07-28/29 on the validation panel (RTX 4070 SUPER, ONNX
+/// Runtime 1.24.2 cuda13 pack, two-digit model, `task check:throughput`).
+/// These constants assume the run worker's length-bucketing (EPI-82: inputs
+/// sorted by length within a super-chunk, so `BatchLongest` pads almost
+/// nothing): bucketed batch 128 is the optimum on *both* CUDA (4,514 unique
+/// rows/s; 64 ≈ −3%, 256 ≈ −18%) and CPU (166 rows/s; +16% over the old
+/// unbucketed 64). Unbucketed, larger batches lose badly to padding waste —
+/// don't raise this without re-measuring via `task check:throughput
+/// --bucket --batch N`. The EP parameter is the tuning seam; DirectML/CoreML
+/// are unmeasured and inherit the measured optimum.
+#[must_use]
+pub fn batch_size(_ep: EpKind) -> usize {
+    128
+}
+
 /// A model loaded into ONNX Runtime with its tokenizer + class label table.
 pub struct LoadedModel {
     pub digit_level: u8,
@@ -103,10 +122,13 @@ fn register_eps(
 /// Build a [`LoadedModel`] from a directory containing `model.onnx`,
 /// `tokenizer.json`, and `config.json`. `eps` is the user's execution-provider
 /// priority list (settings), applied to the session before commit.
+/// `max_cpu_threads` caps ORT's intra-op pool (EPI-83): 0, or any value
+/// outside `1..=cores`, means auto (ORT's default — all physical cores).
 pub fn load_model(
     model_dir: &Path,
     digit_level: u8,
     eps: &[EpKind],
+    max_cpu_threads: u32,
 ) -> anyhow::Result<LoadedModel> {
     // Parse config.json first: it carries id2label AND pad_token_id, which
     // the padding setup below needs. The pad token is family-specific
@@ -152,6 +174,15 @@ pub fn load_model(
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| anyhow::anyhow!("set opt level: {e}"))?;
+    // Clamp semantics (EPI-83): only a value in 1..=cores overrides ORT's
+    // default pool size; anything else (0 = auto, or out of range) leaves the
+    // default, which already means "all physical cores".
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    if (1..=cores).contains(&(max_cpu_threads as usize)) {
+        builder = builder
+            .with_intra_threads(max_cpu_threads as usize)
+            .map_err(|e| anyhow::anyhow!("set intra threads: {e}"))?;
+    }
     let resolved_ep = register_eps(&mut builder, eps).unwrap_or(EpKind::Cpu);
     let session = builder
         .commit_from_file(model_dir.join("model.onnx"))
@@ -434,8 +465,12 @@ pub fn models_root() -> Result<PathBuf, String> {
 /// Load all three digit-level models from `root`. Slow (each model is
 /// ~500 MB); call once at startup. The caller resolves `root` per build
 /// flavor (`resource_dir` for airgap, [`models_root`] otherwise) and passes
-/// the settings' execution-provider priority list.
-pub fn load_all_models(root: &Path, eps: &[EpKind]) -> anyhow::Result<InferenceRegistry> {
+/// the settings' execution-provider priority list + CPU thread cap.
+pub fn load_all_models(
+    root: &Path,
+    eps: &[EpKind],
+    max_cpu_threads: u32,
+) -> anyhow::Result<InferenceRegistry> {
     if !root.exists() {
         anyhow::bail!(
             "models directory missing: {} — run `task models:install` to copy \
@@ -445,9 +480,9 @@ pub fn load_all_models(root: &Path, eps: &[EpKind]) -> anyhow::Result<InferenceR
         );
     }
     Ok(InferenceRegistry {
-        two_digit: load_model(&root.join("two-digit"), 2, eps)?,
-        four_digit: load_model(&root.join("four-digit"), 4, eps)?,
-        six_digit: load_model(&root.join("six-digit"), 6, eps)?,
+        two_digit: load_model(&root.join("two-digit"), 2, eps, max_cpu_threads)?,
+        four_digit: load_model(&root.join("four-digit"), 4, eps, max_cpu_threads)?,
+        six_digit: load_model(&root.join("six-digit"), 6, eps, max_cpu_threads)?,
     })
 }
 

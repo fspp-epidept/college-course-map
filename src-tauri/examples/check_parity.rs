@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown model subdir: {other}"),
         };
         eprintln!("Loading {subdir} ({} inputs)…", items.len());
-        let model = inference::load_model(&root.join(&subdir), digit_level, &[EpKind::Cpu])?;
+        let model = inference::load_model(&root.join(&subdir), digit_level, &[EpKind::Cpu], 0)?;
 
         for entry in items {
             total += 1;
