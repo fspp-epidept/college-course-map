@@ -30,13 +30,13 @@ export function useRunRate(
         samples.value = [];
         return;
       }
-      if (samples.value.at(-1)?.rows === rows) return;
+      if (samples.value[samples.value.length - 1]?.rows === rows) return;
       samples.value = [...samples.value.slice(-7), { t: Date.now(), rows }];
     },
   );
   return computed(() => {
     const first = samples.value[0];
-    const last = samples.value.at(-1);
+    const last = samples.value[samples.value.length - 1];
     if (!first || !last || last.t <= first.t || last.rows <= first.rows) return null;
     return ((last.rows - first.rows) * 1000) / (last.t - first.t);
   });
