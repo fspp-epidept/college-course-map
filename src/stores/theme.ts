@@ -1,6 +1,7 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { commands, type Theme } from "../bindings";
+import { patchSettings } from "../composables/useSettings";
 import { FALLBACK_THEME_ID, builtinThemes } from "../theme/builtins";
 import type { RegistryEntry } from "../theme/types";
 
@@ -92,10 +93,12 @@ export const useThemeStore = defineStore("theme", () => {
         : [];
   }
 
-  /** Switch the active theme and persist the choice. No-op if it can't be applied. */
+  /** Switch the active theme and persist the choice. No-op if it can't be applied.
+   *  patchSettings (read-modify-write), never a hand-built Settings object —
+   *  a partial write resets every omitted field to its Rust-side default. */
   async function setTheme(id: string): Promise<void> {
     if (!(await applyById(id))) return;
-    await commands.writeSettings({ activeTheme: id });
+    await patchSettings({ activeTheme: id });
   }
 
   return {

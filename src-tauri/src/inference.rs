@@ -13,11 +13,14 @@ use std::{
 };
 
 use ort::{
+    ep::{self, ExecutionProvider as _},
     inputs,
     session::{Session, builder::GraphOptimizationLevel},
     value::TensorRef,
 };
 use serde::Deserialize;
+
+use crate::runtime::EpKind;
 use tokenizers::{
     PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationDirection,
     TruncationParams,
@@ -26,9 +29,32 @@ use tokenizers::{
 /// Matches `max_length=512` in `scripts/models/_lib/inference.py::predict_batch`.
 const MAX_SEQ_LEN: usize = 512;
 
+/// Per-EP inference batch size (EPI-82): how many inputs go through one
+/// `session.run` call. Besides the ONNX call, this is also the run worker's
+/// progress/flush/cancel granularity.
+///
+/// Measured 2026-07-28/29 on the validation panel (RTX 4070 SUPER, ONNX
+/// Runtime 1.24.2 cuda13 pack, two-digit model, `task check:throughput`).
+/// These constants assume the run worker's length-bucketing (EPI-82: inputs
+/// sorted by length within a super-chunk, so `BatchLongest` pads almost
+/// nothing): bucketed batch 128 is the optimum on *both* CUDA (4,514 unique
+/// rows/s; 64 ≈ −3%, 256 ≈ −18%) and CPU (166 rows/s; +16% over the old
+/// unbucketed 64). Unbucketed, larger batches lose badly to padding waste —
+/// don't raise this without re-measuring via `task check:throughput
+/// --bucket --batch N`. The EP parameter is the tuning seam; DirectML/CoreML
+/// are unmeasured and inherit the measured optimum.
+#[must_use]
+pub fn batch_size(_ep: EpKind) -> usize {
+    128
+}
+
 /// A model loaded into ONNX Runtime with its tokenizer + class label table.
 pub struct LoadedModel {
     pub digit_level: u8,
+    /// The highest-priority execution provider that registered successfully
+    /// for this session (EPI-73); `Cpu` when none did. Recorded on runs rows
+    /// and surfaced in Settings.
+    pub resolved_ep: EpKind,
     /// The session needs `&mut self` to run; wrap so we can hold it behind an
     /// `Arc` shared from the inference registry.
     session: Mutex<Session>,
@@ -59,9 +85,51 @@ pub struct Classification {
     pub probability: f32,
 }
 
+/// Register execution providers on a session builder in priority order
+/// (EPI-73). Returns the first EP that registered successfully — the one ONNX
+/// Runtime will prefer when assigning graph nodes — or `Cpu` when none did.
+///
+/// A failed registration is the designed fallback path (EP not in the loaded
+/// pack's dylib, CUDA/cuDNN/TensorRT libs not installed on this machine, wrong
+/// platform), so it logs and continues rather than erroring. `Cpu` in the list
+/// is the fallback boundary: entries after it are below the implicit CPU EP by
+/// definition and never register.
+fn register_eps(
+    builder: &mut ort::session::builder::SessionBuilder,
+    eps: &[EpKind],
+) -> Option<EpKind> {
+    let mut resolved = None;
+    for ep in eps {
+        let result = match ep {
+            EpKind::Cpu => break,
+            EpKind::TensorRt => ep::TensorRT::default().register(builder),
+            EpKind::Cuda => ep::CUDA::default().register(builder),
+            EpKind::DirectMl => ep::DirectML::default().register(builder),
+            EpKind::CoreMl => ep::CoreML::default().register(builder),
+        };
+        match result {
+            Ok(()) => {
+                if resolved.is_none() {
+                    resolved = Some(*ep);
+                }
+            }
+            Err(e) => eprintln!("execution provider {}: not used: {e}", ep.as_str()),
+        }
+    }
+    resolved
+}
+
 /// Build a [`LoadedModel`] from a directory containing `model.onnx`,
-/// `tokenizer.json`, and `config.json`.
-pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedModel> {
+/// `tokenizer.json`, and `config.json`. `eps` is the user's execution-provider
+/// priority list (settings), applied to the session before commit.
+/// `max_cpu_threads` caps ORT's intra-op pool (EPI-83): 0, or any value
+/// outside `1..=cores`, means auto (ORT's default — all physical cores).
+pub fn load_model(
+    model_dir: &Path,
+    digit_level: u8,
+    eps: &[EpKind],
+    max_cpu_threads: u32,
+) -> anyhow::Result<LoadedModel> {
     // Parse config.json first: it carries id2label AND pad_token_id, which
     // the padding setup below needs. The pad token is family-specific
     // (RoBERTa: 1/"<pad>", ModernBERT: 50283/"[PAD]") — deriving it from the
@@ -102,15 +170,27 @@ pub fn load_model(model_dir: &Path, digit_level: u8) -> anyhow::Result<LoadedMod
 
     // ort's `Error` carries a builder phantom that's not `Send + Sync`, so we
     // can't `?` it into `anyhow::Error`; stringify at the boundary.
-    let session = Session::builder()
+    let mut builder = Session::builder()
         .map_err(|e| anyhow::anyhow!("session builder: {e}"))?
         .with_optimization_level(GraphOptimizationLevel::Level3)
-        .map_err(|e| anyhow::anyhow!("set opt level: {e}"))?
+        .map_err(|e| anyhow::anyhow!("set opt level: {e}"))?;
+    // Clamp semantics (EPI-83): only a value in 1..=cores overrides ORT's
+    // default pool size; anything else (0 = auto, or out of range) leaves the
+    // default, which already means "all physical cores".
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    if (1..=cores).contains(&(max_cpu_threads as usize)) {
+        builder = builder
+            .with_intra_threads(max_cpu_threads as usize)
+            .map_err(|e| anyhow::anyhow!("set intra threads: {e}"))?;
+    }
+    let resolved_ep = register_eps(&mut builder, eps).unwrap_or(EpKind::Cpu);
+    let session = builder
         .commit_from_file(model_dir.join("model.onnx"))
         .map_err(|e| anyhow::anyhow!("commit_from_file: {e}"))?;
 
     Ok(LoadedModel {
         digit_level,
+        resolved_ep,
         session: Mutex::new(session),
         tokenizer,
         id2label,
@@ -345,6 +425,14 @@ impl InferenceRegistry {
             _ => None,
         }
     }
+
+    /// The execution provider this registry's sessions run on. All three
+    /// models load with the same priority list in one `load_all_models` call,
+    /// so resolution is uniform by construction; read it from any of them.
+    #[must_use]
+    pub fn execution_provider(&self) -> EpKind {
+        self.two_digit.resolved_ep
+    }
 }
 
 /// Same product dir convention as `db.rs::PRODUCT_DIR` and `config.rs` —
@@ -376,8 +464,13 @@ pub fn models_root() -> Result<PathBuf, String> {
 
 /// Load all three digit-level models from `root`. Slow (each model is
 /// ~500 MB); call once at startup. The caller resolves `root` per build
-/// flavor (`resource_dir` for airgap, [`models_root`] otherwise).
-pub fn load_all_models(root: &Path) -> anyhow::Result<InferenceRegistry> {
+/// flavor (`resource_dir` for airgap, [`models_root`] otherwise) and passes
+/// the settings' execution-provider priority list + CPU thread cap.
+pub fn load_all_models(
+    root: &Path,
+    eps: &[EpKind],
+    max_cpu_threads: u32,
+) -> anyhow::Result<InferenceRegistry> {
     if !root.exists() {
         anyhow::bail!(
             "models directory missing: {} — run `task models:install` to copy \
@@ -387,9 +480,9 @@ pub fn load_all_models(root: &Path) -> anyhow::Result<InferenceRegistry> {
         );
     }
     Ok(InferenceRegistry {
-        two_digit: load_model(&root.join("two-digit"), 2)?,
-        four_digit: load_model(&root.join("four-digit"), 4)?,
-        six_digit: load_model(&root.join("six-digit"), 6)?,
+        two_digit: load_model(&root.join("two-digit"), 2, eps, max_cpu_threads)?,
+        four_digit: load_model(&root.join("four-digit"), 4, eps, max_cpu_threads)?,
+        six_digit: load_model(&root.join("six-digit"), 6, eps, max_cpu_threads)?,
     })
 }
 
@@ -429,6 +522,19 @@ impl ModelStore {
             .write()
             .map_err(|_| "model store lock poisoned".to_owned())?;
         *guard = Some(std::sync::Arc::new(registry));
+        Ok(())
+    }
+
+    /// Empty the store so the next load rebuilds sessions (EPI-73: an EP
+    /// priority reorder re-registers providers). A run in flight keeps its
+    /// `Arc` clone and finishes on the old sessions — new runs get the new
+    /// registry.
+    pub(crate) fn clear(&self) -> Result<(), String> {
+        let mut guard = self
+            .registry
+            .write()
+            .map_err(|_| "model store lock poisoned".to_owned())?;
+        *guard = None;
         Ok(())
     }
 

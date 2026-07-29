@@ -87,6 +87,12 @@ jobs:
           # work — a cold seed costs ~20 min and default is save-on-success.
           cache-on-failure: true
 
+      # tauri-build fails while the bundle.resources path `runtimes/cpu` is
+      # absent (EPI-73 ships it in every bundle). Lint and unit tests never
+      # load the dylib, so an empty directory is all the build script needs —
+      # no pack download in CI.
+      - run: mkdir -p src-tauri/runtimes/cpu
+
       - run: task fmt:rust:check
 
       # Clippy fully type-checks while linting — there is deliberately no

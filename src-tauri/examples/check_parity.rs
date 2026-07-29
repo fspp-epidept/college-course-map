@@ -9,7 +9,10 @@
 
 use std::collections::BTreeMap;
 
-use course_classifier_lib::inference::{self, LoadedModel, classify};
+use course_classifier_lib::{
+    inference::{self, LoadedModel, classify},
+    runtime::{self, EpKind},
+};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +32,11 @@ struct ParityEntry {
 const LOGIT_TOLERANCE: f32 = 5e-5;
 
 fn main() -> anyhow::Result<()> {
+    // Parity is CPU-only by decision (EPI-73): GPU float math is not
+    // bit-identical to the Python reference, and that's expected, not drift.
+    runtime::init_ort(&runtime::dev_cpu_pack_dir())
+        .map_err(|e| anyhow::anyhow!("{e} — run `task runtimes:fetch` first"))?;
+
     let parity_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("scripts")
@@ -63,7 +71,7 @@ fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown model subdir: {other}"),
         };
         eprintln!("Loading {subdir} ({} inputs)…", items.len());
-        let model = inference::load_model(&root.join(&subdir), digit_level)?;
+        let model = inference::load_model(&root.join(&subdir), digit_level, &[EpKind::Cpu], 0)?;
 
         for entry in items {
             total += 1;

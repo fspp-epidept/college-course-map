@@ -128,6 +128,13 @@ jobs:
       - name: Generate auto-import declarations
         run: pnpm exec vite build
 
+      # EPI-73: `load-dynamic` links no ONNX Runtime — every bundle ships the
+      # CPU runtime pack under bundle.resources (src-tauri/runtimes/cpu),
+      # fetched + sha256-verified from the pinned runtimes.toml manifest.
+      # Without it the bundler fails on the missing resource directory.
+      - name: Fetch ONNX Runtime CPU pack
+        run: cargo run --quiet --manifest-path src-tauri/Cargo.toml --example runtime_install -- cpu
+
       # release-please owns tag/release creation; tagName points tauri-action
       # at that existing release (gated on release_created, so it exists and
       # is non-draft, matching releaseDraft's default) — it must never create

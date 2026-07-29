@@ -39,7 +39,22 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tauri-plugin-dialog = "2"
 csv = "1"
-ort = "2.0.0-rc.12"
+# load-dynamic: nothing is linked at build time; the ONNX Runtime dylib is
+# resolved from a runtime pack (runtimes.toml) and loaded via ort::init_from at
+# startup. EP features only gate the Rust config API — which EPs actually exist
+# is a property of the loaded pack. api-24 matches the pinned pack version
+# (ONNX Runtime 1.24.x).
+ort = { version = "2.0.0-rc.12", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "api-24",
+    "load-dynamic",
+    "cuda",
+    "tensorrt",
+    "directml",
+    "coreml",
+] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 ndarray = "0.17"
 toml = "0.9"
@@ -47,6 +62,15 @@ toml = "0.9"
 # spawn_blocking; rustls so we never link system OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 sha2 = "0.10"
+
+# Runtime-pack extraction (runtime.rs): official ONNX Runtime release archives
+# are .tgz on Linux/macOS and .zip on Windows; GPU support-library packs
+# (EPI-84) are PyPI wheels — zips — on every platform.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+flate2 = "1"
+tar = "0.4"
 
 [lints.rust]
 unsafe_code = "deny"

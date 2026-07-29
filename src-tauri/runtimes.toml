@@ -1,0 +1,157 @@
+# Pinned ONNX Runtime packs (EPI-73) and GPU support-library packs (EPI-84) —
+# what `load-dynamic` loads at startup. Runtime packs are repackaged official
+# microsoft/onnxruntime release assets; libs packs are the redistributable
+# NVIDIA wheels from PyPI (content-addressed URLs, digests from the PyPI JSON
+# API). Everything is pinned by exact version + sha256. `ort_version` must
+# stay in lockstep with the ONNX Runtime version the `ort` crate targets (see
+# Cargo.toml: ort 2.0.0-rc.12 = api-24 = ONNX Runtime 1.24.x) — bumping `ort`
+# means re-pinning every pack in the same PR.
+#
+# `id` is the user-facing pack name; (id, target) is the lookup key.
+# `layout` controls extraction: "onnxruntime" strips the archive's single
+# top-level directory; "flat-dylibs" extracts only dynamic libraries,
+# flattened into `lib/` (the wheel layout nests them per component).
+# `eps` lists execution providers a runtime pack carries (display metadata);
+# `libs` names the companion libs pack that satisfies those EPs' system
+# dependencies when no system-wide install exists.
+
+ort_version = "1.24.2"
+
+# --- Linux x86_64 ---
+
+[[pack]]
+id = "cpu"
+display_name = "CPU"
+target = "x86_64-unknown-linux-gnu"
+eps = ["cpu"]
+layout = "onnxruntime"
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz"
+sha256 = "43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6"
+size = 8123282
+
+[[pack]]
+id = "cuda"
+display_name = "CUDA 12 + TensorRT"
+target = "x86_64-unknown-linux-gnu"
+eps = ["cuda", "tensorrt"]
+layout = "onnxruntime"
+# No cu12 libs pack is pinned yet — cu12 users are assumed to have a system
+# install. Add one on demand (same wheel idiom, cu12 package names).
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu-1.24.2.tgz"
+sha256 = "bcb42da041f42192e5579de175f7410313c114740a611e230afe9d79be65cc49"
+size = 205369881
+
+[[pack]]
+id = "cuda13"
+display_name = "CUDA 13 + TensorRT"
+target = "x86_64-unknown-linux-gnu"
+eps = ["cuda", "tensorrt"]
+layout = "onnxruntime"
+libs = "cuda13-libs"
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-gpu_cuda13-1.24.2.tgz"
+sha256 = "75128942ac9b22fb5001f1e1e041b473793958db016cd124a2ad981fe273ae12"
+size = 180220519
+
+# CUDA 13 support libraries (EPI-84): the exact redistributable NVIDIA wheels
+# verified working on 2026-07-03 (via the models venv). cuDNN's engine libs
+# dominate the size and are dlopened lazily — do not strip them. The NVIDIA
+# driver itself is the one system prerequisite that cannot be shipped.
+
+[[pack]]
+id = "cuda13-libs"
+display_name = "CUDA 13 support libraries"
+target = "x86_64-unknown-linux-gnu"
+eps = []
+layout = "flat-dylibs"
+
+[[pack.archives]]
+url = "https://files.pythonhosted.org/packages/e7/44/423ac00af4dd95a5aeb27207e2c0d9b7118702149bf4704c3ddb55bb7429/nvidia_cublas-13.1.0.3-py3-none-manylinux_2_27_x86_64.whl"
+sha256 = "ee8722c1f0145ab246bccb9e452153b5e0515fd094c3678df50b2a0888b8b171"
+size = 423133236
+
+[[pack.archives]]
+url = "https://files.pythonhosted.org/packages/2e/24/d1558f3b68b1d26e706813b1d10aa1d785e4698c425af8db8edc3dced472/nvidia_cuda_runtime-13.0.96-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+sha256 = "7f82250d7782aa23b6cfe765ecc7db554bd3c2870c43f3d1821f1d18aebf0548"
+size = 2243632
+
+[[pack.archives]]
+url = "https://files.pythonhosted.org/packages/c3/68/483a78f5e8f31b08fb1bb671559968c0ca3a065ac7acabfc7cee55214fd6/nvidia_cuda_nvrtc-13.0.88-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl"
+sha256 = "ad9b6d2ead2435f11cbb6868809d2adeeee302e9bb94bcf0539c7a40d80e8575"
+size = 90215200
+
+[[pack.archives]]
+url = "https://files.pythonhosted.org/packages/a8/2f/7b57e29836ea8714f81e9898409196f47d772d5ddedddf1592eadb8ab743/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"
+sha256 = "6c44f692dce8fd5ffd3e3df134b6cdb9c2f72d99cf40b62c32dde45eea9ddad3"
+size = 214085489
+
+[[pack.archives]]
+url = "https://files.pythonhosted.org/packages/a5/9f/be0a41ca4a4917abf5cb9ae0daff1a6060cc5de950aec0396de9f3b52bc5/nvidia_curand-10.4.0.35-py3-none-manylinux_2_27_x86_64.whl"
+sha256 = "1aee33a5da6e1db083fe2b90082def8915f30f3248d5896bcec36a579d941bfc"
+size = 59544258
+
+[[pack.archives]]
+url = "https://files.pythonhosted.org/packages/a3/22/0b4b932655d17a6da1b92fa92ab12844b053bb2ac2475e179ba6f043da1e/nvidia_cudnn_cu13-9.19.0.56-py3-none-manylinux_2_27_x86_64.whl"
+sha256 = "d20e1734305e9d68889a96e3f35094d733ff1f83932ebe462753973e53a572bf"
+size = 366066321
+
+# --- Windows x86_64 ---
+# The CPU zip's DirectML status is unverified (EPI-85). Windows CUDA libs
+# packs (win_amd64 wheels) land with EPI-85's Windows verification pass.
+
+[[pack]]
+id = "cpu"
+display_name = "CPU"
+target = "x86_64-pc-windows-msvc"
+eps = ["cpu"]
+layout = "onnxruntime"
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-1.24.2.zip"
+sha256 = "8e3e9c826375352e29cb2614fe44f3d7a4b0ff7b8028ad7a456af9d949a7e8b0"
+size = 74075355
+
+[[pack]]
+id = "cuda"
+display_name = "CUDA 12 + TensorRT"
+target = "x86_64-pc-windows-msvc"
+eps = ["cuda", "tensorrt"]
+layout = "onnxruntime"
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu-1.24.2.zip"
+sha256 = "4152b67ea67405cf642fdc484a4e24fb1d9bfda7a78dfd5f756c73812a40bdcd"
+size = 280855316
+
+[[pack]]
+id = "cuda13"
+display_name = "CUDA 13 + TensorRT"
+target = "x86_64-pc-windows-msvc"
+eps = ["cuda", "tensorrt"]
+layout = "onnxruntime"
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-win-x64-gpu_cuda13-1.24.2.zip"
+sha256 = "72207a283ec9886e1968a4183636a7665c78e2154d4f4adc16e61193dd7a74f1"
+size = 288348147
+
+# --- macOS aarch64 ---
+# The official osx build includes the CoreML EP; there is no separate GPU
+# pack and never a libs pack — CoreML is built into the OS.
+
+[[pack]]
+id = "cpu"
+display_name = "CPU + CoreML"
+target = "aarch64-apple-darwin"
+eps = ["coreml", "cpu"]
+layout = "onnxruntime"
+
+[[pack.archives]]
+url = "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-osx-arm64-1.24.2.tgz"
+sha256 = "0af4fa503e8ea285245b47ee42d0a7461b8156a81270857da0c1d4ecf858abde"
+size = 31604221

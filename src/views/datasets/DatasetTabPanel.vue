@@ -63,21 +63,19 @@ function coverageLabel(level: DigitLevel): string {
 }
 
 // --- Classify action ---
+// A run always covers every model (EPI-96) — one button, one confirm.
 
-const confirmLevel = ref<DigitLevel | null>(null);
+const confirmOpen = ref(false);
 const startError = ref<string | null>(null);
 
 const classify = useMutation({
-  mutationFn: async (level: DigitLevel) => {
-    const result = await commands.startRun({
-      datasetId: datasetId.value,
-      digitLevel: level,
-    });
+  mutationFn: async () => {
+    const result = await commands.startRun({ datasetId: datasetId.value });
     if (result.status === "error") throw new Error(result.error);
     return result.data;
   },
   onSuccess: () => {
-    confirmLevel.value = null;
+    confirmOpen.value = false;
     startError.value = null;
     // ["runs"] prefix-matches the latest-run query, which flips the card to
     // its running state on the next render.
@@ -90,31 +88,25 @@ const classify = useMutation({
   },
 });
 
-function requestRun(level: DigitLevel): void {
+function requestRun(): void {
   startError.value = null;
-  confirmLevel.value = level;
+  confirmOpen.value = true;
   // The confirm panel quotes cache numbers; make sure they're current at the
   // moment of decision, not from tab-mount time.
   refetchCoverage();
 }
 
-function confirmRun(): void {
-  if (confirmLevel.value === null) return;
-  classify.mutate(confirmLevel.value);
-}
-
-const dropdownItems = computed(() =>
-  LEVELS.map((level) => ({
-    label: `Classify ${level}-digit`,
-    onSelect: () => requestRun(level),
-  })),
+// Confirm-panel numbers: what each level still needs to compute.
+const confirmLevels = computed(() =>
+  LEVELS.map((level) => {
+    const c = coverageFor(level);
+    return {
+      level,
+      remaining: c ? c.total - c.classified : null,
+      classified: c?.classified ?? 0,
+    };
+  }),
 );
-
-// Confirm-panel numbers for the pending level.
-const confirmCoverage = computed(() => {
-  if (confirmLevel.value === null) return null;
-  return coverageFor(confirmLevel.value);
-});
 
 // --- Pause ---
 
@@ -179,12 +171,12 @@ const progressPct = computed(() => {
 const runStateHeading = computed(() => {
   const r = latestRun.value;
   if (!r) return "";
-  const level = r.digitLevel ? `${r.digitLevel}-digit` : "";
+  const level = r.digitLevel ? `${r.digitLevel}-digit` : "All-models";
   if (r.state === "running" && pauseRequested.value)
     return "Pausing — finishing the current batch…";
   switch (r.state) {
     case "running":
-      return `Classifying (${level})…`;
+      return `Classifying (${level.toLowerCase()})…`;
     case "completed":
       return `${level} run complete`;
     case "interrupted":
@@ -335,32 +327,18 @@ async function exportCsv(): Promise<void> {
     </div>
 
     <section class="flex flex-col gap-3">
-      <!-- Classify action: one split button. The main button targets the level
-           currently in view; the chevron opens the other levels. Selection of
-           what to LOOK at lives in the table header below — this control only
-           starts work, and always via the inline confirm. -->
+      <!-- Classify action: one button, one confirm (EPI-96 — a run always
+           covers every model). Selection of what to LOOK at lives in the
+           table header below; this control only starts work. -->
       <div class="flex items-center gap-3">
-        <div class="inline-flex">
-          <UButton
-            color="primary"
-            icon="i-lucide-play"
-            class="rounded-r-none"
-            :disabled="classifyDisabled"
-            @click="requestRun(viewLevel)"
-          >
-            Classify {{ viewLevel }}-digit
-          </UButton>
-          <UDropdownMenu :items="dropdownItems" :content="{ align: 'end' }">
-            <UButton
-              color="primary"
-              icon="i-lucide-chevron-down"
-              class="rounded-l-none border-l border-(--ui-bg)/30"
-              square
-              aria-label="Classify at another level"
-              :disabled="classifyDisabled"
-            />
-          </UDropdownMenu>
-        </div>
+        <UButton
+          color="primary"
+          icon="i-lucide-play"
+          :disabled="classifyDisabled"
+          @click="requestRun"
+        >
+          Classify
+        </UButton>
         <span v-if="activeElsewhere" class="text-xs text-(--ui-text-muted)">
           A run is active on
           <span class="text-(--ui-text)">{{ activeElsewhere.datasetTitle }}</span>
@@ -379,51 +357,49 @@ async function exportCsv(): Promise<void> {
         leave-to-class="opacity-0 -translate-y-1"
       >
         <div
-          v-if="confirmLevel !== null"
+          v-if="confirmOpen"
           key="confirm"
           class="rounded-lg border border-(--ui-border-accented) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
         >
           <span class="text-(--ui-text) font-medium">
-            Start {{ confirmLevel }}-digit classification of {{ tab.label }}
+            Classify {{ tab.label }} with all models
           </span>
-          <p class="text-(--ui-text-muted)">
-            <template v-if="confirmCoverage && confirmCoverage.classified > 0">
-              <span class="text-(--ui-text) tabular-nums">
-                {{ (confirmCoverage.total - confirmCoverage.classified).toLocaleString() }}
-              </span>
-              of
-              <span class="text-(--ui-text) tabular-nums">
-                {{ confirmCoverage.total.toLocaleString() }}
-              </span>
-              courses need computing —
-              <span class="text-(--ui-text) tabular-nums">
-                {{ confirmCoverage.classified.toLocaleString() }}
-              </span>
-              already classified by this model are reused from the cache.
-            </template>
-            <template v-else>
-              Classifies all
-              <span class="text-(--ui-text) tabular-nums">
-                {{ (confirmCoverage?.total ?? dataset?.rowCount ?? totalRows).toLocaleString() }}
-              </span>
-              courses with the {{ confirmLevel }}-digit CCM model.
-            </template>
-          </p>
+          <ul class="text-(--ui-text-muted) flex flex-col gap-0.5">
+            <li v-for="row in confirmLevels" :key="row.level" class="tabular-nums">
+              {{ row.level }}-digit:
+              <template v-if="row.remaining !== null">
+                <span class="text-(--ui-text)">{{ row.remaining.toLocaleString() }}</span>
+                to compute<template v-if="row.classified > 0"
+                  >,
+                  <span class="text-(--ui-text)">{{ row.classified.toLocaleString() }}</span>
+                  reused from the cache</template
+                >
+              </template>
+              <template v-else>
+                all
+                <span class="text-(--ui-text)">
+                  {{ (dataset?.rowCount ?? totalRows).toLocaleString() }}
+                </span>
+                courses
+              </template>
+            </li>
+          </ul>
           <p class="text-(--ui-text-dimmed) text-xs">
-            Runs locally on this machine. You can keep working while it runs.
+            Runs locally on this machine, one model at a time. You can keep
+            working while it runs.
           </p>
           <p v-if="startError" class="text-(--ui-color-error-500) text-xs">
             {{ startError }}
           </p>
           <div class="flex justify-end gap-2 pt-1">
-            <UButton variant="ghost" color="neutral" @click="confirmLevel = null">
+            <UButton variant="ghost" color="neutral" @click="confirmOpen = false">
               Cancel
             </UButton>
             <UButton
               color="primary"
               :loading="classify.isPending.value"
               :disabled="classifyDisabled"
-              @click="confirmRun"
+              @click="classify.mutate()"
             >
               Start run
             </UButton>
@@ -477,10 +453,17 @@ async function exportCsv(): Promise<void> {
           />
 
           <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-(--ui-text-muted)">
-            <span>Rows processed</span>
+            <span>Classifications</span>
             <span class="text-(--ui-text) tabular-nums">
               {{ (latestRun.rowsProcessed ?? 0).toLocaleString() }} /
               {{ (latestRun.rowsTotal ?? 0).toLocaleString() }}
+              <span
+                v-if="latestRun.modelCount > 1 && latestRun.rowsTotal"
+                class="text-(--ui-text-dimmed)"
+              >
+                ({{ Math.round(latestRun.rowsTotal / latestRun.modelCount).toLocaleString() }}
+                rows × {{ latestRun.modelCount }} models)
+              </span>
             </span>
             <span>New classifications</span>
             <span class="text-(--ui-text) tabular-nums">

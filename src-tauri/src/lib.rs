@@ -13,6 +13,8 @@ mod models;
 // Public for the resume verification harness (examples/check_resume.rs,
 // EPI-39), which drives the real RunPipeline against a scratch database.
 pub mod runs;
+// Public for the dev pack fetcher (examples/runtime_install.rs, EPI-73).
+pub mod runtime;
 pub mod seed;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
@@ -41,6 +43,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             models::download_models,
             models::load_models,
             models::models_status,
+            models::reload_models,
+            runtime::download_runtime,
+            runtime::relaunch_app,
+            runtime::runtime_status,
             runs::get_latest_run,
             runs::get_run,
             runs::list_runs,
@@ -51,6 +57,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
         .events(collect_events![
             models::ModelDownloadProgress,
             models::ModelsStateChanged,
+            runtime::RuntimeDownloadProgress,
+            runtime::RuntimeStateChanged,
         ])
 }
 
@@ -100,6 +108,25 @@ pub fn run() {
             };
             app.manage(db);
             app.manage(catalog);
+            // Load ONNX Runtime (EPI-73): with `load-dynamic` nothing is
+            // linked, so the dylib must be loaded before any session exists.
+            // Pack choice follows the settings EP priority (GPU pack when
+            // installed, bundled CPU pack otherwise) and is fixed for the
+            // process lifetime — switching packs requires a relaunch.
+            {
+                let settings =
+                    config::read_settings().map_err(|e| format!("read settings: {e}"))?;
+                let resource_dir = app
+                    .path()
+                    .resource_dir()
+                    .map_err(|e| format!("resolve bundle resource dir: {e}"))?;
+                let state = runtime::startup(&settings, &resource_dir)?;
+                eprintln!(
+                    "startup: ONNX Runtime {} loaded from pack '{}'",
+                    state.ort_version, state.pack_id
+                );
+                app.manage(state);
+            }
             // Models load lazily (EPI-3/EPI-56): the store starts empty and a
             // background thread fills it when the manifest files are already
             // on disk (always, for airgap; post-download for connected).

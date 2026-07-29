@@ -63,6 +63,24 @@ impl ModelCatalog {
             .iter()
             .find(|m| m.digit_level == digit_level)
     }
+
+    /// Digit levels the manifest defines, ascending — the set an all-models
+    /// run covers (EPI-96).
+    #[must_use]
+    pub fn levels(&self) -> Vec<u8> {
+        let mut levels: Vec<u8> = self.manifest.model.iter().map(|m| m.digit_level).collect();
+        levels.sort_unstable();
+        levels
+    }
+
+    /// Reverse lookup: the digit level whose *active* model row is `model_id`,
+    /// `None` when the id belongs to a superseded family/revision.
+    #[must_use]
+    pub fn level_of(&self, model_id: i64) -> Option<u8> {
+        self.levels()
+            .into_iter()
+            .find(|level| self.model_id(*level) == Some(model_id))
+    }
 }
 
 /// Upsert one `models` row per manifest entry (keyed by repo + revision) and

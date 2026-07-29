@@ -167,6 +167,48 @@ async modelsStatus() : Promise<Result<ModelStatus[], string>> {
 }
 },
 /**
+ * Clear the store and load fresh — the settings path for changes that only
+ * take effect at session build time (EPI-73: EP priority reorder). Unlike
+ * `load_models`, already-loaded is not a no-op. A run in flight finishes on
+ * its `Arc` of the old registry; new runs see the new sessions.
+ */
+async reloadModels() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reload_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Download + verify + install a runtime pack into the data dir. The new pack
+ * is picked up at the next app launch (init-once); the UI says so. Connected
+ * builds only — airgap has no network by definition.
+ */
+async downloadRuntime(packId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("download_runtime", { packId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Restart the app (EPI-94): the one way to switch runtime packs, since ONNX
+ * Runtime loads exactly once per process.
+ */
+async relaunchApp() : Promise<void> {
+    await TAURI_INVOKE("relaunch_app");
+},
+async runtimeStatus() : Promise<Result<RuntimeStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("runtime_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Most recent run for a dataset, or `None` if the dataset has never been
  * classified. The dataset tab's run surface card derives from this — backend
  * state, not component memory — so it survives tab close/reopen and app
@@ -209,10 +251,10 @@ async pauseRun(runId: string) : Promise<boolean> {
 /**
  * Resume an `interrupted` run (EPI-38). Same worker, same run id: the row
  * flips back to `running` with `resume_count` bumped, and the pipeline
- * re-walks the whole dataset — everything already in `inference_results`
- * is a cache hit, so only the remainder computes. Idempotent by
- * construction. Progress restarts from row zero and races through the
- * cached prefix.
+ * selects only the courses still missing a result for this model — progress
+ * continues from where it stopped (`total - remaining`), never from zero.
+ * Idempotent by construction: anything already in `inference_results` is
+ * never recomputed.
  */
 async resumeRun(runId: string) : Promise<Result<StartRunResponse, string>> {
     try {
@@ -237,10 +279,14 @@ async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>>
 
 export const events = __makeEvents__<{
 modelDownloadProgress: ModelDownloadProgress,
-modelsStateChanged: ModelsStateChanged
+modelsStateChanged: ModelsStateChanged,
+runtimeDownloadProgress: RuntimeDownloadProgress,
+runtimeStateChanged: RuntimeStateChanged
 }>({
 modelDownloadProgress: "model-download-progress",
-modelsStateChanged: "models-state-changed"
+modelsStateChanged: "models-state-changed",
+runtimeDownloadProgress: "runtime-download-progress",
+runtimeStateChanged: "runtime-state-changed"
 })
 
 /** user-defined constants **/
@@ -326,6 +372,13 @@ rowCount: number;
  * `ready` when complete, `failed` when the worker errored.
  */
 importState: string; importError: string | null }
+/**
+ * Execution providers the app knows how to register, in the shape the
+ * settings priority list stores. `Cpu` is a real list entry ("allowed as
+ * fallback"), not an implicit default — a user who wants CPU-only moves it
+ * to the top.
+ */
+export type EpKind = "tensorrt" | "cuda" | "directml" | "coreml" | "cpu"
 export type ExportOutcome = { path: string; rows: number }
 export type ExportRequest = { datasetId: string; 
 /**
@@ -385,7 +438,12 @@ export type ModelsStateChanged = Record<string, never>
  * model digit level (resolved from the JSON `model_ids` array) and the
  * `unique_inputs_done` + `error_message` fields the summary view drops.
  */
-export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
+export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; 
+/**
+ * How many models the run covers (EPI-96). Row counters are in
+ * row×model units — the UI divides by this to talk about dataset rows.
+ */
+modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
@@ -395,7 +453,12 @@ export type RunSummary = { id: string; datasetId: string; datasetTitle: string; 
  * Resolved from the run's first `model_ids` entry so a list row can say
  * which model it was without a second IPC call (EPI-69).
  */
-digitLevel: number | null; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; resumeCount: number; 
+digitLevel: number | null; 
+/**
+ * How many models the run covers (EPI-96). Row counters are in
+ * row×model units — the UI divides by this to talk about dataset rows.
+ */
+modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; resumeCount: number; 
 /**
  * Whether `resume_run` would accept this run right now (EPI-69).
  * Computed at read time — never persisted — so external changes (models
@@ -409,6 +472,49 @@ resumable: boolean;
  */
 resumeBlockers: string[] }
 /**
+ * Per-pack download progress, mirroring `models::ModelDownloadProgress`.
+ */
+export type RuntimeDownloadProgress = { packId: string; received: number; total: number; bytesPerSec: number }
+export type RuntimePackStatus = { id: string; displayName: string; 
+/**
+ * EPs the pack claims to carry (manifest metadata; empty = libs pack).
+ */
+eps: string[]; sizeBytes: number; installed: boolean; 
+/**
+ * Whether this is the pack the running process loaded (always false for
+ * libs packs — they are preloaded next to a runtime pack, not loaded as
+ * one).
+ */
+active: boolean; 
+/**
+ * Companion libs pack id, when this runtime pack has one (EPI-84).
+ */
+libs: string | null }
+/**
+ * Coarse "runtime pack state changed" signal — emitted when a pack install
+ * finishes or fails; the frontend refetches `runtime_status`.
+ */
+export type RuntimeStateChanged = Record<string, never>
+export type RuntimeStatus = { ortVersion: string; 
+/**
+ * Pack the running process loaded (fixed until relaunch).
+ */
+activePackId: string; 
+/**
+ * EP the loaded models actually run on; `None` until models load.
+ */
+resolvedEp: string | null; 
+/**
+ * Platform EPs in the shape the settings priority list stores, for the
+ * settings UI to render reorderable rows without hardcoding.
+ */
+platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[]; 
+/**
+ * Startup runtime conditions worth a warning in Settings (EPI-87):
+ * damaged-pack fallback, missing CUDA directory, failed preloads.
+ */
+notices: string[] }
+/**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).
  */
@@ -417,13 +523,46 @@ export type SemanticTokens = { bg?: string | null; "bg-muted"?: string | null; "
  * General application settings. `activeTheme` references a theme by id; design
  * tokens themselves live in `themes/*.json`, not here.
  */
-export type Settings = { activeTheme: string }
-export type StartRunRequest = { datasetId: string; 
+export type Settings = { activeTheme: string; 
 /**
- * 2, 4, or 6. Maps to a row in the `models` table on the Rust side; the
- * spike avoids forcing the frontend to know surrogate model ids.
+ * Execution-provider priority for inference (EPI-73), most preferred
+ * first. `cpu` is a list entry meaning "allowed as fallback" — the one
+ * mechanism, no separate GPU toggle. Reordering takes effect on the
+ * next model load; switching *packs* (cpu↔cuda dylib) needs a relaunch.
+ * `serde(default)` keeps pre-EPI-73 settings.json files parsing under
+ * `deny_unknown_fields`.
  */
-digitLevel: number }
+executionProviders?: EpKind[]; 
+/**
+ * Cap on ORT's intra-op CPU threads during inference (EPI-83).
+ * `0` = auto (ORT default: all physical cores); any value below 1 or
+ * above the machine's cores also behaves as auto — clamp semantics,
+ * no error states. Applied at session build; rides `reload_models`.
+ */
+maxCpuThreads?: number; 
+/**
+ * Directory holding CUDA/cuDNN libraries to preload at startup (EPI-84)
+ * — for users whose CUDA lives in a conda env or pip venv
+ * (`site-packages/nvidia`) instead of a system install. Takes precedence
+ * over the downloadable support-libs pack; changing it needs a relaunch
+ * (preload is process-lifetime).
+ */
+cudaLibraryDir?: string | null; 
+/**
+ * Runtime pack the user explicitly activated in Settings → Compute
+ * (EPI-94). Checked before the EP-priority scan at startup, so an
+ * explicit choice can never be shadowed by manifest order. `None` — or a
+ * pack that is no longer installed — falls back to the scan, whose
+ * terminal fallback is the bundled CPU pack. Switching packs requires a
+ * relaunch (ONNX Runtime is init-once).
+ */
+preferredPack?: string | null }
+export type StartRunRequest = { 
+/**
+ * A run always classifies the dataset with every manifest model
+ * (EPI-96) — there is no level to pick.
+ */
+datasetId: string }
 /**
  * Response from `start_run`: the run has been queued and is already updating
  * its own row. The frontend polls `get_run(run_id)` from here.

@@ -159,12 +159,45 @@ pub(crate) struct ThemeSummary {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) active_theme: String,
+    /// Execution-provider priority for inference (EPI-73), most preferred
+    /// first. `cpu` is a list entry meaning "allowed as fallback" — the one
+    /// mechanism, no separate GPU toggle. Reordering takes effect on the
+    /// next model load; switching *packs* (cpu↔cuda dylib) needs a relaunch.
+    /// `serde(default)` keeps pre-EPI-73 settings.json files parsing under
+    /// `deny_unknown_fields`.
+    #[serde(default = "crate::runtime::default_priority")]
+    pub(crate) execution_providers: Vec<crate::runtime::EpKind>,
+    /// Cap on ORT's intra-op CPU threads during inference (EPI-83).
+    /// `0` = auto (ORT default: all physical cores); any value below 1 or
+    /// above the machine's cores also behaves as auto — clamp semantics,
+    /// no error states. Applied at session build; rides `reload_models`.
+    #[serde(default)]
+    pub(crate) max_cpu_threads: u32,
+    /// Directory holding CUDA/cuDNN libraries to preload at startup (EPI-84)
+    /// — for users whose CUDA lives in a conda env or pip venv
+    /// (`site-packages/nvidia`) instead of a system install. Takes precedence
+    /// over the downloadable support-libs pack; changing it needs a relaunch
+    /// (preload is process-lifetime).
+    #[serde(default)]
+    pub(crate) cuda_library_dir: Option<String>,
+    /// Runtime pack the user explicitly activated in Settings → Compute
+    /// (EPI-94). Checked before the EP-priority scan at startup, so an
+    /// explicit choice can never be shadowed by manifest order. `None` — or a
+    /// pack that is no longer installed — falls back to the scan, whose
+    /// terminal fallback is the bundled CPU pack. Switching packs requires a
+    /// relaunch (ONNX Runtime is init-once).
+    #[serde(default)]
+    pub(crate) preferred_pack: Option<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             active_theme: "default-light".to_owned(),
+            execution_providers: crate::runtime::default_priority(),
+            max_cpu_threads: 0,
+            cuda_library_dir: None,
+            preferred_pack: None,
         }
     }
 }
