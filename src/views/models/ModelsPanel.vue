@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import {
+  useCancelDownload,
   useDownloadModels,
+  useDownloading,
   useLoadModels,
   useModelsEvents,
   useModelsStatus,
@@ -10,6 +12,12 @@ import {
 const { data: models, isPending, isError, error } = useModelsStatus();
 const { progress } = useModelsEvents();
 const download = useDownloadModels();
+const cancel = useCancelDownload();
+// Backend truth (EPI-74): reflects downloads started before this mount or
+// from anywhere else; the mutation's isPending only covers this component's
+// own invocation window before the status refetch lands.
+const backendDownloading = useDownloading();
+const downloading = computed(() => backendDownloading.value || download.isPending.value);
 const load = useLoadModels();
 
 const allPresent = computed(
@@ -29,22 +37,40 @@ function fmtMb(bytes: number): string {
   return `${Math.round(bytes / 1e6)} MB`;
 }
 
-function pct(digitLevel: number): number | null {
-  const p = progress.value[digitLevel];
+/** Live event progress when we have it, else the backend snapshot from
+ * `models_status` — which is what a freshly-mounted panel sees mid-download
+ * before the next event tick (EPI-74). */
+function progressFor(m: {
+  digitLevel: number;
+  download: { file: string; received: number; total: number } | null;
+}): { file: string; received: number; total: number; bytesPerSec: number | null } | null {
+  const live = progress.value[m.digitLevel];
+  if (live) return live;
+  return m.download ? { ...m.download, bytesPerSec: null } : null;
+}
+
+function pct(m: Parameters<typeof progressFor>[0]): number | null {
+  const p = progressFor(m);
   if (!p || p.total === 0) return null;
   return Math.round((p.received / p.total) * 100);
 }
 
-function downloadDetail(digitLevel: number): string | null {
-  const p = progress.value[digitLevel];
+function downloadDetail(m: Parameters<typeof progressFor>[0]): string | null {
+  const p = progressFor(m);
   if (!p) return null;
-  return `${p.file} — ${fmtMb(p.received)} / ${fmtMb(p.total)} · ${(p.bytesPerSec / 1e6).toFixed(1)} MB/s`;
+  const speed = p.bytesPerSec === null ? "" : ` · ${(p.bytesPerSec / 1e6).toFixed(1)} MB/s`;
+  return `${p.file} — ${fmtMb(p.received)} / ${fmtMb(p.total)}${speed}`;
 }
 
-function statusLabel(m: { digitLevel: number; filesPresent: number; filesTotal: number }): string {
+function statusLabel(m: {
+  digitLevel: number;
+  filesPresent: number;
+  filesTotal: number;
+  download: { file: string; received: number; total: number } | null;
+}): string {
   if (loaded.value) return "loaded";
-  const p = pct(m.digitLevel);
-  if (download.isPending.value && p !== null && m.filesPresent < m.filesTotal) {
+  const p = pct(m);
+  if (downloading.value && p !== null && m.filesPresent < m.filesTotal) {
     return `downloading ${p}%`;
   }
   if (m.filesPresent === m.filesTotal) return "on disk";
@@ -70,15 +96,27 @@ function statusLabel(m: { digitLevel: number; filesPresent: number; filesTotal: 
 
     <template v-else-if="models">
       <div class="flex items-center gap-2">
-        <UButton
-          v-if="anyMissing"
-          color="primary"
-          icon="i-lucide-download"
-          :loading="download.isPending.value"
-          @click="download.mutate()"
-        >
-          Download models
-        </UButton>
+        <template v-if="anyMissing">
+          <UButton
+            color="primary"
+            icon="i-lucide-download"
+            :loading="downloading"
+            :disabled="downloading"
+            @click="download.mutate()"
+          >
+            Download models
+          </UButton>
+          <UButton
+            v-if="downloading"
+            color="neutral"
+            variant="subtle"
+            icon="i-lucide-x"
+            :loading="cancel.isPending.value"
+            @click="cancel.mutate()"
+          >
+            Cancel
+          </UButton>
+        </template>
         <UButton
           v-else-if="!loaded"
           color="primary"
@@ -112,12 +150,10 @@ function statusLabel(m: { digitLevel: number; filesPresent: number; filesTotal: 
               {{ statusLabel(m) }}
             </span>
           </div>
-          <template
-            v-if="download.isPending.value && pct(m.digitLevel) !== null && m.filesPresent < m.filesTotal"
-          >
-            <UProgress :model-value="pct(m.digitLevel) ?? 0" :max="100" size="sm" />
+          <template v-if="downloading && pct(m) !== null && m.filesPresent < m.filesTotal">
+            <UProgress :model-value="pct(m) ?? 0" :max="100" size="sm" />
             <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
-              {{ downloadDetail(m.digitLevel) }}
+              {{ downloadDetail(m) }}
             </span>
           </template>
           <div class="text-xs text-(--ui-text-dimmed) flex flex-wrap gap-x-4">

@@ -133,6 +133,14 @@ async listMetrics() : Promise<Result<AppMetrics, string>> {
 }
 },
 /**
+ * Request cancellation of the in-flight model download. The chunk loop
+ * honors it within one read; the partial file is deleted. Returns `false`
+ * when no download was active.
+ */
+async cancelDownload() : Promise<boolean> {
+    return await TAURI_INVOKE("cancel_download");
+},
+/**
  * Download every missing manifest file from its pinned HF revision into the
  * data-dir models path, sha256-verifying as it streams. Connected builds
  * only — the airgap bundle ships its models read-only in the resource dir.
@@ -373,6 +381,12 @@ rowCount: number;
  */
 importState: string; importError: string | null }
 /**
+ * Last-known download position for one digit level, kept server-side so a
+ * freshly-mounted client renders the true state from `models_status` without
+ * having caught any progress events (EPI-74).
+ */
+export type DownloadSnapshot = { file: string; received: number; total: number }
+/**
  * Execution providers the app knows how to register, in the shape the
  * settings priority list stores. `Cpu` is a real list entry ("allowed as
  * fallback"), not an implicit default — a user who wants CPU-only moves it
@@ -433,7 +447,18 @@ export type ModelStatus = { digitLevel: number; displayName: string; hfRepo: str
  * Files on disk with the manifest's exact size. Full sha256 verification
  * happens during download, not on status polls.
  */
-filesPresent: number; totalBytes: number; loaded: boolean; loading: boolean }
+filesPresent: number; totalBytes: number; loaded: boolean; loading: boolean; 
+/**
+ * Whether a download is in flight app-wide (same value on every row).
+ * This — not any component-local pending flag — gates the Download
+ * button (EPI-74).
+ */
+downloading: boolean; 
+/**
+ * This level's last-known download position, when a download has
+ * touched it. Hydrates a freshly-mounted progress bar.
+ */
+download: DownloadSnapshot | null }
 /**
  * Coarse "something about model state changed" signal — emitted after a file
  * finishes downloading, a load starts/completes, or either fails. The
