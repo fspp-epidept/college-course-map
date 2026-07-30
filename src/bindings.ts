@@ -104,9 +104,9 @@ async listDatasets() : Promise<Result<DatasetSummary[], string>> {
 }
 },
 /**
- * Export a dataset's courses (joined with one model's cached classifications
- * + taxonomy titles) to a CSV the user picks via the native save dialog.
- * Returns `None` when the user cancels the dialog.
+ * Export a dataset's courses (joined with the requested models' cached
+ * classifications + taxonomy titles) to a CSV the user picks via the native
+ * save dialog. Returns `None` when the user cancels the dialog.
  */
 async exportResults(req: ExportRequest) : Promise<Result<ExportOutcome | null, string>> {
     try {
@@ -382,15 +382,17 @@ export type EpKind = "tensorrt" | "cuda" | "directml" | "coreml" | "cpu"
 export type ExportOutcome = { path: string; rows: number }
 export type ExportRequest = { datasetId: string; 
 /**
- * Model whose classifications populate the `ccm*` columns. Rows without
- * a cached result export with those cells empty.
+ * Models whose classifications populate the `ccm*` column sets — one
+ * set per model, ordered by digit level (EPI-80). Rows without a cached
+ * result for a model export with that model's cells empty. Must be
+ * non-empty with distinct digit levels.
  */
-modelId: number; 
+modelIds: number[]; 
 /**
  * Emit the numbered top-5 candidate columns (`ccm…_code1` …
- * `ccm…_title5`). Export-dialog toggle (EPI-98).
+ * `ccm…_title5`) per exported model. Export-dialog toggle (EPI-98).
  */
-includeTopCandidates: boolean }
+includeTopCandidates: boolean; rowMode: RowMode }
 export type ImportRequest = { path: string; 
 /**
  * Falls back to the filename when null/blank.
@@ -438,6 +440,21 @@ filesPresent: number; totalBytes: number; loaded: boolean; loading: boolean }
  * frontend responds by refetching `models_status`.
  */
 export type ModelsStateChanged = Record<string, never>
+/**
+ * Row granularity of the export (EPI-78).
+ */
+export type RowMode = 
+/**
+ * One output row per input row (source fidelity, mergeable back onto
+ * the original file).
+ */
+"all" | 
+/**
+ * One output row per distinct classified input (`content_hash`).
+ * Duplicate inputs share one cached result by construction; the
+ * representative row is the first occurrence (lowest `row_index`).
+ */
+"unique"
 /**
  * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
  * model digit level (resolved from the JSON `model_ids` array) and the
