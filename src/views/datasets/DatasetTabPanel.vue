@@ -259,7 +259,7 @@ function gotoNext(): void {
   cursor.value = last.rowIndex + 1;
 }
 
-// --- CSV export (EPI-15, EPI-77/79/81/98) ---
+// --- CSV export (EPI-15, EPI-77/78/79/80/81/98) ---
 // The Export button opens a small options dialog; confirming closes it and
 // hands off to Rust, which owns the save dialog and streams straight from
 // DuckDB to disk. The resolved path comes back for display. `null` data
@@ -269,9 +269,12 @@ const exporting = ref(false);
 const exportOutcome = ref<{ path: string; rows: number } | null>(null);
 const exportError = ref<string | null>(null);
 const exportOpen = ref(false);
-// Top-5 candidate columns are an explicit opt-in (EPI-98 stakeholder
-// decision): 15 extra columns is a lot of CSV to include silently.
+// Column/row options are explicit opt-ins: top-5 adds 15 columns per level
+// (EPI-98), all-levels adds a ccm column set per digit level (EPI-80), and
+// unique-rows collapses duplicates and drops the non-input columns (EPI-78).
 const includeTopCandidates = ref(false);
+const includeAllLevels = ref(false);
+const uniqueRows = ref(false);
 
 async function exportCsv(): Promise<void> {
   if (modelId.value == null) return;
@@ -279,10 +282,24 @@ async function exportCsv(): Promise<void> {
   exporting.value = true;
   exportError.value = null;
   try {
+    // Resolve the model id for each exported level through the catalog —
+    // the viewed level's id is already cached; the all-levels case asks for
+    // the other two at click time.
+    const levels = includeAllLevels.value ? LEVELS : [viewLevel.value];
+    const modelIds: number[] = [];
+    for (const level of levels) {
+      const resolved = await commands.modelIdForDigitLevel(level);
+      if (resolved.status === "error") throw new Error(resolved.error);
+      if (resolved.data == null) {
+        throw new Error(`no active model for the ${level}-digit level`);
+      }
+      modelIds.push(resolved.data);
+    }
     const result = await commands.exportResults({
       datasetId: datasetId.value,
-      modelId: modelId.value,
+      modelIds,
       includeTopCandidates: includeTopCandidates.value,
+      rowMode: uniqueRows.value ? "unique" : "all",
     });
     if (result.status === "error") throw new Error(result.error);
     if (result.data) exportOutcome.value = result.data;
@@ -573,20 +590,33 @@ async function exportCsv(): Promise<void> {
           >
             Export CSV
           </UButton>
-          <UModal v-model:open="exportOpen" :title="`Export ${viewLevel}-digit results`">
+          <UModal
+            v-model:open="exportOpen"
+            :title="includeAllLevels ? 'Export all-level results' : `Export ${viewLevel}-digit results`"
+          >
             <template #body>
               <div class="flex flex-col gap-3 text-sm">
                 <p class="text-(--ui-text-muted)">
-                  Exports every row of this dataset with the
-                  {{ viewLevel }}-digit code, its probability, and the
-                  standardized CCM title appended
-                  (<code>ccm{{ viewLevel }}digit_code</code>,
-                  <code>…_prob</code>, <code>…_title</code>).
+                  Exports this dataset with each selected level's code,
+                  probability, and standardized CCM title appended
+                  (<code>ccm{{ includeAllLevels ? "…" : viewLevel }}digit_code</code>,
+                  <code>…_prob</code>, <code>…_title</code>). Levels without
+                  classifications export as empty cells.
                 </p>
+                <UCheckbox
+                  v-model="includeAllLevels"
+                  label="Include all digit levels"
+                  description="One column set per level (2, 4, and 6-digit) in a single file, instead of only the level in view."
+                />
+                <UCheckbox
+                  v-model="uniqueRows"
+                  label="One row per unique course"
+                  description="Collapses duplicate courses to their first occurrence. Only the subject, catalog number, and title columns are kept — other columns differ between duplicates."
+                />
                 <UCheckbox
                   v-model="includeTopCandidates"
                   label="Include top 5 candidate codes"
-                  :description="`Adds ccm${viewLevel}digit_code1…5 with a probability and title per rank. Rank 1 repeats the main columns.`"
+                  description="Adds numbered code/probability/title columns per rank for each level. Rank 1 repeats the main columns."
                 />
               </div>
             </template>
