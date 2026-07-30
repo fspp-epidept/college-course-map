@@ -42,7 +42,7 @@ logits are the only signal, and everything below is derived from them.
 - **`top2_code`/`top2_prob` … `top5_code`/`top5_prob`** — the candidate codes
   ranked 2–5 by logit, each with its softmax probability from the same
   distribution (one shared denominator per row, `inference.rs::softmax_at`).
-  Added in migration `0004` (EPI-98).
+  Added in migration `0004` (2026-07-30).
 
 ## Where each step happens
 
@@ -75,9 +75,10 @@ than a calibrated frequency.
 
 `logit_argmax` is preserved so pre-softmax signal survives, and the top-5
 candidate codes and probabilities are persisted per result (migration `0004`,
-EPI-98). The **full logit vector** is still discarded after that reduction;
-temperature scaling and entropy analyses over all `K` classes would need it,
-and whether top-5 suffices for calibration work is tracked as Linear EPI-61.
+2026-07-30). The **full logit vector** is still discarded after that
+reduction; temperature scaling and entropy analyses over all `K` classes
+would need it, and whether top-5 suffices for calibration work is an open
+question in the backlog.
 
 ## Reproducing a value
 

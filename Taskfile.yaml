@@ -174,7 +174,7 @@ tasks:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example models_install
 
   runtimes:fetch:
-    desc: "EPI-73: download + verify + extract ONNX Runtime packs into src-tauri/runtimes/ (default cpu; GPU pack: `task runtimes:fetch -- cuda`)"
+    desc: "download + verify + extract ONNX Runtime packs into src-tauri/runtimes/ (default cpu; GPU pack: `task runtimes:fetch -- cuda`)"
     cmds:
       # tauri-build refuses to compile while the bundle.resources path
       # `runtimes/cpu` is absent — pre-create it so the installer example
@@ -183,12 +183,12 @@ tasks:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example runtime_install -- {{.CLI_ARGS | default "cpu"}}
 
   check:runtime:
-    desc: "EPI-73: report which runtime pack + execution provider this machine resolves to, and time one real classification on it"
+    desc: "report which runtime pack + execution provider this machine resolves to, and time one real classification on it"
     cmds:
       - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example runtime_check
 
   check:throughput:
-    desc: "EPI-82: benchmark batched inference over a CSV (default data/validation.csv) on the resolved EP; e.g. `task check:throughput -- --ep cpu --rows 100000`"
+    desc: "benchmark batched inference over a CSV (default data/validation.csv) on the resolved EP; e.g. `task check:throughput -- --ep cpu --rows 100000`"
     cmds:
       - cargo run --release --quiet --manifest-path src-tauri/Cargo.toml --example throughput_bench -- {{.CLI_ARGS}}
 
@@ -201,7 +201,7 @@ tasks:
       - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity
 
   check:resume:
-    desc: "EPI-39: SIGKILL a run mid-flight against a scratch DB, sweep, resume, verify no dup/missing/recomputed results (needs the two-digit model on disk)"
+    desc: "SIGKILL a run mid-flight against a scratch DB, sweep, resume, verify no dup/missing/recomputed results (needs the two-digit model on disk)"
     cmds:
       # Release for realistic inference speed; the child must still be
       # mid-run when the kill threshold hits. See examples/check_resume.rs.

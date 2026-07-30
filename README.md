@@ -9,9 +9,42 @@ A native desktop app that bulk-classifies college courses against College Course
 - Handles ~2M-row datasets with resumable runs and a results cache keyed by `(model, content hash)`, so nothing re-pays for inference already done
 - Stores everything in DuckDB: streaming CSV ingest, paginated result queries, exports written straight to disk
 
-Pre-1.0. The core loop is complete: import a CSV, map columns, classify locally, browse and export results. Remaining v1 work is tracked in Linear (team EPI).
+Pre-1.0. The core loop is complete: import a CSV, map columns, classify locally, browse and export results.
+
+## Install
+
+Download the installer for your platform from the [latest release](https://github.com/fspp-epidept/college-course-map/releases/latest):
+
+- **Windows**: the `*-setup.exe` installer. It installs per-user, so no administrator rights are needed; the app appears in your per-user Start Menu
+- **macOS**: the `.dmg`; drag the app to Applications
+- **Linux**: the `.AppImage` (mark it executable, then run it), or the `.deb` / `.rpm` for your distribution
+
+> [!NOTE]
+> Builds are not yet code-signed. Windows SmartScreen will warn on first launch: click **More info**, then **Run anyway**. On macOS, Control-click the app and choose **Open**; if it is still blocked, approve it under **System Settings → Privacy & Security → Open Anyway**.
+
+## Quick start
+
+1. **Download the models.** Open the **Models** activity in the left activity bar and click **Download models**. The three classifiers (about 2 GB total) download once from Hugging Face, are hash-verified, and load automatically. Everything after this step is fully offline.
+2. **Import a CSV.** Open the **Datasets** activity and click **Import CSV**. Pick your file, then map which columns hold the subject code, catalog number, and course title; recognized headers map automatically. No file handy? Use [`samples/sample_courses.csv`](samples/sample_courses.csv) from this repo, a 49,537-row real-shaped input whose headers auto-map.
+3. **Classify.** Select the dataset and click **Classify**. One run classifies at all three digit levels, with live progress. Long runs are interruptible and resumable, and results are cached by course content, so nothing is ever classified twice.
+4. **Export.** In the dataset view, click **Export CSV** and choose a destination. Options: include all digit levels in one file, include the top-5 candidate codes with probabilities per level, or collapse to one row per unique course. Exports include your original input columns, so the file drops back into your existing workflow.
+
+## GPU acceleration
+
+CPU inference works out of the box on every platform and needs no configuration. On macOS, the default pack already includes CoreML; there is nothing to set up.
+
+On Windows or Linux with an NVIDIA GPU, open **Settings → Compute**:
+
+1. Click **Download** on the CUDA (or TensorRT) backend. Each backend is a single download that bundles everything it needs
+2. Click **Make active**, then **Relaunch**
+
+The active provider is shown at the top of the Compute page, and every run records which provider it used.
+
+If a GPU backend fails on your machine (old driver, provider fails to load), the Compute page shows a warning and the app falls back safely. To disable GPU inference, make the **CPU** backend active again and relaunch. The **Provider priority** list under Advanced reorders execution providers within the active backend; changing it only requires a model reload, not a relaunch.
 
 ## Prerequisites
+
+For building from source:
 
 - [Rust](https://rustup.rs/): toolchain pinned by `rust-toolchain.toml`
 - [Node.js](https://nodejs.org/) 20+ and [pnpm](https://pnpm.io/) 10+
@@ -35,7 +68,7 @@ Run the desktop app in dev mode. The first run downloads the CPU ONNX Runtime pa
 task dev
 ```
 
-The app fetches its classifier models on first launch from the Models panel. `samples/sample_courses.csv` is a 49,537-row input for trying an import end to end.
+The app fetches its classifier models on first launch from the Models panel.
 
 Run the full check pipeline (Biome, clippy, rustfmt, `vue-tsc`):
 

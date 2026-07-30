@@ -1,9 +1,5 @@
 # Product
 
-<!-- Personality, anti-references, and the a11y target below were inferred from
-     repo context on 2026-07-03 (init interview timed out). Register, users, and
-     purpose come straight from CLAUDE.md. Edit anything that reads wrong. -->
-
 ## Register
 
 product

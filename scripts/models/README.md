@@ -72,7 +72,7 @@ This matches annamp's model card. The Tauri Rust app must produce byte-identical
 
 ## Model families
 
-Both annamp families are converted and published: RoBERTa and ModernBERT. The app-active family is **ModernBERT** (EPI-56, 2026-07-03); the RoBERTa repos stay published on HF but are not what the app downloads. `src-tauri/models.toml` pins the app-active repos by commit SHA and per-file sha256; regenerate it with `task models:manifest` after any upload.
+Both annamp families are converted and published: RoBERTa and ModernBERT. The app-active family is **ModernBERT** (decision 2026-07-03); the RoBERTa repos stay published on HF but are not what the app downloads. `src-tauri/models.toml` pins the app-active repos by commit SHA and per-file sha256; regenerate it with `task models:manifest` after any upload.
 
 `upload.py` reads `HF_USERNAME` from `.env` (loaded automatically by uv) and pushes to `<HF_USERNAME>/courses-{two,four,six}-digit-{roberta,modernbert}-base-onnx`.
 
@@ -82,4 +82,4 @@ Both annamp families are converted and published: RoBERTa and ModernBERT. The ap
 
 ## Closed decisions
 
-- Quantization (F16 / int8) — **never, without revisiting parity** (EPI-33, 2026-07-29). Research users need unmodified model outputs; correctness is exact-match parity against the Python reference, which quantization breaks. F32 only.
+- Quantization (F16 / int8) — **never, without revisiting parity** (decision 2026-07-29). Research users need unmodified model outputs; correctness is exact-match parity against the Python reference, which quantization breaks. F32 only.
