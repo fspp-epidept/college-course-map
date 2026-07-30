@@ -259,22 +259,30 @@ function gotoNext(): void {
   cursor.value = last.rowIndex + 1;
 }
 
-// --- CSV export (EPI-15) ---
-// Rust owns the save dialog and streams straight from DuckDB to disk; the
-// resolved path comes back for display. `null` data means the user cancelled.
+// --- CSV export (EPI-15, EPI-77/79/81/98) ---
+// The Export button opens a small options dialog; confirming closes it and
+// hands off to Rust, which owns the save dialog and streams straight from
+// DuckDB to disk. The resolved path comes back for display. `null` data
+// means the user cancelled the save dialog.
 
 const exporting = ref(false);
 const exportOutcome = ref<{ path: string; rows: number } | null>(null);
 const exportError = ref<string | null>(null);
+const exportOpen = ref(false);
+// Top-5 candidate columns are an explicit opt-in (EPI-98 stakeholder
+// decision): 15 extra columns is a lot of CSV to include silently.
+const includeTopCandidates = ref(false);
 
 async function exportCsv(): Promise<void> {
   if (modelId.value == null) return;
+  exportOpen.value = false;
   exporting.value = true;
   exportError.value = null;
   try {
     const result = await commands.exportResults({
       datasetId: datasetId.value,
       modelId: modelId.value,
+      includeTopCandidates: includeTopCandidates.value,
     });
     if (result.status === "error") throw new Error(result.error);
     if (result.data) exportOutcome.value = result.data;
@@ -561,10 +569,38 @@ async function exportCsv(): Promise<void> {
             size="xs"
             :loading="exporting"
             :disabled="modelId == null || isRunning || totalRows === 0"
-            @click="exportCsv"
+            @click="exportOpen = true"
           >
             Export CSV
           </UButton>
+          <UModal v-model:open="exportOpen" :title="`Export ${viewLevel}-digit results`">
+            <template #body>
+              <div class="flex flex-col gap-3 text-sm">
+                <p class="text-(--ui-text-muted)">
+                  Exports every row of this dataset with the
+                  {{ viewLevel }}-digit code, its probability, and the
+                  standardized CCM title appended
+                  (<code>ccm{{ viewLevel }}digit_code</code>,
+                  <code>…_prob</code>, <code>…_title</code>).
+                </p>
+                <UCheckbox
+                  v-model="includeTopCandidates"
+                  label="Include top 5 candidate codes"
+                  :description="`Adds ccm${viewLevel}digit_code1…5 with a probability and title per rank. Rank 1 repeats the main columns.`"
+                />
+              </div>
+            </template>
+            <template #footer>
+              <div class="flex justify-end gap-2 w-full">
+                <UButton variant="ghost" color="neutral" @click="exportOpen = false">
+                  Cancel
+                </UButton>
+                <UButton color="primary" icon="i-lucide-download" @click="exportCsv">
+                  Choose file…
+                </UButton>
+              </div>
+            </template>
+          </UModal>
         </div>
       </div>
 

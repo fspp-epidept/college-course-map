@@ -73,14 +73,27 @@ impl std::fmt::Debug for LoadedModel {
     }
 }
 
-/// One classification: argmax label, its index, the top-3 indices (sorted
+/// One ranked candidate within a [`Classification`]: class index, its raw
+/// `id2label` string (float-mangled — normalize with [`normalize_ccm_code`]
+/// before persisting), and its softmax probability.
+#[derive(Debug, Clone)]
+pub struct TopCandidate {
+    pub index: usize,
+    pub label: String,
+    pub probability: f32,
+}
+
+/// One classification: argmax label, its index, the top-5 candidates (sorted
 /// descending by logit), the raw logit value at argmax, and the softmax
 /// probability at argmax (the confidence; see `docs/model-confidence.md`).
 #[derive(Debug, Clone)]
 pub struct Classification {
     pub label: String,
     pub label_index: usize,
-    pub top3: [usize; 3],
+    /// Rank 1 is always the argmax — same label and probability as the
+    /// top-level fields (EPI-98 persists ranks 2–5; rank 1 lives in the
+    /// existing `classification`/`probability` cache columns).
+    pub top5: [TopCandidate; 5],
     pub logit_argmax: f32,
     pub probability: f32,
 }
@@ -284,60 +297,82 @@ pub fn classify_batch(model: &LoadedModel, inputs: &[&str]) -> anyhow::Result<Ve
 
     let mut out: Vec<Classification> = Vec::with_capacity(n);
     for row_logits in logits_flat.chunks(num_classes) {
-        let (argmax, &argmax_val) = row_logits
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .ok_or_else(|| anyhow::anyhow!("argmax: empty logits row"))?;
-        let top3 = top3_indices(row_logits);
-        let label = model
-            .id2label
-            .get(argmax)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("argmax {argmax} out of id2label bounds"))?;
-        out.push(Classification {
-            label,
-            label_index: argmax,
-            top3,
-            logit_argmax: argmax_val,
-            probability: softmax_at(row_logits, argmax_val),
-        });
+        out.push(classify_row(model, row_logits)?);
     }
     Ok(out)
 }
 
-/// Softmax probability of the argmax class, computed in the numerically
-/// stable max-shifted form (see `docs/model-confidence.md` for the exact
-/// formula, dependency chain, and research-validity notes):
-///
-/// ```text
-/// p(argmax) = exp(z_max − z_max) / Σ_j exp(z_j − z_max)
-///           = 1 / Σ_j exp(z_j − z_max)
-/// ```
-///
-/// Subtracting the row maximum before exponentiating bounds every exponent
-/// at ≤ 0, so `exp` can't overflow f32 regardless of logit magnitude; the
-/// result is identical to naive softmax in exact arithmetic.
-fn softmax_at(row_logits: &[f32], z_max: f32) -> f32 {
-    let denom: f32 = row_logits.iter().map(|&z| (z - z_max).exp()).sum();
-    1.0 / denom
+/// Build one [`Classification`] from a row of logits: argmax + the top-5
+/// candidates, all normalized by one softmax denominator per row —
+/// `p(i) = exp(z_i − z_max) / denom`, so the argmax probability
+/// (`exp(0)/denom = 1/denom`) and the ranked candidates' probabilities come
+/// from the same normalization.
+fn classify_row(model: &LoadedModel, row_logits: &[f32]) -> anyhow::Result<Classification> {
+    let (argmax, &argmax_val) = row_logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .ok_or_else(|| anyhow::anyhow!("argmax: empty logits row"))?;
+    let label = model
+        .id2label
+        .get(argmax)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("argmax {argmax} out of id2label bounds"))?;
+    let denom = softmax_denom(row_logits, argmax_val);
+    let mut candidates = Vec::with_capacity(5);
+    for i in top5_indices(row_logits) {
+        let candidate_label = model
+            .id2label
+            .get(i)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("top-5 index {i} out of id2label bounds"))?;
+        let z = row_logits
+            .get(i)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("top-5 index {i} out of logits bounds"))?;
+        candidates.push(TopCandidate {
+            index: i,
+            label: candidate_label,
+            probability: (z - argmax_val).exp() / denom,
+        });
+    }
+    let top5: [TopCandidate; 5] = candidates
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("top-5 candidate build produced wrong arity"))?;
+    Ok(Classification {
+        label,
+        label_index: argmax,
+        top5,
+        logit_argmax: argmax_val,
+        probability: 1.0 / denom,
+    })
 }
 
-/// Top-3 indices, sorted descending by logit value. Ties broken by index order
+/// The shared softmax denominator `Σ_j exp(z_j − z_max)`, computed once per
+/// row so the argmax probability (`1 / denom`) and every ranked candidate's
+/// probability (`exp(z_i − z_max) / denom`) normalize identically. This is
+/// the numerically stable max-shifted form (see `docs/model-confidence.md`
+/// for the exact formula, dependency chain, and research-validity notes):
+/// subtracting the row maximum before exponentiating bounds every exponent
+/// at ≤ 0, so `exp` can't overflow f32 regardless of logit magnitude; the
+/// result is identical to naive softmax in exact arithmetic.
+fn softmax_denom(row_logits: &[f32], z_max: f32) -> f32 {
+    row_logits.iter().map(|&z| (z - z_max).exp()).sum()
+}
+
+/// Top-5 indices, sorted descending by logit value. Ties broken by index order
 /// (deterministic across runs), which matches `NumPy`'s stable-sort behavior in
-/// `np.argsort`/`np.argpartition` for equal values.
-fn top3_indices(logits: &[f32]) -> [usize; 3] {
+/// `np.argsort`/`np.argpartition` for equal values. Every model has ≥ 48
+/// classes, so 5 ranks always exist; a shorter row (impossible in practice)
+/// pads with index 0.
+fn top5_indices(logits: &[f32]) -> [usize; 5] {
     let mut indexed: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
     indexed.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.0.cmp(&b.0))
     });
-    [
-        indexed.first().map_or(0, |x| x.0),
-        indexed.get(1).map_or(0, |x| x.0),
-        indexed.get(2).map_or(0, |x| x.0),
-    ]
+    std::array::from_fn(|rank| indexed.get(rank).map_or(0, |x| x.0))
 }
 
 /// Normalize a model `id2label` value to the canonical zero-padded CCM code
@@ -552,7 +587,42 @@ impl ModelStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_ccm_code, softmax_at};
+    use super::{normalize_ccm_code, softmax_denom, top5_indices};
+
+    /// `p(argmax)` in the max-shifted form the pipeline uses.
+    fn softmax_at(row_logits: &[f32], z_max: f32) -> f32 {
+        1.0 / softmax_denom(row_logits, z_max)
+    }
+
+    /// Descending by logit; equal values break ties by index (stable, matches
+    /// the Python reference's argsort behavior).
+    #[test]
+    fn top5_sorts_descending_with_stable_ties() {
+        let logits = [1.0_f32, 3.0, 3.0, 2.0, 0.5, 0.1];
+        assert_eq!(top5_indices(&logits), [1, 2, 3, 0, 4]);
+    }
+
+    /// Candidate probabilities computed off the shared denominator are a
+    /// proper distribution slice: rank-1 equals `softmax_at`, ranks are
+    /// non-increasing, and the five together never exceed 1.
+    #[test]
+    fn top5_probabilities_share_the_argmax_normalization() {
+        let logits = [2.0_f32, 1.0, 0.5, -0.5, 3.0, 0.0, -1.0];
+        let z_max = 3.0_f32;
+        let denom = softmax_denom(&logits, z_max);
+        let probs: Vec<f32> = top5_indices(&logits)
+            .iter()
+            .filter_map(|&i| logits.get(i))
+            .map(|&z| (z - z_max).exp() / denom)
+            .collect();
+        let first = probs.first().copied().unwrap_or(0.0);
+        assert!((first - softmax_at(&logits, z_max)).abs() < 1e-7);
+        assert!(
+            probs.windows(2).all(|w| matches!(w, [a, b] if a >= b)),
+            "probs = {probs:?}"
+        );
+        assert!(probs.iter().sum::<f32>() <= 1.0 + 1e-6);
+    }
 
     /// Cases drawn from the real `id2label` sets of all three models —
     /// including every float-mangling shape observed (lost leading zeros,

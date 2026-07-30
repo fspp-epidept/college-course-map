@@ -42,6 +42,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         3,
         include_str!("../migrations/0003_ccm_taxonomy_and_confidence.sql"),
     ),
+    (
+        4,
+        include_str!("../migrations/0004_roundtrip_export_top5.sql"),
+    ),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -274,6 +278,16 @@ mod tests {
         // 0003 also added the research-signal column to the cache.
         conn.prepare("SELECT logit_argmax FROM inference_results")
             .map_err(|e| e.to_string())?;
+
+        // 0004: round-trip header storage + top-5 candidate columns.
+        conn.prepare("SELECT original_headers FROM source_files")
+            .map_err(|e| e.to_string())?;
+        conn.prepare(
+            "SELECT top2_code, top2_prob, top3_code, top3_prob,
+                    top4_code, top4_prob, top5_code, top5_prob
+             FROM inference_results",
+        )
+        .map_err(|e| e.to_string())?;
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn)?;

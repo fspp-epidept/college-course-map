@@ -104,9 +104,9 @@ async listDatasets() : Promise<Result<DatasetSummary[], string>> {
 }
 },
 /**
- * Export a dataset's courses (joined with one model's cached classifications)
- * to a CSV the user picks via the native save dialog. Returns `None` when the
- * user cancels the dialog.
+ * Export a dataset's courses (joined with one model's cached classifications
+ * + taxonomy titles) to a CSV the user picks via the native save dialog.
+ * Returns `None` when the user cancels the dialog.
  */
 async exportResults(req: ExportRequest) : Promise<Result<ExportOutcome | null, string>> {
     try {
@@ -382,10 +382,15 @@ export type EpKind = "tensorrt" | "cuda" | "directml" | "coreml" | "cpu"
 export type ExportOutcome = { path: string; rows: number }
 export type ExportRequest = { datasetId: string; 
 /**
- * Model whose classifications populate the classification/probability
- * columns. Rows without a cached result export with those cells empty.
+ * Model whose classifications populate the `ccm*` columns. Rows without
+ * a cached result export with those cells empty.
  */
-modelId: number }
+modelId: number; 
+/**
+ * Emit the numbered top-5 candidate columns (`ccm…_code1` …
+ * `ccm…_title5`). Export-dialog toggle (EPI-98).
+ */
+includeTopCandidates: boolean }
 export type ImportRequest = { path: string; 
 /**
  * Falls back to the filename when null/blank.

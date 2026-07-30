@@ -1255,6 +1255,14 @@ impl RunPipeline {
                         "logit_argmax",
                         "computed_at",
                         "computed_by_run",
+                        "top2_code",
+                        "top2_prob",
+                        "top3_code",
+                        "top3_prob",
+                        "top4_code",
+                        "top4_prob",
+                        "top5_code",
+                        "top5_prob",
                     ],
                 )
                 .map_err(|e| format!("open inference appender: {e}"))?;
@@ -1262,7 +1270,12 @@ impl RunPipeline {
                 // Codes persist in canonical zero-padded form (the model's
                 // id2label strings are float-mangled); probability is the
                 // softmax confidence, logit_argmax the raw research signal —
-                // see docs/model-confidence.md.
+                // see docs/model-confidence.md. Ranks 2-5 (EPI-98) persist the
+                // same way; rank 1 IS classification/probability.
+                let [_, c2, c3, c4, c5] = &classification.top5;
+                let code = |c: &crate::inference::TopCandidate| {
+                    crate::inference::normalize_ccm_code(&c.label, digit_level)
+                };
                 appender
                     .append_row(params![
                         model_id,
@@ -1272,6 +1285,14 @@ impl RunPipeline {
                         f64::from(classification.logit_argmax),
                         self.computed_at.as_str(),
                         self.run_id.as_str(),
+                        code(c2),
+                        f64::from(c2.probability),
+                        code(c3),
+                        f64::from(c3.probability),
+                        code(c4),
+                        f64::from(c4.probability),
+                        code(c5),
+                        f64::from(c5.probability),
                     ])
                     .map_err(|e| format!("inference appender append_row: {e}"))?;
             }
