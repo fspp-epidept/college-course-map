@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.3.0...course-classifier-v0.4.0) (2026-07-30)
+
+
+### Features
+
+* combined multi-level CSV export and unique-rows mode ([#155](https://github.com/fspp-epidept/college-course-map/issues/155)) ([0c73f18](https://github.com/fspp-epidept/college-course-map/commit/0c73f18341d7a160b820efb839ed2a47c00c3e3b))
+* GPU inference via load-dynamic runtime packs (EPI-73) ([#151](https://github.com/fspp-epidept/college-course-map/issues/151)) ([62354a5](https://github.com/fspp-epidept/college-course-map/commit/62354a53a28b665f85dbe21fb94615c83e9001bf))
+* round-trip CSV export, ccm columns, titles, top-5 candidates ([#153](https://github.com/fspp-epidept/college-course-map/issues/153)) ([330c47e](https://github.com/fspp-epidept/college-course-map/commit/330c47ead4d2bf870ca8d466ce970bf06accbd36))
+
+
+### Bug Fixes
+
+* disable WebKitGTK DMABUF renderer in shipped Linux builds ([#161](https://github.com/fspp-epidept/college-course-map/issues/161)) ([57b47a6](https://github.com/fspp-epidept/college-course-map/commit/57b47a6704e8b06e2e010ac41875186377211f2d))
+* model download concurrency guard, integrity verify, repair path ([#158](https://github.com/fspp-epidept/college-course-map/issues/158)) ([a6696cb](https://github.com/fspp-epidept/college-course-map/commit/a6696cb82c6247442bb2f03247f4b505ae6de371))
+
 ## [0.3.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.2.0...course-classifier-v0.3.0) (2026-07-03)
 
 
