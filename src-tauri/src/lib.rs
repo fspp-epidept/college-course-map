@@ -40,6 +40,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             export::export_results,
             import::import_csv,
             metrics::list_metrics,
+            models::cancel_download,
             models::download_models,
             models::load_models,
             models::models_status,
@@ -132,6 +133,9 @@ pub fn run() {
             // on disk (always, for airgap; post-download for connected).
             // Commands that need models error cleanly until then.
             app.manage(inference::ModelStore::default());
+            // Download in-flight guard + progress snapshots (EPI-74) — managed
+            // before autoload so models_status can always resolve it.
+            app.manage(models::DownloadState::default());
             models::autoload_if_present(app.handle());
             // Tracks per-run cancellation flags so `pause_run` can signal an
             // in-flight worker (EPI-37).
