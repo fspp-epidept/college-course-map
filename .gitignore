@@ -67,3 +67,4 @@ CLAUDE.local.md
 # Synced agent skill packs (managed outside git)
 .agents/skills/
 .claude/skills/
+skills-lock.json
