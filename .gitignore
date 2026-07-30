@@ -68,3 +68,6 @@ CLAUDE.local.md
 .agents/skills/
 .claude/skills/
 skills-lock.json
+.impeccable/
+.codex/
+PRODUCT.md

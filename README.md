@@ -93,7 +93,6 @@ Standalone Python tooling converts the annamp classifiers from PyTorch to ONNX, 
 - [`CLAUDE.md`](CLAUDE.md): repository conventions, architectural ground rules, schema, IPC (inter-process communication) contracts, and threat model
 - [`docs/keybinds.md`](docs/keybinds.md): the three-layer keyboard-shortcut model (OS global / menu accelerator / WebView)
 - [`docs/model-confidence.md`](docs/model-confidence.md): how confidence values are computed, and how to reproduce one
-- [`PRODUCT.md`](PRODUCT.md): personas, brand personality, and design principles
 - [`samples/README.md`](samples/README.md): tracked sample input files
 
 ### Layout
