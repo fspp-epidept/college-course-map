@@ -39,6 +39,10 @@ logits are the only signal, and everything below is derived from them.
   order.
 - **`logit_argmax`** — the raw value `z_argmax`, persisted unchanged as a
   research signal (see "Calibration caveats").
+- **`top2_code`/`top2_prob` … `top5_code`/`top5_prob`** — the candidate codes
+  ranked 2–5 by logit, each with its softmax probability from the same
+  distribution (one shared denominator per row, `inference.rs::softmax_at`).
+  Added in migration `0004` (EPI-98).
 
 ## Where each step happens
 
@@ -69,10 +73,11 @@ ECE, temperature scaling) against labeled data. Until such a study exists,
 treat `probability` as a *ranking* signal (higher = more confident) rather
 than a calibrated frequency.
 
-`logit_argmax` is preserved so pre-softmax signal survives; note that
-temperature scaling and entropy/margin analyses need the **full logit
-vector**, which is currently discarded after argmax — persisting it (or a
-top-k reduction) is tracked as Linear EPI-61.
+`logit_argmax` is preserved so pre-softmax signal survives, and the top-5
+candidate codes and probabilities are persisted per result (migration `0004`,
+EPI-98). The **full logit vector** is still discarded after that reduction;
+temperature scaling and entropy analyses over all `K` classes would need it,
+and whether top-5 suffices for calibration work is tracked as Linear EPI-61.
 
 ## Reproducing a value
 
