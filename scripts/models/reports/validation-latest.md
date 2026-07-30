@@ -2,7 +2,7 @@
 
 Generated: 2026-05-08T12:40:16Z
 
-- Source CSV: `/home/nick/dev/um/jurgens/course-classifier/data/validation.csv`
+- Source CSV: `data/validation.csv`
 - Sample mode: `full` (1,757,531 rows)
 - Input format: B (model card spec)
 - Execution provider (actual): CUDAExecutionProvider

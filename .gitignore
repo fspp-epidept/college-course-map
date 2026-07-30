@@ -59,3 +59,15 @@ __pycache__/
 # Claude Code per-user settings (permission allowlist etc.); shared
 # project settings would live in .claude/settings.json instead.
 .claude/settings.local.json
+
+# Maintainer-local config (private tooling references)
+CLAUDE.local.md
+.linear.toml
+
+# Synced agent skill packs (managed outside git)
+.agents/skills/
+.claude/skills/
+skills-lock.json
+.impeccable/
+.codex/
+PRODUCT.md

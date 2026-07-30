@@ -5,9 +5,9 @@
 
 ### Features
 
-* redesign classify flow — coverage, inline confirm (EPI-68) ([#145](https://github.com/fspp-epidept/college-course-map/issues/145)) ([53a7459](https://github.com/fspp-epidept/college-course-map/commit/53a7459760287a1bea411f18ed9ed0ad2c6d5e22))
-* run resume, crash sweep, resumability surfacing (EPI-38) ([#149](https://github.com/fspp-epidept/college-course-map/issues/149)) ([6758527](https://github.com/fspp-epidept/college-course-map/commit/675852765365e49dc7178a8afee8af2440bb5e37))
-* VS Code-style tab context menu (EPI-71) ([#147](https://github.com/fspp-epidept/college-course-map/issues/147)) ([311f878](https://github.com/fspp-epidept/college-course-map/commit/311f878e3b9c7f9ae90c82a3485435448a118fa5))
+* redesign classify flow — coverage, inline confirm ([#145](https://github.com/fspp-epidept/college-course-map/issues/145)) ([53a7459](https://github.com/fspp-epidept/college-course-map/commit/53a7459760287a1bea411f18ed9ed0ad2c6d5e22))
+* run resume, crash sweep, resumability surfacing ([#149](https://github.com/fspp-epidept/college-course-map/issues/149)) ([6758527](https://github.com/fspp-epidept/college-course-map/commit/675852765365e49dc7178a8afee8af2440bb5e37))
+* VS Code-style tab context menu ([#147](https://github.com/fspp-epidept/college-course-map/issues/147)) ([311f878](https://github.com/fspp-epidept/college-course-map/commit/311f878e3b9c7f9ae90c82a3485435448a118fa5))
 
 ## [0.2.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.1.0...course-classifier-v0.2.0) (2026-07-03)
 

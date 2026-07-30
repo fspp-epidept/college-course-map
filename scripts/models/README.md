@@ -14,7 +14,8 @@ scripts/models/
 ├── convert.py             optimum-cli export, idempotent
 ├── verify.py              ONNX vs PyTorch parity on a synthetic corpus
 ├── validate.py            CIP/CCM overlap rate on labeled panel data
-├── upload.py              push to HF (TODO — placeholder until env-check is added)
+├── upload.py              push to HF, one repo per spec + a collection; idempotent
+├── manifest.py            regenerate src-tauri/models.toml from the published repos
 ├── data/
 │   └── parity_inputs.csv  20-row synthetic corpus, committed
 ├── output/                generated ONNX, parity results, validation runs (gitignored)
@@ -32,6 +33,8 @@ task models:verify      # 1–3 min: parity check
 task models:validate    # ~30s on GPU: 10k sample of validation.csv
 task models:validate:full  # full panel (~30–60 min on a 4070-class GPU)
 task models:all         # convert + verify
+task models:upload      # push converted models to the HF namespace
+task models:manifest    # regenerate src-tauri/models.toml from the published repos
 task models:clean       # wipe output/
 ```
 
@@ -67,8 +70,16 @@ The model input format is locked in `_lib/format.py`:
 
 This matches annamp's model card. The Tauri Rust app must produce byte-identical strings — `convert.py` writes `output/format_spec.json` as the cross-language contract.
 
+## Model families
+
+Both annamp families are converted and published: RoBERTa and ModernBERT. The app-active family is **ModernBERT** (decision 2026-07-03); the RoBERTa repos stay published on HF but are not what the app downloads. `src-tauri/models.toml` pins the app-active repos by commit SHA and per-file sha256; regenerate it with `task models:manifest` after any upload.
+
+`upload.py` reads `HF_USERNAME` from `.env` (loaded automatically by uv) and pushes to `<HF_USERNAME>/courses-{two,four,six}-digit-{roberta,modernbert}-base-onnx`.
+
 ## Open questions
 
 - Train/test split status of `data/validation.csv` — unconfirmed. Mostly moot now that we know the panel is CIP and the models are CCM (so memorization can't inflate the *overlap* rate the way it would inflate accuracy on same-taxonomy labels), but worth confirming if annamp ever publishes a CCM-labeled holdout.
-- HF namespace for converted-ONNX repos — TBD. `upload.py` will read `HF_USERNAME` from `.env` (loaded automatically by uv).
-- Quantization (F16 / int8) — deferred. F32 only for now.
+
+## Closed decisions
+
+- Quantization (F16 / int8) — **never, without revisiting parity** (decision 2026-07-29). Research users need unmodified model outputs; correctness is exact-match parity against the Python reference, which quantization breaks. F32 only.

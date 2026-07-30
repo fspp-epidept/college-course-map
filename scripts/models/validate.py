@@ -322,7 +322,10 @@ def main() -> int:
         "format": "B (model card spec)",
         "execution_provider": ", ".join(actual_providers),
         "preferred_providers": providers,
-        "source_csv": str(csv_path),
+        # Relative to the repo root so committed reports carry no local paths.
+        "source_csv": str(
+            csv_path.relative_to(REPO_ROOT) if csv_path.is_relative_to(REPO_ROOT) else csv_path.name
+        ),
         "filter": "non-null required fields, exclude Multiple Course?",
         "results": [asdict(r) for r in results],
     }
