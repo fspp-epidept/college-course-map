@@ -42,9 +42,11 @@ The active provider is shown at the top of the Compute page, and every run recor
 
 If a GPU backend fails on your machine (old driver, provider fails to load), the Compute page shows a warning and the app falls back safely. To disable GPU inference, make the **CPU** backend active again and relaunch. The **Provider priority** list under Advanced reorders execution providers within the active backend; changing it only requires a model reload, not a relaunch.
 
-## Prerequisites
+## Development
 
-For building from source:
+Everything below is for working on the app itself. If you installed a release build, you're done; none of this applies.
+
+### Prerequisites
 
 - [Rust](https://rustup.rs/): toolchain pinned by `rust-toolchain.toml`
 - [Node.js](https://nodejs.org/) 20+ and [pnpm](https://pnpm.io/) 10+
@@ -52,7 +54,7 @@ For building from source:
 - Tauri 2 platform dependencies: <https://v2.tauri.app/start/prerequisites/>
 - [uv](https://docs.astral.sh/uv/), only if you run the Python model pipeline
 
-## Develop
+### Build and run
 
 Clone and install JS dependencies:
 
@@ -82,11 +84,11 @@ List every available task:
 task
 ```
 
-## Model-conversion pipeline
+### Model-conversion pipeline
 
 Standalone Python tooling converts the annamp classifiers from PyTorch to ONNX, verifies parity, and uploads the converted models to Hugging Face. The Tauri app never runs Python; it consumes the ONNX artifacts this pipeline publishes. See [`scripts/models/README.md`](scripts/models/README.md).
 
-## More documentation
+### More documentation
 
 - [`CLAUDE.md`](CLAUDE.md): repository conventions, architectural ground rules, schema, IPC (inter-process communication) contracts, and threat model
 - [`docs/keybinds.md`](docs/keybinds.md): the three-layer keyboard-shortcut model (OS global / menu accelerator / WebView)
@@ -94,7 +96,7 @@ Standalone Python tooling converts the annamp classifiers from PyTorch to ONNX, 
 - [`PRODUCT.md`](PRODUCT.md): personas, brand personality, and design principles
 - [`samples/README.md`](samples/README.md): tracked sample input files
 
-## Layout
+### Layout
 
 ```text
 src/            Vue 3 + TypeScript frontend
