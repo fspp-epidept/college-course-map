@@ -84,6 +84,18 @@ List every available task:
 task
 ```
 
+The ones you'll reach for most:
+
+| Task | What it does |
+| --- | --- |
+| `task gen:bindings` | Regenerate the typed IPC bindings (`src/bindings.ts`) after changing a Rust command |
+| `task check:parity` | Assert Rust ONNX inference matches the Python reference on the parity fixture |
+| `task check:runtime` | Report which runtime pack and execution provider this machine resolves to |
+| `task check:throughput` | Benchmark batched inference over a CSV |
+| `task runtimes:fetch -- cuda` | Fetch the CUDA runtime pack for GPU development |
+| `task db:reset` / `task seed:demo` | Reset the dev database / seed it with fixture data |
+| `task build` | Build the installer bundle for this platform |
+
 ### Model-conversion pipeline
 
 Standalone Python tooling converts the annamp classifiers from PyTorch to ONNX, verifies parity, and uploads the converted models to Hugging Face. The Tauri app never runs Python; it consumes the ONNX artifacts this pipeline publishes. See [`scripts/models/README.md`](scripts/models/README.md).

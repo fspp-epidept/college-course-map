@@ -29,11 +29,11 @@ tasks:
     interactive: true
     # WebKitGTK's DMABUF renderer crashes the webview under Wayland on NVIDIA
     # ("Gdk Error 71 Protocol error"); disabling it falls back to a stable path.
-    # No-op on macOS/Windows. See also #97.
+    # No-op on macOS/Windows.
     env:
       WEBKIT_DISABLE_DMABUF_RENDERER: 1
-    # EPI-73: bundle.resources ships runtimes/cpu; tauri dev fails on the
-    # missing directory otherwise. The fetch is idempotent (marker-skipped).
+    # bundle.resources ships runtimes/cpu; tauri dev fails on the missing
+    # directory otherwise. The fetch is idempotent (marker-skipped).
     deps: [runtimes:fetch]
     cmds:
       - pnpm tauri dev
@@ -59,8 +59,10 @@ tasks:
       NO_STRIP: "1"
     deps: [runtimes:fetch]
     preconditions:
-      - sh: test -f scripts/models/output/two-digit/model.onnx
-        msg: "models missing — run `task models:convert` first"
+      # The airgap bundle resources (tauri.airgap.conf.json) read from the
+      # ModernBERT output dirs — guard on those, not the RoBERTa ones.
+      - sh: test -f scripts/models/output/two-digit-modernbert/model.onnx
+        msg: "ModernBERT models missing — run `task models:convert` first"
     cmds:
       - pnpm tauri build --config src-tauri/tauri.airgap.conf.json --features airgap --bundles deb,appimage
 
