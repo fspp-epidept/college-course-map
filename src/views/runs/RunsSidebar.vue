@@ -8,18 +8,15 @@ import { runStateMeta } from "./runState";
 const workspace = useWorkspace();
 const { data: runs, isPending, isError, error } = useRuns();
 
-// Same pattern as DatasetsSidebar: drop persisted tabs whose run no longer
-// exists in the DB. Keeps stale tabs from sticking around after a DB wipe.
+// Same pattern as DatasetsSidebar: drop a persisted selection whose run no
+// longer exists in the DB. Keeps a stale detail from rendering after a wipe.
 watch(
   runs,
   (list) => {
     if (!list) return;
-    const valid = new Set(list.map((r) => `run:${r.id}`));
-    const open = workspace.tabsByActivity.runs ?? [];
-    for (const tab of open) {
-      if (!valid.has(tab.id)) {
-        workspace.closeTab("runs", tab.id);
-      }
+    const selected = workspace.selectedRunId;
+    if (selected !== null && !list.some((r) => r.id === selected)) {
+      workspace.selectRun(null);
     }
   },
   { immediate: true },
@@ -50,14 +47,7 @@ const groups = computed<RunGroup[]>(() => {
 });
 
 function open(run: RunSummary): void {
-  // Use the dataset title + a short id suffix for a meaningful tab label.
-  const shortId = run.id.slice(0, 8);
-  workspace.openTab("runs", {
-    id: `run:${run.id}`,
-    kind: "run",
-    label: `${run.datasetTitle} · ${shortId}`,
-    icon: "i-lucide-play",
-  });
+  workspace.selectRun(run.id);
 }
 
 function progressLabel(run: RunSummary): string {
@@ -119,7 +109,13 @@ function progressPct(run: RunSummary): number | null {
           v-for="run in group.runs"
           :key="run.id"
           type="button"
-          class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex items-start gap-2"
+          class="text-left rounded px-2 py-1.5 flex items-start gap-2"
+          :class="
+            workspace.selectedRunId === run.id
+              ? 'bg-(--ui-bg-accented)'
+              : 'hover:bg-(--ui-bg-muted)'
+          "
+          :aria-current="workspace.selectedRunId === run.id ? 'true' : undefined"
           @click="open(run)"
         >
           <UIcon

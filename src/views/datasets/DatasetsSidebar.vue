@@ -11,27 +11,20 @@ const { data: datasets, isPending, isError, error } = useDatasets();
 const importOpen = ref(false);
 
 function open(dataset: DatasetSummary): void {
-  workspace.openTab("datasets", {
-    id: `dataset:${dataset.id}`,
-    kind: "dataset",
-    label: dataset.title,
-    icon: "i-lucide-database",
-  });
+  workspace.selectDataset(dataset.id);
 }
 
-// Prune persisted tabs whose dataset no longer exists in the DB (e.g. after a
-// `task db:clear-data`). Without this the workbench renders stale tabs from
-// localStorage and clicking Classify on one fails an FK constraint.
+// Prune a persisted selection whose dataset no longer exists in the DB (e.g.
+// after a `task db:clear-data`). Without this the detail panel renders a
+// stale dataset from localStorage and clicking Classify fails an FK
+// constraint.
 watch(
   datasets,
   (list) => {
     if (!list) return;
-    const valid = new Set(list.map((d) => `dataset:${d.id}`));
-    const open = workspace.tabsByActivity.datasets ?? [];
-    for (const tab of open) {
-      if (!valid.has(tab.id)) {
-        workspace.closeTab("datasets", tab.id);
-      }
+    const selected = workspace.selectedDatasetId;
+    if (selected !== null && !list.some((d) => d.id === selected)) {
+      workspace.selectDataset(null);
     }
   },
   { immediate: true },
@@ -53,7 +46,13 @@ watch(
         v-for="dataset in datasets"
         :key="dataset.id"
         type="button"
-        class="text-left rounded px-2 py-1.5 hover:bg-(--ui-bg-muted) flex flex-col"
+        class="text-left rounded px-2 py-1.5 flex flex-col"
+        :class="
+          workspace.selectedDatasetId === dataset.id
+            ? 'bg-(--ui-bg-accented)'
+            : 'hover:bg-(--ui-bg-muted)'
+        "
+        :aria-current="workspace.selectedDatasetId === dataset.id ? 'true' : undefined"
         @click="open(dataset)"
       >
         <span class="text-sm text-(--ui-text) flex items-center gap-1.5">

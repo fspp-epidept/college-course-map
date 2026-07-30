@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useDatasets } from "../../composables/useDatasets";
+import { useRuns } from "../../composables/useRuns";
 import { activities, type ActivityId } from "../../config/activities";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
+
+// Every dataset and run is a jump target (EPI-58) — selection-driven
+// navigation replaced the old "open tabs" list, so the palette now reaches
+// anything, not just what was already open. Both queries share their cache
+// with the sidebars, and their polling is conditional on active work.
+const { data: datasets } = useDatasets();
+const { data: runs } = useRuns();
 
 // Bind UDashboardSearch's open state to the workspace store so other surfaces
 // (e.g. the centered search button in the titlebar) can toggle the same modal.
@@ -16,41 +25,19 @@ const open = computed({
   },
 });
 
-interface OpenTabRow {
-  activityId: ActivityId;
-  tabId: string;
-  label: string;
-  icon?: string;
-  activityLabel: string;
-}
-
-// Surface every open tab in every activity as a quick-jump target — Cmd-K
-// becomes the only thing you need to switch context.
-const openTabRows = computed<OpenTabRow[]>(() => {
-  const rows: OpenTabRow[] = [];
-  for (const activity of activities) {
-    const tabs = workspace.tabsByActivity[activity.id] ?? [];
-    for (const tab of tabs) {
-      rows.push({
-        activityId: activity.id,
-        tabId: tab.id,
-        label: tab.label,
-        icon: tab.icon,
-        activityLabel: activity.label,
-      });
-    }
-  }
-  return rows;
-});
-
 function jumpToActivity(id: ActivityId): void {
   workspace.setActiveActivity(id);
   if (!workspace.sidebarOpen) workspace.toggleSidebar();
 }
 
-function jumpToTab(row: OpenTabRow): void {
-  workspace.setActiveActivity(row.activityId);
-  workspace.setActiveTab(row.activityId, row.tabId);
+function jumpToDataset(id: string): void {
+  workspace.selectDataset(id);
+  workspace.setActiveActivity("datasets");
+}
+
+function jumpToRun(id: string): void {
+  workspace.selectRun(id);
+  workspace.setActiveActivity("runs");
 }
 
 function jumpToSettingsSection(section: "general" | "theme" | "about"): void {
@@ -72,13 +59,23 @@ const groups = computed(() => [
     })),
   },
   {
-    id: "tabs",
-    label: "Open tabs",
-    items: openTabRows.value.map((row) => ({
-      label: row.label,
-      icon: row.icon,
-      suffix: row.activityLabel,
-      onSelect: () => jumpToTab(row),
+    id: "datasets",
+    label: "Datasets",
+    items: (datasets.value ?? []).map((dataset) => ({
+      label: dataset.title,
+      icon: "i-lucide-database",
+      suffix: "Dataset",
+      onSelect: () => jumpToDataset(dataset.id),
+    })),
+  },
+  {
+    id: "runs",
+    label: "Runs",
+    items: (runs.value ?? []).map((run) => ({
+      label: `${run.datasetTitle} · ${run.id.slice(0, 8)}`,
+      icon: "i-lucide-play",
+      suffix: run.state,
+      onSelect: () => jumpToRun(run.id),
     })),
   },
   {

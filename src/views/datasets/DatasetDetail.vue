@@ -11,20 +11,19 @@ import {
   useResumeRun,
   useRuns,
 } from "../../composables/useRuns";
-import type { OpenTab } from "../../stores/workspace";
+// Master/detail (EPI-58): DatasetsPanel keys this component by dataset id, so
+// all local state (view level, cursors, dialogs) is per-dataset by
+// construction.
+const props = defineProps<{ datasetId: string }>();
 
-const props = defineProps<{ tab: OpenTab }>();
-
-// Tabs in this activity use ids shaped like `dataset:<uuid>`. Strip the prefix
-// to get the dataset id this tab is bound to.
-const datasetId = computed(() => props.tab.id.replace(/^dataset:/, ""));
+const currentDatasetId = computed(() => props.datasetId);
 
 type DigitLevel = 2 | 4 | 6;
 const LEVELS: readonly DigitLevel[] = [2, 4, 6] as const;
 
 // Which model's results the courses table shows. Pure view state — switching
-// never starts work (EPI-68 view/action split). Fresh per tab: TabbedView
-// keys the component by tab id.
+// never starts work (EPI-68 view/action split). Fresh per dataset:
+// DatasetsPanel keys this component by dataset id.
 const viewLevel = ref<DigitLevel>(6);
 
 const queryClient = useQueryClient();
@@ -33,7 +32,7 @@ const queryClient = useQueryClient();
 // The run surface card renders from "the dataset's latest run" as the backend
 // reports it — not from a component-local run id — so it survives tab
 // close/reopen and app restart. Polls 250 ms while running.
-const { data: latestRun } = useLatestRun(datasetId);
+const { data: latestRun } = useLatestRun(currentDatasetId);
 const isRunning = computed(() => latestRun.value?.state === "running");
 
 // Global runs list (1 s heartbeat while anything runs) tells this tab about
@@ -41,7 +40,7 @@ const isRunning = computed(() => latestRun.value?.state === "running");
 const { data: allRuns } = useRuns();
 const activeElsewhere = computed(() => {
   const other = allRuns.value?.find(
-    (r) => r.state === "running" && r.datasetId !== datasetId.value,
+    (r) => r.state === "running" && r.datasetId !== currentDatasetId.value,
   );
   return other ?? null;
 });
@@ -49,7 +48,7 @@ const activeElsewhere = computed(() => {
 // --- Coverage (EPI-68) ---
 // Per-model classified/total counts: feeds the view-switcher chips and the
 // confirm panel's "already classified" line.
-const { data: coverage, refetch: refetchCoverage } = useCoverage(datasetId);
+const { data: coverage, refetch: refetchCoverage } = useCoverage(currentDatasetId);
 function coverageFor(level: DigitLevel) {
   return coverage.value?.find((c) => c.digitLevel === level) ?? null;
 }
@@ -70,7 +69,7 @@ const startError = ref<string | null>(null);
 
 const classify = useMutation({
   mutationFn: async () => {
-    const result = await commands.startRun({ datasetId: datasetId.value });
+    const result = await commands.startRun({ datasetId: currentDatasetId.value });
     if (result.status === "error") throw new Error(result.error);
     return result.data;
   },
@@ -136,7 +135,7 @@ function onResume(): void {
 // Surface this dataset's import state by reusing the cached datasets query
 // (it's already polled while any import is active). No extra IPC traffic.
 const { data: datasets } = useDatasets();
-const dataset = computed(() => datasets.value?.find((d) => d.id === datasetId.value));
+const dataset = computed(() => datasets.value?.find((d) => d.id === currentDatasetId.value));
 const isImporting = computed(() => dataset.value?.importState === "importing");
 const importFailed = computed(() => dataset.value?.importState === "failed");
 
@@ -144,8 +143,8 @@ const importFailed = computed(() => dataset.value?.importState === "failed");
 // exactly once so the table fills in.
 watch(isImporting, (now, before) => {
   if (before && !now) {
-    queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
-    queryClient.invalidateQueries({ queryKey: ["coverage", datasetId.value] });
+    queryClient.invalidateQueries({ queryKey: ["courses", currentDatasetId.value] });
+    queryClient.invalidateQueries({ queryKey: ["coverage", currentDatasetId.value] });
   }
 });
 
@@ -195,7 +194,7 @@ watch(
   (next, prev) => {
     if (!isRunning.value || next === prev) return;
     if (latestRun.value?.digitLevel === viewLevel.value) {
-      queryClient.invalidateQueries({ queryKey: ["courses", datasetId.value] });
+      queryClient.invalidateQueries({ queryKey: ["courses", currentDatasetId.value] });
     }
   },
 );
@@ -225,7 +224,7 @@ const {
   isError: coursesError,
   error: coursesErr,
 } = useCourses({
-  datasetId,
+  datasetId: currentDatasetId,
   modelId: computed(() => modelId.value ?? null),
   cursor,
   pageSize: PAGE_SIZE,
@@ -280,7 +279,7 @@ async function exportCsv(): Promise<void> {
   exportError.value = null;
   try {
     const result = await commands.exportResults({
-      datasetId: datasetId.value,
+      datasetId: currentDatasetId.value,
       modelId: modelId.value,
       includeTopCandidates: includeTopCandidates.value,
     });
@@ -298,7 +297,7 @@ async function exportCsv(): Promise<void> {
   <div class="h-full p-6 flex flex-col gap-6 overflow-auto">
     <header class="flex items-center gap-3">
       <UIcon name="i-lucide-database" class="size-5 text-(--ui-text-muted)" />
-      <h2 class="text-lg font-medium">{{ tab.label }}</h2>
+      <h2 class="text-lg font-medium">{{ dataset?.title ?? "Dataset" }}</h2>
       <span
         v-if="isImporting"
         class="text-(--ui-color-info-500) animate-pulse text-xs uppercase tracking-wide"
@@ -370,7 +369,7 @@ async function exportCsv(): Promise<void> {
           class="rounded-lg border border-(--ui-border-accented) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
         >
           <span class="text-(--ui-text) font-medium">
-            Classify {{ tab.label }} with all models
+            Classify {{ dataset?.title ?? "this dataset" }} with all models
           </span>
           <ul class="text-(--ui-text-muted) flex flex-col gap-0.5">
             <li v-for="row in confirmLevels" :key="row.level" class="tabular-nums">
@@ -748,7 +747,7 @@ async function exportCsv(): Promise<void> {
     </section>
 
     <p class="text-xs text-(--ui-text-dimmed)">
-      Dataset id: <code>{{ datasetId }}</code>
+      Dataset id: <code>{{ currentDatasetId }}</code>
     </p>
   </div>
 </template>
