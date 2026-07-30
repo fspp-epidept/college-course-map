@@ -8,23 +8,28 @@ import {
   useRunRate,
 } from "../../composables/useRuns";
 import { runStateMeta } from "./runState";
-import type { OpenTab } from "../../stores/workspace";
 
-const props = defineProps<{ tab: OpenTab }>();
+// Master/detail (EPI-58): RunsPanel keys this component by run id.
+const props = defineProps<{ runId: string }>();
 
-// Tab id shape: `run:<uuid>`.
-const runId = computed(() => props.tab.id.replace(/^run:/, ""));
+const currentRunId = computed(() => props.runId);
 
-const { data: run, isPending, isError, error } = useRun(runId);
+const { data: run, isPending, isError, error } = useRun(currentRunId);
+
+// Heading: dataset title + a short id suffix (same label the sidebar rows
+// and the old tab strip used).
+const heading = computed(() =>
+  run.value ? `${run.value.datasetTitle} · ${run.value.id.slice(0, 8)}` : "Run",
+);
 
 const pauseRun = usePauseRun();
 function onPause() {
-  pauseRun.mutate(runId.value);
+  pauseRun.mutate(currentRunId.value);
 }
 
 const resumeRun = useResumeRun();
 function onResume() {
-  resumeRun.mutate(runId.value);
+  resumeRun.mutate(currentRunId.value);
 }
 
 const rate = useRunRate(run);
@@ -59,7 +64,7 @@ function fmtTime(iso: string | null | undefined): string {
   <div class="h-full p-6 flex flex-col gap-4 overflow-auto">
     <header class="flex items-center gap-3">
       <UIcon name="i-lucide-play" class="size-5 text-(--ui-text-muted)" />
-      <h2 class="text-lg font-medium">{{ tab.label }}</h2>
+      <h2 class="text-lg font-medium">{{ heading }}</h2>
     </header>
 
     <p v-if="isPending" class="text-sm text-(--ui-text-dimmed)">Loading run…</p>
