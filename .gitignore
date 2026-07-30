@@ -63,3 +63,7 @@ __pycache__/
 # Maintainer-local config (private tooling references)
 CLAUDE.local.md
 .linear.toml
+
+# Synced agent skill packs (managed outside git)
+.agents/skills/
+.claude/skills/

@@ -1,6 +1,6 @@
 # Samples
 
-Small example input files for demos, testing, and onboarding. Tracked in git, unlike the gitignored `/data/` dev datasets.
+Small example input files for demos, testing, and onboarding. Tracked in git, unlike the gitignored `/data/` dev datasets. The course data here was provided with explicit permission for public distribution.
 
 | File | Contents |
 | --- | --- |
