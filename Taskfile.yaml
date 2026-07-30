@@ -27,9 +27,14 @@ tasks:
   dev:
     desc: Run the full Tauri app (Vite + native webview, IPC live)
     interactive: true
-    # WebKitGTK's DMABUF renderer crashes the webview under Wayland on NVIDIA
-    # ("Gdk Error 71 Protocol error"); disabling it falls back to a stable path.
-    # No-op on macOS/Windows.
+    # WebKitGTK 2.42+ composites through DMABUF buffer sharing. NVIDIA's
+    # proprietary driver mishandles that path under Wayland, killing the
+    # webview at startup ("Gdk Error 71 Protocol error") — a known WebKitGTK/
+    # NVIDIA issue, not something this app controls. The env var is the
+    # upstream-documented escape hatch: WebKit falls back to its non-DMABUF
+    # renderer (slightly slower compositing, fully stable). macOS/Windows
+    # don't read it. Dev-only today; the shipped Linux build needs the same
+    # guard set in main.rs before webview init — tracked in the backlog.
     env:
       WEBKIT_DISABLE_DMABUF_RENDERER: 1
     # bundle.resources ships runtimes/cpu; tauri dev fails on the missing
