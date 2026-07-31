@@ -6,7 +6,7 @@
 ### Features
 
 * combined multi-level CSV export and unique-rows mode ([#155](https://github.com/fspp-epidept/college-course-map/issues/155)) ([0c73f18](https://github.com/fspp-epidept/college-course-map/commit/0c73f18341d7a160b820efb839ed2a47c00c3e3b))
-* GPU inference via load-dynamic runtime packs (EPI-73) ([#151](https://github.com/fspp-epidept/college-course-map/issues/151)) ([62354a5](https://github.com/fspp-epidept/college-course-map/commit/62354a53a28b665f85dbe21fb94615c83e9001bf))
+* GPU inference via load-dynamic runtime packs ([#151](https://github.com/fspp-epidept/college-course-map/issues/151)) ([62354a5](https://github.com/fspp-epidept/college-course-map/commit/62354a53a28b665f85dbe21fb94615c83e9001bf))
 * round-trip CSV export, ccm columns, titles, top-5 candidates ([#153](https://github.com/fspp-epidept/college-course-map/issues/153)) ([330c47e](https://github.com/fspp-epidept/college-course-map/commit/330c47ead4d2bf870ca8d466ce970bf06accbd36))
 
 
