@@ -21,7 +21,7 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
 };
 
@@ -55,6 +55,10 @@ pub struct AppDb {
     rw: Mutex<Connection>,
     ro: Mutex<Connection>,
     path: PathBuf,
+    /// Set when [`AppDb::open_at`] had to set an unreplayable WAL aside to
+    /// open at all (EPI-105). User-facing copy; surfaced through the
+    /// runtime notices in Settings.
+    recovery_notice: Option<String>,
 }
 
 impl std::fmt::Debug for AppDb {
@@ -84,14 +88,44 @@ impl AppDb {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
-        let rw = Connection::open(&path).map_err(|e| e.to_string())?;
+        let (rw, recovery_notice) = match Connection::open(&path) {
+            Ok(conn) => (conn, None),
+            Err(e) if is_wal_replay_failure(&e) => {
+                let set_aside = set_aside_wal(&path, &e)?;
+                eprintln!(
+                    "startup: WAL replay failed ({e}); set aside as {} and reopened",
+                    set_aside.display()
+                );
+                let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+                (conn, Some(recovery_notice(&set_aside)))
+            }
+            Err(e) => return Err(e.to_string()),
+        };
         migrate(&rw)?;
         let ro = rw.try_clone().map_err(|e| e.to_string())?;
         Ok(Self {
             rw: Mutex::new(rw),
             ro: Mutex::new(ro),
             path,
+            recovery_notice,
         })
+    }
+
+    /// The user-facing notice from a WAL set-aside at open, if one happened.
+    #[must_use]
+    pub fn recovery_notice(&self) -> Option<&str> {
+        self.recovery_notice.as_deref()
+    }
+
+    /// Fold the WAL into the main file (EPI-105). Called after the startup
+    /// writes and on clean exit so an unclean exit later orphans the
+    /// smallest possible WAL — replay is the one open step this crate can't
+    /// make safe (duckdb/duckdb#19712). A plain `CHECKPOINT` errors
+    /// harmlessly when another transaction is open; callers log and go on.
+    pub fn checkpoint(&self) -> Result<(), String> {
+        self.rw()?
+            .execute_batch("CHECKPOINT")
+            .map_err(|e| e.to_string())
     }
 
     /// Borrow the read-write connection. The mutex is uncontended in single-user
@@ -110,6 +144,58 @@ impl AppDb {
     pub(crate) fn ro(&self) -> Result<MutexGuard<'_, Connection>, String> {
         self.ro.lock().map_err(|_| "ro mutex poisoned".to_owned())
     }
+}
+
+/// `DuckDB` wraps every exception raised while replaying `<db>.wal` at open
+/// in this prefix (`WriteAheadLog::Replay`). Matching on it — not on any
+/// open failure — keeps the set-aside below from ever touching the WAL of a
+/// database that failed to open for another reason (a lock held by a second
+/// instance, a missing directory), where the WAL is live data.
+fn is_wal_replay_failure(e: &duckdb::Error) -> bool {
+    e.to_string().contains("replaying WAL")
+}
+
+/// Move `<db>.wal` to `<db>.wal.corrupt-<unix seconds>` so the next open
+/// starts from the last checkpoint (EPI-105). The file is kept as forensic
+/// evidence for the upstream replay bug, never deleted. A replay failure
+/// with no WAL on disk is something else entirely — the original error
+/// stands.
+fn set_aside_wal(db: &Path, cause: &duckdb::Error) -> Result<PathBuf, String> {
+    let wal = wal_path(db);
+    if !wal.exists() {
+        return Err(cause.to_string());
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut set_aside = wal.clone().into_os_string();
+    set_aside.push(format!(".corrupt-{secs}"));
+    let set_aside = PathBuf::from(set_aside);
+    fs::rename(&wal, &set_aside).map_err(|e| {
+        format!("WAL replay failed ({cause}) and the WAL could not be set aside: {e}")
+    })?;
+    Ok(set_aside)
+}
+
+/// `DuckDB`'s WAL sits next to the database file as `<db>.wal`.
+fn wal_path(db: &Path) -> PathBuf {
+    let mut wal = db.as_os_str().to_owned();
+    wal.push(".wal");
+    PathBuf::from(wal)
+}
+
+fn recovery_notice(set_aside: &Path) -> String {
+    let name = set_aside.file_name().map_or_else(
+        || set_aside.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    format!(
+        "The database's write-ahead log could not be replayed at startup and was set \
+         aside as \"{name}\", so changes since the last checkpoint were not recovered. \
+         Nothing else is affected: classifications recompute from the results cache \
+         on the next run, and an interrupted import can be re-imported. The set-aside \
+         file is kept for diagnosis."
+    )
 }
 
 /// `<data>/college-course-map/app.duckdb` — same product-dir convention used by
@@ -231,7 +317,64 @@ fn insert_taxonomy_csv(conn: &Connection, digit_level: u8, data: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::migrate;
+    use super::{AppDb, migrate, wal_path};
+
+    /// A WAL `DuckDB` can't replay must not keep the app from opening
+    /// (EPI-105): it's set aside under a `.corrupt-*` name, the database
+    /// opens at its last checkpoint, and the notice is set. The fixture
+    /// reproduces the field error exactly — `INTERNAL Error: Failure while
+    /// replaying WAL file ... GetDefaultDatabase with no default database
+    /// set` — by pairing a database with a WAL whose entries reference a
+    /// table it doesn't have (`DuckDB` fumbles the catalog miss during
+    /// replay into that internal error).
+    #[test]
+    fn open_at_sets_aside_unreplayable_wal() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("ccm-wal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let donor = root.join("donor.duckdb");
+        let foreign_wal = {
+            let conn = duckdb::Connection::open(&donor).map_err(|e| e.to_string())?;
+            conn.execute_batch(
+                "CREATE TABLE not_in_app(x INTEGER); CHECKPOINT;
+                 INSERT INTO not_in_app VALUES (1), (2), (3);",
+            )
+            .map_err(|e| e.to_string())?;
+            // Copy while the connection is open — dropping it checkpoints
+            // and truncates the WAL.
+            let kept = root.join("kept.wal");
+            std::fs::copy(wal_path(&donor), &kept).map_err(|e| e.to_string())?;
+            kept
+        };
+
+        let path = root.join("app.duckdb");
+        drop(AppDb::open_at(path.clone())?);
+        std::fs::copy(&foreign_wal, wal_path(&path)).map_err(|e| e.to_string())?;
+
+        let db = AppDb::open_at(path.clone())?;
+        let notice = db.recovery_notice().ok_or("no recovery notice")?;
+        assert!(notice.contains(".wal.corrupt-"), "notice = {notice}");
+        assert!(!wal_path(&path).exists(), "bad WAL still in place");
+        let set_aside = std::fs::read_dir(&root)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains("app.duckdb.wal.corrupt-")
+            });
+        assert!(set_aside, "set-aside WAL missing");
+        // The database is usable: schema is migrated and writable.
+        db.rw()?
+            .execute_batch("SELECT COUNT(*) FROM ccm_taxonomy")
+            .map_err(|e| e.to_string())?;
+        db.checkpoint()?;
+        // A healthy open carries no notice.
+        drop(db);
+        assert!(AppDb::open_at(path)?.recovery_notice().is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 
     /// Full migration chain on a fresh database: schema applies, the 0003
     /// data hook seeds the taxonomy inside the same transaction, and a second

@@ -92,6 +92,10 @@ pub fn run() {
             // Failing here is unrecoverable (no app without storage), so we
             // surface the error and let Tauri short-circuit setup.
             let db = db::AppDb::open().map_err(|e| format!("open database: {e}"))?;
+            // A WAL set aside at open (EPI-105) is reported through the
+            // runtime notices below — the one startup-conditions surface the
+            // Settings UI already renders.
+            let db_notice = db.recovery_notice().map(str::to_owned);
             // Resolve the embedded model manifest against the models table so
             // every digit-level → model-id lookup goes through pinned rows
             // (stale rows from earlier families stay put for their cached
@@ -105,7 +109,15 @@ pub fn run() {
                 if swept > 0 {
                     eprintln!("startup: swept {swept} orphaned running run(s) to interrupted");
                 }
-                manifest::resolve_model_rows(&conn, manifest::load()?)?
+                let catalog = manifest::resolve_model_rows(&conn, manifest::load()?)?;
+                // Fold the startup writes (migrations, sweep, manifest rows)
+                // into the main file now (EPI-105): a crash later in this
+                // session then orphans only what was written after this
+                // point, and the next open has that much less WAL to replay.
+                if let Err(e) = conn.execute_batch("CHECKPOINT") {
+                    eprintln!("startup: checkpoint skipped: {e}");
+                }
+                catalog
             };
             app.manage(db);
             app.manage(catalog);
@@ -121,11 +133,12 @@ pub fn run() {
                     .path()
                     .resource_dir()
                     .map_err(|e| format!("resolve bundle resource dir: {e}"))?;
-                let state = runtime::startup(&settings, &resource_dir)?;
+                let mut state = runtime::startup(&settings, &resource_dir)?;
                 eprintln!(
                     "startup: ONNX Runtime {} loaded from pack '{}'",
                     state.ort_version, state.pack_id
                 );
+                state.notices.extend(db_notice);
                 app.manage(state);
             }
             // Models load lazily (EPI-3/EPI-56): the store starts empty and a
@@ -148,8 +161,24 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Tauri leaves `run` via `process::exit`, so managed state is
+            // never dropped and DuckDB never gets its close-time checkpoint.
+            // Do it explicitly (EPI-105): a clean exit leaves no WAL for the
+            // next launch to replay. Best effort — an in-flight run's flush
+            // holds the writer briefly; a checkpoint refused here just leaves
+            // the WAL for the next open, as before.
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager as _;
+                if let Some(db) = app.try_state::<db::AppDb>()
+                    && let Err(e) = db.checkpoint()
+                {
+                    eprintln!("exit: checkpoint skipped: {e}");
+                }
+            }
+        });
 }
 
 #[cfg(test)]
