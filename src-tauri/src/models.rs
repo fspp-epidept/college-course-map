@@ -267,12 +267,24 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
         // restart. (Switching runtime *packs* is the part that needs a
         // relaunch; see runtime.rs.)
         let settings = crate::config::read_settings()?;
-        let registry = inference::load_all_models(
-            &root,
-            &settings.execution_providers,
-            settings.max_cpu_threads,
-        )
-        .map_err(|e| e.to_string())?;
+        // Only providers the loaded pack carries are ever attempted
+        // (EPI-104): a settings entry the pack lacks is dropped here, not
+        // discovered by a failed registration.
+        let runtime = app.state::<crate::runtime::RuntimeState>();
+        let eps = runtime.registrable(&settings.execution_providers);
+        for skipped in settings
+            .execution_providers
+            .iter()
+            .filter(|ep| !eps.contains(ep))
+        {
+            eprintln!(
+                "execution provider {}: not in runtime pack '{}', skipped",
+                skipped.as_str(),
+                runtime.pack_id
+            );
+        }
+        let registry = inference::load_all_models(&root, &eps, settings.max_cpu_threads)
+            .map_err(|e| e.to_string())?;
         store.set(registry)
     })();
     store.end_loading();

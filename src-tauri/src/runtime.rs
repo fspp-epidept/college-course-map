@@ -118,9 +118,12 @@ pub struct RuntimePack {
     pub display_name: String,
     /// Rust target triple this pack's archives are built for.
     pub target: String,
-    /// EPs compiled into a runtime pack, most capable first (display
-    /// metadata — `is_available()` against the loaded dylib is the runtime
-    /// truth). Empty for libs packs, which carry no ONNX Runtime.
+    /// EPs compiled into a runtime pack, most capable first. A registration
+    /// precondition (EPI-104): a provider absent from the loaded pack's list
+    /// is never attempted, because `ort` rc.12 turns a failed-then-retried
+    /// registration into a native crash. Per-session resolution (which of
+    /// the attempted providers actually registered) lives on the loaded
+    /// models. Empty for libs packs, which carry no ONNX Runtime.
     pub eps: Vec<String>,
     pub layout: PackLayout,
     /// Companion libs pack (by id) that satisfies this runtime pack's EP
@@ -572,6 +575,22 @@ pub struct RuntimeState {
     pub notices: Vec<String>,
 }
 
+impl RuntimeState {
+    /// The user's EP priority list restricted to providers the loaded pack
+    /// claims to carry (EPI-104), order preserved. `Cpu` always passes: it's
+    /// the implicit provider in every ONNX Runtime build and the fallback
+    /// boundary `register_eps` stops at. Attempting a provider the dylib
+    /// lacks is not a harmless "not used" — see `inference::FailedEps`.
+    #[must_use]
+    pub fn registrable(&self, priority: &[EpKind]) -> Vec<EpKind> {
+        priority
+            .iter()
+            .copied()
+            .filter(|ep| *ep == EpKind::Cpu || self.eps.iter().any(|e| e == ep.as_str()))
+            .collect()
+    }
+}
+
 /// Choose the pack this process will load. An explicitly preferred pack
 /// (EPI-94, Settings → Compute "Make active") wins when installed — an
 /// explicit choice can never be shadowed by manifest order. Otherwise the
@@ -973,7 +992,42 @@ pub(crate) fn relaunch_app(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EpKind, load_manifest};
+    use super::{EpKind, RuntimeState, load_manifest};
+
+    fn state(eps: &[&str]) -> RuntimeState {
+        RuntimeState {
+            pack_id: "test".to_owned(),
+            ort_version: "0".to_owned(),
+            eps: eps.iter().map(|e| (*e).to_owned()).collect(),
+            notices: Vec::new(),
+        }
+    }
+
+    /// The settings priority only keeps providers the loaded pack claims,
+    /// in the user's order, with `Cpu` always allowed through (EPI-104).
+    #[test]
+    fn registrable_filters_priority_by_pack_eps() {
+        let windows_default = [
+            EpKind::Cuda,
+            EpKind::TensorRt,
+            EpKind::DirectMl,
+            EpKind::Cpu,
+        ];
+        // The shipped CPU-only pack: nothing but CPU survives — DirectML is
+        // never attempted, which is the whole fix.
+        assert_eq!(state(&["cpu"]).registrable(&windows_default), [EpKind::Cpu]);
+        // A CUDA pack keeps the GPU entries it carries, in priority order.
+        assert_eq!(
+            state(&["cuda", "tensorrt"]).registrable(&windows_default),
+            [EpKind::Cuda, EpKind::TensorRt, EpKind::Cpu]
+        );
+        // User reorder is respected; `Cpu` passes even if the pack list
+        // omits it.
+        assert_eq!(
+            state(&["tensorrt"]).registrable(&[EpKind::Cpu, EpKind::TensorRt]),
+            [EpKind::Cpu, EpKind::TensorRt]
+        );
+    }
 
     /// The startup sweep must remove `.part` archives and staging dirs while
     /// leaving installed pack directories untouched (EPI-88).

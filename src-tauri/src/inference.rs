@@ -98,21 +98,72 @@ pub struct Classification {
     pub probability: f32,
 }
 
+/// Execution providers whose registration failed earlier in this process
+/// (EPI-104). Retrying a failed provider on a later session is the one lethal
+/// path in `ort` 2.0.0-rc.12: `ep::DirectML::register` caches the DML API
+/// table in a `std`-flavoured `OnceLock` whose `get_or_try_init` marks the
+/// cell completed even when the init closure returns `Err`, so the second
+/// attempt reads zeroed memory as the API table and calls through a null
+/// function pointer (`0xc0000005` at offset 0 on Windows, `SIGSEGV` on
+/// Linux). Success-then-reuse is safe — a valid table is cached — so only
+/// failures are memoised, for the process lifetime. Per-session registration
+/// itself is required ONNX Runtime semantics (EPs bind to `SessionOptions`);
+/// this hoists the *decision*, not the registration.
+struct FailedEps(Mutex<Vec<EpKind>>);
+
+impl FailedEps {
+    const fn new() -> Self {
+        Self(Mutex::new(Vec::new()))
+    }
+
+    fn contains(&self, ep: EpKind) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&ep)
+    }
+
+    fn record(&self, ep: EpKind) {
+        let mut failed = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !failed.contains(&ep) {
+            failed.push(ep);
+        }
+    }
+}
+
+static FAILED_EPS: FailedEps = FailedEps::new();
+
 /// Register execution providers on a session builder in priority order
 /// (EPI-73). Returns the first EP that registered successfully — the one ONNX
 /// Runtime will prefer when assigning graph nodes — or `Cpu` when none did.
 ///
-/// A failed registration is the designed fallback path (EP not in the loaded
-/// pack's dylib, CUDA/cuDNN/TensorRT libs not installed on this machine, wrong
-/// platform), so it logs and continues rather than erroring. `Cpu` in the list
-/// is the fallback boundary: entries after it are below the implicit CPU EP by
-/// definition and never register.
+/// A failed registration is the designed fallback path (CUDA/cuDNN/TensorRT
+/// libs not installed on this machine, driver too old), so it logs and
+/// continues rather than erroring — and is remembered in [`FAILED_EPS`] so no
+/// later session retries it. Callers pass a list already filtered against the
+/// loaded pack's claimed providers (`RuntimeState::registrable`); the memo is
+/// the second guard for a pack whose metadata claims a provider its dylib
+/// doesn't carry. `Cpu` in the list is the fallback boundary: entries after it
+/// are below the implicit CPU EP by definition and never register.
 fn register_eps(
     builder: &mut ort::session::builder::SessionBuilder,
     eps: &[EpKind],
 ) -> Option<EpKind> {
     let mut resolved = None;
-    for ep in eps {
+    for &ep in eps {
+        if ep == EpKind::Cpu {
+            break;
+        }
+        if FAILED_EPS.contains(ep) {
+            eprintln!(
+                "execution provider {}: skipped (failed earlier in this process)",
+                ep.as_str()
+            );
+            continue;
+        }
         let result = match ep {
             EpKind::Cpu => break,
             EpKind::TensorRt => ep::TensorRT::default().register(builder),
@@ -123,10 +174,13 @@ fn register_eps(
         match result {
             Ok(()) => {
                 if resolved.is_none() {
-                    resolved = Some(*ep);
+                    resolved = Some(ep);
                 }
             }
-            Err(e) => eprintln!("execution provider {}: not used: {e}", ep.as_str()),
+            Err(e) => {
+                FAILED_EPS.record(ep);
+                eprintln!("execution provider {}: not used: {e}", ep.as_str());
+            }
         }
     }
     resolved
@@ -587,7 +641,28 @@ impl ModelStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_ccm_code, softmax_denom, top5_indices};
+    use super::{FailedEps, normalize_ccm_code, softmax_denom, top5_indices};
+    use crate::runtime::EpKind;
+
+    /// A provider that failed once is remembered for the process; others are
+    /// unaffected and repeats don't accumulate (EPI-104).
+    #[test]
+    fn failed_eps_memoises_failures_only() {
+        let failed = FailedEps::new();
+        assert!(!failed.contains(EpKind::DirectMl));
+        failed.record(EpKind::DirectMl);
+        failed.record(EpKind::DirectMl);
+        assert!(failed.contains(EpKind::DirectMl));
+        assert!(!failed.contains(EpKind::Cuda));
+        assert_eq!(
+            failed
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+    }
 
     /// `p(argmax)` in the max-shifted form the pipeline uses.
     fn softmax_at(row_logits: &[f32], z_max: f32) -> f32 {
