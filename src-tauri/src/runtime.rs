@@ -567,7 +567,8 @@ pub struct RuntimeState {
     pub eps: Vec<String>,
     /// Startup conditions the user must be able to see without a terminal
     /// (EPI-87): damaged-pack fallback, missing CUDA library directory,
-    /// failed preloads. Fixed for the process lifetime; surfaced by
+    /// failed preloads — and, from `lib.rs`, a database WAL set aside at
+    /// open (EPI-105). Fixed for the process lifetime; surfaced by
     /// `runtime_status`.
     pub notices: Vec<String>,
 }
