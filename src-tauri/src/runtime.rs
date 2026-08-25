@@ -293,7 +293,7 @@ pub fn install_pack(
 /// the next launch retries the same invalidation.
 pub fn invalidate_pack(dir: &Path) {
     if let Err(e) = std::fs::remove_dir_all(dir) {
-        eprintln!("failed to remove damaged pack {}: {e}", dir.display());
+        log::warn!("failed to remove damaged pack {}: {e}", dir.display());
     }
 }
 
@@ -537,7 +537,7 @@ pub fn preload_support_libs(dir: &Path) -> Result<usize, String> {
         }
     }
     for path in &pending {
-        eprintln!("support lib not preloaded: {}", path.display());
+        log::warn!("support lib not preloaded: {}", path.display());
     }
     Ok(loaded)
 }
@@ -723,7 +723,7 @@ pub(crate) fn startup(
     // by a mid-download kill.
     let swept = runtimes_root().map_or(0, |root| sweep_partial_downloads(&root));
     if swept > 0 {
-        eprintln!("startup: swept {swept} partial pack download(s)");
+        log::info!("startup: swept {swept} partial pack download(s)");
     }
     let (mut state, pack_dir) = resolve_startup_pack(
         &manifest,
@@ -741,7 +741,7 @@ pub(crate) fn startup(
         if state.pack_id == "cpu" {
             return Err(e);
         }
-        eprintln!(
+        log::warn!(
             "startup: runtime pack '{}' failed to load: {e}",
             state.pack_id
         );
@@ -776,12 +776,12 @@ pub(crate) fn startup(
     let libs_dir = installed_libs_dir(&manifest, &state);
     if let Some(dir) = user_dir.or(libs_dir.as_deref()) {
         match preload_support_libs(dir) {
-            Ok(count) => eprintln!(
+            Ok(count) => log::info!(
                 "startup: preloaded {count} GPU support libs from {}",
                 dir.display()
             ),
             Err(e) => {
-                eprintln!("startup: GPU support lib preload skipped: {e}");
+                log::warn!("startup: GPU support lib preload skipped: {e}");
                 state.notices.push(format!(
                     "GPU support libraries could not be loaded from {}: {e}",
                     dir.display()

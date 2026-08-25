@@ -277,7 +277,7 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
             .iter()
             .filter(|ep| !eps.contains(ep))
         {
-            eprintln!(
+            log::info!(
                 "execution provider {}: not in runtime pack '{}', skipped",
                 skipped.as_str(),
                 runtime.pack_id
@@ -304,7 +304,7 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
             )
         }
         Err(repair_err) => {
-            eprintln!("post-load-failure repair: {repair_err}");
+            log::warn!("post-load-failure repair: {repair_err}");
             e
         }
     });
@@ -329,11 +329,11 @@ pub(crate) fn autoload_if_present(app: &AppHandle) {
         match all_present {
             Ok(true) => {
                 if let Err(e) = load_now(&app) {
-                    eprintln!("model autoload failed: {e}");
+                    log::error!("model autoload failed: {e}");
                 }
             }
             Ok(false) => {} // connected first run: Models panel offers download
-            Err(e) => eprintln!("model autoload skipped: {e}"),
+            Err(e) => log::warn!("model autoload skipped: {e}"),
         }
     });
 }

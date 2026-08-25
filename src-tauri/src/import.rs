@@ -390,7 +390,7 @@ impl ImportTask {
     fn mark_ready(&self, imported: u64) {
         let db = self.app.state::<AppDb>();
         let Ok(conn) = db.rw() else {
-            eprintln!(
+            log::error!(
                 "import {}: rw mutex poisoned at mark_ready",
                 self.dataset_id
             );
@@ -405,21 +405,21 @@ impl ImportTask {
                 &self.dataset_id,
             ],
         ) {
-            eprintln!("import {}: mark_ready: {e}", self.dataset_id);
+            log::error!("import {}: mark_ready: {e}", self.dataset_id);
         }
         // CHECKPOINT compacts the WAL into the main file. Without this, the
         // first read against the freshly-imported dataset pays the merge cost
         // for every row — on a 2M-row import that shows up as a UI hang
         // when opening the dataset tab.
         if let Err(e) = conn.execute_batch("CHECKPOINT") {
-            eprintln!("import {}: post-import checkpoint: {e}", self.dataset_id);
+            log::warn!("import {}: post-import checkpoint: {e}", self.dataset_id);
         }
     }
 
     fn mark_failed(&self, err: &str) {
         let db = self.app.state::<AppDb>();
         let Ok(conn) = db.rw() else {
-            eprintln!(
+            log::error!(
                 "import {}: rw mutex poisoned at mark_failed",
                 self.dataset_id
             );
@@ -429,7 +429,7 @@ impl ImportTask {
             "UPDATE datasets SET import_state = 'failed', import_error = ? WHERE id = ?",
             params![err, &self.dataset_id],
         ) {
-            eprintln!("import {}: mark_failed: {e}", self.dataset_id);
+            log::error!("import {}: mark_failed: {e}", self.dataset_id);
         }
     }
 }
