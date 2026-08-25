@@ -909,7 +909,7 @@ impl RunPipeline {
             // 'running' which is technically wrong, but the alternative
             // (panic in a worker thread) is worse. The cancel flag is left in
             // the registry — also unrecoverable, and harmless.
-            eprintln!("run {}: rw mutex poisoned", self.run_id);
+            log::error!("run {}: rw mutex poisoned", self.run_id);
             return;
         };
         match outcome {
@@ -932,7 +932,7 @@ impl RunPipeline {
                         &self.run_id,
                     ],
                 ) {
-                    eprintln!("run {}: interrupt finalize: {e}", self.run_id);
+                    log::error!("run {}: interrupt finalize: {e}", self.run_id);
                 }
             }
             Ok(o) => {
@@ -952,7 +952,7 @@ impl RunPipeline {
                         &self.run_id,
                     ],
                 ) {
-                    eprintln!("run {}: finalize: {e}", self.run_id);
+                    log::error!("run {}: finalize: {e}", self.run_id);
                 }
             }
             Err(err) => {
@@ -1075,7 +1075,7 @@ impl RunPipeline {
                         conn.execute_batch("CHECKPOINT").map_err(|e| e.to_string())
                     });
                     if let Err(e) = result {
-                        eprintln!("run {}: periodic checkpoint skipped: {e}", self.run_id);
+                        log::warn!("run {}: periodic checkpoint skipped: {e}", self.run_id);
                     }
                     last_checkpoint = std::time::Instant::now();
                 }
@@ -1205,7 +1205,7 @@ impl RunPipeline {
         if let Ok(conn) = db.rw()
             && let Err(e) = conn.execute_batch("DROP TABLE IF EXISTS run_misses")
         {
-            eprintln!("run {}: drop misses temp table: {e}", self.run_id);
+            log::warn!("run {}: drop misses temp table: {e}", self.run_id);
         }
     }
 

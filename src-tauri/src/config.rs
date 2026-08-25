@@ -315,7 +315,7 @@ pub(crate) fn list_themes() -> Result<Vec<ThemeSummary>, String> {
                 name: theme.name,
                 color_scheme: theme.color_scheme,
             }),
-            Err(err) => eprintln!("skipping theme file {}: {err}", path.display()),
+            Err(err) => log::warn!("skipping theme file {}: {err}", path.display()),
         }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

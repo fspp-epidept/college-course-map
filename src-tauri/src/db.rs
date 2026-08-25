@@ -92,7 +92,7 @@ impl AppDb {
             Ok(conn) => (conn, None),
             Err(e) if is_wal_replay_failure(&e) => {
                 let set_aside = set_aside_wal(&path, &e)?;
-                eprintln!(
+                log::warn!(
                     "startup: WAL replay failed ({e}); set aside as {} and reopened",
                     set_aside.display()
                 );

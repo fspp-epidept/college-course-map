@@ -115,6 +115,6 @@ pub(crate) fn handle_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::
     }
 
     if let Err(err) = app.emit(&format!("menu:{id}"), ()) {
-        eprintln!("failed to emit menu event menu:{id}: {err}");
+        log::warn!("failed to emit menu event menu:{id}: {err}");
     }
 }

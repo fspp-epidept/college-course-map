@@ -124,6 +124,18 @@ async importCsv(req: ImportRequest) : Promise<Result<ImportStarted, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Open the logs folder in the platform file manager (Settings → About).
+ * Rust-side opener call: no capability widening for the WebView.
+ */
+async openLogsDir() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_logs_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listMetrics() : Promise<Result<AppMetrics, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_metrics") };

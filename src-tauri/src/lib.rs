@@ -7,6 +7,7 @@ mod export;
 pub mod format;
 mod import;
 pub mod inference;
+mod logging;
 pub mod manifest;
 mod metrics;
 mod models;
@@ -39,6 +40,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             datasets::list_datasets,
             export::export_results,
             import::import_csv,
+            logging::open_logs_dir,
             metrics::list_metrics,
             models::cancel_download,
             models::download_models,
@@ -69,9 +71,13 @@ fn specta_builder() -> Builder<tauri::Wry> {
     reason = "startup failure is unrecoverable; panicking is the canonical Tauri pattern"
 )]
 pub fn run() {
+    logging::install_panic_hook();
     let specta = specta_builder();
 
+    // The log plugin goes first so every later step — DB open, runtime
+    // pack, model autoload — lands in the file (EPI-109).
     let builder = tauri::Builder::default()
+        .plugin(logging::plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
 
@@ -107,7 +113,7 @@ pub fn run() {
                 // (resumable) before any command can observe it.
                 let swept = runs::sweep_orphaned_runs(&conn)?;
                 if swept > 0 {
-                    eprintln!("startup: swept {swept} orphaned running run(s) to interrupted");
+                    log::info!("startup: swept {swept} orphaned running run(s) to interrupted");
                 }
                 let catalog = manifest::resolve_model_rows(&conn, manifest::load()?)?;
                 // Fold the startup writes (migrations, sweep, manifest rows)
@@ -115,7 +121,7 @@ pub fn run() {
                 // session then orphans only what was written after this
                 // point, and the next open has that much less WAL to replay.
                 if let Err(e) = conn.execute_batch("CHECKPOINT") {
-                    eprintln!("startup: checkpoint skipped: {e}");
+                    log::warn!("startup: checkpoint skipped: {e}");
                 }
                 catalog
             };
@@ -134,9 +140,10 @@ pub fn run() {
                     .resource_dir()
                     .map_err(|e| format!("resolve bundle resource dir: {e}"))?;
                 let mut state = runtime::startup(&settings, &resource_dir)?;
-                eprintln!(
+                log::info!(
                     "startup: ONNX Runtime {} loaded from pack '{}'",
-                    state.ort_version, state.pack_id
+                    state.ort_version,
+                    state.pack_id
                 );
                 state.notices.extend(db_notice);
                 app.manage(state);
@@ -175,7 +182,7 @@ pub fn run() {
                 if let Some(db) = app.try_state::<db::AppDb>()
                     && let Err(e) = db.checkpoint()
                 {
-                    eprintln!("exit: checkpoint skipped: {e}");
+                    log::warn!("exit: checkpoint skipped: {e}");
                 }
             }
         });

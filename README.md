@@ -42,6 +42,21 @@ The active provider is shown at the top of the Compute page, and every run recor
 
 If a GPU backend fails on your machine (old driver, provider fails to load), the Compute page shows a warning and the app falls back safely. To disable GPU inference, make the **CPU** backend active again and relaunch. The **Provider priority** list under Advanced reorders execution providers within the active backend; changing it only requires a model reload, not a relaunch.
 
+## Troubleshooting
+
+The app writes a diagnostic log to `logs/app.log` in its data folder. It records startup steps, provider resolution, model load results, and errors; never course data. To attach it to a bug report, open **Settings → About** and click **Open logs folder**. The folder lives at:
+
+- Windows: `%APPDATA%\college-course-map\logs`
+- macOS: `~/Library/Application Support/college-course-map/logs`
+- Linux: `~/.local/share/college-course-map/logs`
+
+> [!NOTE]
+> The macOS build is not yet signed or notarized, so Gatekeeper reports the downloaded app as damaged. Copy the app to `/Applications`, then clear the quarantine flag once:
+>
+> ```sh
+> xattr -d com.apple.quarantine "/Applications/course-classifier.app"
+> ```
+
 ## Development
 
 Everything below is for working on the app itself. If you installed a release build, you're done; none of this applies.

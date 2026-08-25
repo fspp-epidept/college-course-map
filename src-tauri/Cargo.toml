@@ -67,6 +67,9 @@ sha2 = "0.10"
 # are .tgz on Linux/macOS and .zip on Windows; GPU support-library packs
 # (EPI-84) are PyPI wheels — zips — on every platform.
 zip = { version = "8", default-features = false, features = ["deflate"] }
+tauri-plugin-log = "2"
+log = "0.4"
+tracing = { version = "0.1", features = ["log"] }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 flate2 = "1"

@@ -158,7 +158,7 @@ fn register_eps(
             break;
         }
         if FAILED_EPS.contains(ep) {
-            eprintln!(
+            log::info!(
                 "execution provider {}: skipped (failed earlier in this process)",
                 ep.as_str()
             );
@@ -179,7 +179,7 @@ fn register_eps(
             }
             Err(e) => {
                 FAILED_EPS.record(ep);
-                eprintln!("execution provider {}: not used: {e}", ep.as_str());
+                log::warn!("execution provider {}: not used: {e}", ep.as_str());
             }
         }
     }
