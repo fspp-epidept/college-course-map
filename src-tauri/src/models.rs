@@ -379,6 +379,7 @@ fn download_all(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("build http client: {e}"))?;
 
     let downloads = app.state::<DownloadState>();
+    let mut changed = false;
     for entry in &catalog.manifest.model {
         let dir = root.join(&entry.app_subdir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -394,8 +395,21 @@ fn download_all(app: &AppHandle) -> Result<(), String> {
                 continue;
             }
             download_one(app, &client, entry, file, &dest)?;
+            changed = true;
             let _ = ModelsStateChanged {}.emit(app);
         }
+    }
+    // A changed model file invalidates the compiled CoreML cache, which ONNX
+    // Runtime keys by path and never invalidates itself (EPI-108).
+    if changed
+        && let Ok(cache) = inference::coreml_cache_dir()
+        && cache.exists()
+        && let Err(e) = std::fs::remove_dir_all(&cache)
+    {
+        log::warn!(
+            "coreml: could not clear compiled-model cache {}: {e}",
+            cache.display()
+        );
     }
     Ok(())
 }

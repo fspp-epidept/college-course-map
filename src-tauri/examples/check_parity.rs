@@ -6,6 +6,10 @@
 //! near-tied logits to flip the argmax, while the Python reference was captured
 //! with the same opt level as Rust release. Mismatches in release mode are real
 //! parity failures and must be investigated.
+//!
+//! Parity is CPU-only by decision (EPI-73). `--ep NAME` (e.g. `--ep coreml`)
+//! registers another provider ahead of CPU and reports the same numbers, for
+//! measuring whether a provider is fit to ship (EPI-108) — not for gating.
 
 use std::collections::BTreeMap;
 
@@ -32,8 +36,9 @@ struct ParityEntry {
 const LOGIT_TOLERANCE: f32 = 5e-5;
 
 fn main() -> anyhow::Result<()> {
-    // Parity is CPU-only by decision (EPI-73): GPU float math is not
-    // bit-identical to the Python reference, and that's expected, not drift.
+    let eps = parse_eps()?;
+    // GPU float math is not bit-identical to the Python reference; a non-CPU
+    // provider here is a measurement, not the parity gate.
     runtime::init_ort(&runtime::dev_cpu_pack_dir())
         .map_err(|e| anyhow::anyhow!("{e} — run `task runtimes:fetch` first"))?;
 
@@ -71,7 +76,11 @@ fn main() -> anyhow::Result<()> {
             other => anyhow::bail!("unknown model subdir: {other}"),
         };
         eprintln!("Loading {subdir} ({} inputs)…", items.len());
-        let model = inference::load_model(&root.join(&subdir), digit_level, &[EpKind::Cpu], 0)?;
+        let model = inference::load_model(&root.join(&subdir), digit_level, &eps, 0)?;
+        eprintln!(
+            "  resolved execution provider: {}",
+            model.resolved_ep.as_str()
+        );
 
         for entry in items {
             total += 1;
@@ -134,4 +143,26 @@ fn run_with_context(
     entry: &ParityEntry,
 ) -> anyhow::Result<inference::Classification> {
     classify(model, &entry.input).map_err(|e| anyhow::anyhow!("classify {:?}: {e}", entry.input))
+}
+
+/// `--ep NAME` → `[NAME, cpu]`; absent (or `cpu`) → `[cpu]`.
+fn parse_eps() -> anyhow::Result<Vec<EpKind>> {
+    let mut it = std::env::args().skip(1);
+    let mut eps = vec![EpKind::Cpu];
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--ep" => {
+                let name = it
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--ep needs a value"))?;
+                let ep: EpKind = serde_json::from_value(serde_json::Value::String(name.clone()))
+                    .map_err(|_| anyhow::anyhow!("unknown ep '{name}'"))?;
+                if ep != EpKind::Cpu {
+                    eps.insert(0, ep);
+                }
+            }
+            other => anyhow::bail!("unknown flag '{other}' (only --ep NAME)"),
+        }
+    }
+    Ok(eps)
 }

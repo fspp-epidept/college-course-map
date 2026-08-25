@@ -141,18 +141,18 @@ sha256 = "72207a283ec9886e1968a4183636a7665c78e2154d4f4adc16e61193dd7a74f1"
 size = 288348147
 
 # --- macOS aarch64 ---
-# The official osx build includes the CoreML EP, but the pack does not claim
-# it (decision 2026-08-25, EPI-107): the NeuralNetwork-format CoreML EP fails
-# at run time on ModernBERT, and `eps` is a registration precondition
-# (EPI-104), so listing it would make every Mac fail by default. Re-add
-# "coreml" only when the EPI-108 spike proves parity. No separate GPU pack
-# and never a libs pack — CoreML is built into the OS.
+# The official osx build includes the CoreML EP. It is claimed here but NOT
+# in the macOS default priority (EPI-108 experiment): the app registers it
+# in MLProgram format, and a user opts in by moving CoreML above CPU under
+# Settings → Inference → Advanced. `eps` is a registration precondition
+# (EPI-104); drop "coreml" again if the experiment fails. No separate GPU
+# pack and never a libs pack — CoreML is built into the OS.
 
 [[pack]]
 id = "cpu"
-display_name = "CPU"
+display_name = "CPU + CoreML (experimental)"
 target = "aarch64-apple-darwin"
-eps = ["cpu"]
+eps = ["coreml", "cpu"]
 layout = "onnxruntime"
 
 [[pack.archives]]
