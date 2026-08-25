@@ -595,10 +595,7 @@ impl ModelStore {
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.registry
-            .read()
-            .ok()
-            .is_some_and(|guard| guard.is_some())
+        self.registry.read().is_ok_and(|guard| guard.is_some())
     }
 
     pub fn is_loading(&self) -> bool {
