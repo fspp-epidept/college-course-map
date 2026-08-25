@@ -62,12 +62,15 @@ impl EpKind {
 /// Platform-natural default EP priority. `cuda` above `tensorrt` on purpose:
 /// TRT compiles engines per input shape and our `BatchLongest` padding
 /// produces variable shapes — TRT stays opt-in-by-reorder until measured
-/// (EPI-73 flag 1).
+/// (EPI-73 flag 1). macOS is CPU-only (EPI-107): `CoreML` fails at run time
+/// on `ModernBERT` and the macOS pack no longer claims it, so it would be
+/// filtered out anyway — keeping the default honest avoids a dead row in
+/// Settings.
 #[must_use]
 pub fn default_priority() -> Vec<EpKind> {
     #[cfg(target_os = "macos")]
     {
-        vec![EpKind::CoreMl, EpKind::Cpu]
+        vec![EpKind::Cpu]
     }
     #[cfg(target_os = "windows")]
     {
