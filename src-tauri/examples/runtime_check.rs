@@ -47,6 +47,9 @@ fn main() -> anyhow::Result<()> {
 
     let root = inference::models_root().map_err(anyhow::Error::msg)?;
     let started = std::time::Instant::now();
+    // Same pack filter the app applies (EPI-104): providers the resolved
+    // pack doesn't carry are never attempted.
+    let eps = state.registrable(&eps);
     let model = inference::load_model(&root.join("two-digit"), 2, &eps, 0)?;
     println!(
         "resolved EP          : {} (session built in {:.1?})",
