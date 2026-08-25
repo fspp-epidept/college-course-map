@@ -31,7 +31,7 @@ Download the installer for your platform from the [latest release](https://githu
 
 ## GPU acceleration
 
-CPU inference works out of the box on every platform and needs no configuration. On macOS, the default pack already includes CoreML; there is nothing to set up.
+CPU inference works out of the box on every platform and needs no configuration. On macOS the app runs on CPU. CoreML stays off until it passes the parity check against the Python reference.
 
 On Windows or Linux with an NVIDIA GPU, open **Settings → Compute**:
 
