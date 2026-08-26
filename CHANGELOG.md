@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.4.0...course-classifier-v0.5.0) (2026-08-26)
+
+
+### Features
+
+* CoreML in MLProgram format as an opt-in macOS experiment ([#174](https://github.com/fspp-epidept/college-course-map/issues/174)) ([5bebf2a](https://github.com/fspp-epidept/college-course-map/commit/5bebf2afa1fb55b0918ccb9e0d626364e09b5d90))
+* diagnostic log file with Open logs folder in About ([#173](https://github.com/fspp-epidept/college-course-map/issues/173)) ([c55a937](https://github.com/fspp-epidept/college-course-map/commit/c55a93765206bf2e64adc6955ab3ae9d15494a89))
+* rewrite fp32 Neg to Mul(-1) in ONNX export for CoreML ([#175](https://github.com/fspp-epidept/college-course-map/issues/175)) ([7e98815](https://github.com/fspp-epidept/college-course-map/commit/7e98815523ea742e1854bb3b7be4b0e9a9e5550c))
+
+
+### Bug Fixes
+
+* never attempt execution providers the runtime pack lacks ([#168](https://github.com/fspp-epidept/college-course-map/issues/168)) ([008dd1b](https://github.com/fspp-epidept/college-course-map/commit/008dd1be251938d7a0ab2db988695c204ed79e62))
+* stop attempting CoreML on macOS until it is validated ([#172](https://github.com/fspp-epidept/college-course-map/issues/172)) ([806ab05](https://github.com/fspp-epidept/college-course-map/commit/806ab056ee71c545383a2f930e0607bbdba927e3))
+* survive an unreplayable DuckDB WAL at startup ([#169](https://github.com/fspp-epidept/college-course-map/issues/169)) ([77c3654](https://github.com/fspp-epidept/college-course-map/commit/77c3654bfa4f079254e4384e30cd6328f7803158))
+
 ## [0.4.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.3.0...course-classifier-v0.4.0) (2026-07-30)
 
 
