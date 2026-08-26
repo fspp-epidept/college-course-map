@@ -16,8 +16,10 @@ import os
 import sys
 from pathlib import Path
 
+import onnx
 from huggingface_hub import HfApi, create_repo
 
+from _lib import neg_rewrite
 from _lib.models import MODELS, ModelSpec
 
 HERE = Path(__file__).parent
@@ -48,7 +50,14 @@ def repo_id_for(spec: ModelSpec, username: str) -> str:
     return f"{username}/{spec.onnx_repo_slug}"
 
 
-def render_model_card(spec: ModelSpec) -> str:
+NEG_REWRITE_NOTE = """
+## Export pass: fp32 `Neg` → `Mul(x, -1.0)`
+
+Every fp32 `Neg` node in the exported graph (the rotary `rotate_half`, two per layer) is rewritten to `Mul(x, -1.0)`. ONNX Runtime's CoreML execution provider has no `Neg` builder, so the original export split every transformer layer into CoreML/CPU partitions around them. `Neg(x)` and `Mul(x, -1.0)` are bit-identical in IEEE float; the conversion pipeline asserts zero output difference between the original and rewritten graphs on every run. The graph carries `metadata_props` `coreml_neg_rewrite=1`. The unmodified export is the previous revision of this repo.
+"""
+
+
+def render_model_card(spec: ModelSpec, neg_rewritten: bool) -> str:
     return f"""---
 license: mit
 language: en
@@ -71,7 +80,7 @@ Exported via `optimum-cli export onnx --task text-classification`. Bit-for-bit p
     {{SUBJECT_CODE}} {{CATALOG_NUMBER}} --- {{COURSE_TITLE}}
 
 Match this format exactly at inference time.
-"""
+{NEG_REWRITE_NOTE if neg_rewritten else ""}"""
 
 
 def check_env() -> tuple[str, str]:
@@ -108,7 +117,8 @@ def upload_one(spec: ModelSpec, username: str, token: str, api: HfApi) -> str:
 
     # Write the model card into the directory so upload_folder picks it up.
     card_path = out_dir / "README.md"
-    card_path.write_text(render_model_card(spec))
+    model = onnx.load(str(out_dir / "model.onnx"), load_external_data=False)
+    card_path.write_text(render_model_card(spec, neg_rewrite.is_stamped(model)))
 
     # Idempotent: returns existing repo if already created.
     create_repo(repo_id, token=token, exist_ok=True, repo_type="model")

@@ -33,6 +33,7 @@ tasks:
     sources:
       - convert.py
       - _lib/**/*.py
+      - data/parity_inputs.csv
     generates:
       - output/two-digit/model.onnx
       - output/four-digit/model.onnx
