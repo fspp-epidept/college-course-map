@@ -169,7 +169,7 @@ fn register_eps(
             EpKind::TensorRt => ep::TensorRT::default().register(builder),
             EpKind::Cuda => ep::CUDA::default().register(builder),
             EpKind::DirectMl => ep::DirectML::default().register(builder),
-            EpKind::CoreMl => ep::CoreML::default().register(builder),
+            EpKind::CoreMl => register_coreml(builder),
         };
         match result {
             Ok(()) => {
@@ -184,6 +184,25 @@ fn register_eps(
         }
     }
     resolved
+}
+
+/// `CoreML` in `MLProgram` format (EPI-108). The default `NeuralNetwork` format
+/// cannot execute `ModernBERT` (the 0.4.0 field failure); `MLProgram` is the
+/// format with native `LayerNormalization` / Erf / `Unsqueeze`, and it keeps
+/// our fp32 weights fp32, so the program runs fp32 on the GPU (the
+/// fp16-only Neural Engine is skipped). Compiled models are cached under
+/// the product cache dir: ONNX Runtime keys that cache by model path and
+/// never invalidates it, so `models::download_all` wipes the dir whenever a
+/// model file changes.
+fn register_coreml(
+    builder: &mut ort::session::builder::SessionBuilder,
+) -> Result<(), ep::RegisterError> {
+    let mut coreml = ep::CoreML::default().with_model_format(ep::coreml::ModelFormat::MLProgram);
+    match coreml_cache_dir() {
+        Ok(dir) => coreml = coreml.with_model_cache_dir(dir.display()),
+        Err(e) => log::warn!("coreml: compiled-model cache disabled: {e}"),
+    }
+    coreml.register(builder)
 }
 
 /// Build a [`LoadedModel`] from a directory containing `model.onnx`,
@@ -529,6 +548,14 @@ impl InferenceRegistry {
 /// callers exist; promote when a third lands.
 const PRODUCT_DIR: &str = "college-course-map";
 const MODELS_SUBDIR: &str = "models";
+
+/// `<data>/college-course-map/cache/coreml` — compiled `CoreML` models
+/// (EPI-108). Derived state: safe to delete at any time.
+pub fn coreml_cache_dir() -> Result<PathBuf, String> {
+    dirs::data_dir()
+        .map(|dir| dir.join(PRODUCT_DIR).join("cache").join("coreml"))
+        .ok_or_else(|| "no platform data directory available".to_owned())
+}
 
 /// Resolve the on-disk model directory for **non-airgap** (dev/connected)
 /// runs. The airgap build never calls this — its models live in the bundle's

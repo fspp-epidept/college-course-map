@@ -205,7 +205,7 @@ tasks:
       # Release-only: debug FP behavior can flip near-tied argmaxes vs the
       # Python reference (which was captured with the same opt level as Rust
       # release). See examples/check_parity.rs.
-      - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity
+      - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity -- {{.CLI_ARGS}}
 
   check:resume:
     desc: "SIGKILL a run mid-flight against a scratch DB, sweep, resume, verify no dup/missing/recomputed results (needs the two-digit model on disk)"
