@@ -10,8 +10,8 @@ Build-time tooling. Converts annamp's PyTorch CCM classifiers to ONNX, verifies 
 scripts/models/
 ├── pyproject.toml         uv-managed Python project
 ├── uv.lock                committed lockfile (deterministic conversion)
-├── _lib/                  shared module (model specs, format, inference, reporting)
-├── convert.py             optimum-cli export, idempotent
+├── _lib/                  shared module (model specs, format, inference, reporting, neg_rewrite)
+├── convert.py             optimum-cli export + fp32 Neg→Mul pass, idempotent
 ├── verify.py              ONNX vs PyTorch parity on a synthetic corpus
 ├── validate.py            CIP/CCM overlap rate on labeled panel data
 ├── upload.py              push to HF, one repo per spec + a collection; idempotent
@@ -73,6 +73,10 @@ This matches annamp's model card. The Tauri Rust app must produce byte-identical
 ## Model families
 
 Both annamp families are converted and published: RoBERTa and ModernBERT. The app-active family is **ModernBERT** (decision 2026-07-03); the RoBERTa repos stay published on HF but are not what the app downloads. `src-tauri/models.toml` pins the app-active repos by commit SHA and per-file sha256; regenerate it with `task models:manifest` after any upload.
+
+## Export pass: fp32 Neg → Mul(-1)
+
+ONNX Runtime's CoreML execution provider has no `Neg` builder, and ModernBERT's export carries two `Neg` nodes per layer (rotary `rotate_half`), which splits every layer into CoreML/CPU partitions. After export, `convert.py` runs `_lib/neg_rewrite.py`: every fp32 `Neg` becomes `Mul(x, -1.0)` (bit-identical in IEEE float), names are preserved, and the pass proves zero output difference against the pre-rewrite graph on the parity corpus before saving. Non-fp32 `Neg` nodes are left alone and printed. Rewritten graphs carry `metadata_props` `coreml_neg_rewrite=1`; graphs with nothing to rewrite (RoBERTa) are untouched. Decision 2026-08-26.
 
 `upload.py` reads `HF_USERNAME` from `.env` (loaded automatically by uv) and pushes to `<HF_USERNAME>/courses-{two,four,six}-digit-{roberta,modernbert}-base-onnx`.
 

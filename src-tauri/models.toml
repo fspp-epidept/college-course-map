@@ -8,12 +8,12 @@ digit_level = 2
 app_subdir = "two-digit"
 display_name = "Two-digit CCM (ModernBERT)"
 hf_repo = "robotastronaut/courses-two-digit-modernbert-base-onnx"
-revision = "64dfcbdfccbafee818c9dc730367e5e183c8e027"
+revision = "a005e7e0524d131e160b81d2dab4e9863e96b961"
 
 [[model.files]]
 name = "model.onnx"
-sha256 = "dbb27afda74771c7496b9493dac1be56831b70fa5693095069b5c76dfe0fac48"
-size = 599141870
+sha256 = "f352620003254f2d6c220ed86433a819c310bbefbc12e9ca82903a8c56be9d71"
+size = 599143434
 
 [[model.files]]
 name = "tokenizer.json"
@@ -30,12 +30,12 @@ digit_level = 4
 app_subdir = "four-digit"
 display_name = "Four-digit CCM (ModernBERT)"
 hf_repo = "robotastronaut/courses-four-digit-modernbert-base-onnx"
-revision = "9f23013f1b58e4009941085d7e9a88883ffce03a"
+revision = "628ebe9628050738b5e35a437db4fb0362b34489"
 
 [[model.files]]
 name = "model.onnx"
-sha256 = "03cbd1bb9e3355e963de935e2a7fcab11114fcda52c96eea8d029b64d470b8c5"
-size = 600080053
+sha256 = "fc835224df45fd5d99869ac49f57af324d854e33b65f5f7c21833c5a97167f81"
+size = 600081617
 
 [[model.files]]
 name = "tokenizer.json"
@@ -52,12 +52,12 @@ digit_level = 6
 app_subdir = "six-digit"
 display_name = "Six-digit CCM (ModernBERT)"
 hf_repo = "robotastronaut/courses-six-digit-modernbert-base-onnx"
-revision = "a985a6d23a18a4e1ba8c246598317ad028208b74"
+revision = "4cb70f7fe0ee4d452c965fc485a8660985713aa4"
 
 [[model.files]]
 name = "model.onnx"
-sha256 = "06c484780b71b1e5538d8f60d7c70dd3921d116a89ea3c13ecaa12987828c075"
-size = 603371375
+sha256 = "0e51997f7398cc2ac2b71561f0e89580e9808d69f8f3f36a0e7598a8e01b7b3b"
+size = 603372939
 
 [[model.files]]
 name = "tokenizer.json"

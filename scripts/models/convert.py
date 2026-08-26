@@ -1,7 +1,10 @@
-"""Convert annamp PyTorch models to ONNX via optimum-cli.
+"""Convert annamp PyTorch models to ONNX via optimum-cli, then apply the
+fp32 Neg→Mul export pass (`_lib/neg_rewrite.py`).
 
 Idempotent: if `output/<dir>/model.onnx` already exists and is non-empty,
-the model is skipped. Wipe `output/` to force a fresh conversion.
+the export is skipped; the Neg→Mul pass still runs, and is itself a no-op
+once its `metadata_props` stamp is present. Wipe `output/` to force a
+fresh conversion.
 """
 from __future__ import annotations
 
@@ -11,13 +14,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-from _lib.format import export_spec
+import numpy as np
+import pandas as pd
+from tokenizers import Tokenizer
+
+from _lib import neg_rewrite
+from _lib.format import CourseInput, export_spec, format_input
 from _lib.models import MODELS, ModelSpec
 
-OUTPUT_ROOT = Path(__file__).parent / "output"
+HERE = Path(__file__).parent
+OUTPUT_ROOT = HERE / "output"
+PARITY_CSV = HERE / "data" / "parity_inputs.csv"
 
 
-def convert_one(spec: ModelSpec) -> Path:
+def export_one(spec: ModelSpec) -> Path:
     out_dir = OUTPUT_ROOT / spec.output_subdir
     onnx_path = out_dir / "model.onnx"
 
@@ -47,12 +57,40 @@ def convert_one(spec: ModelSpec) -> Path:
     return out_dir
 
 
+def fixture_feeds(out_dir: Path, texts: list[str]) -> list[dict[str, np.ndarray]]:
+    """Tokenize the parity corpus one input at a time (no padding), as the app does."""
+    tokenizer = Tokenizer.from_file(str(out_dir / "tokenizer.json"))
+    feeds = []
+    for enc in tokenizer.encode_batch(texts):
+        feeds.append({
+            "input_ids": np.asarray([enc.ids], dtype=np.int64),
+            "attention_mask": np.asarray([enc.attention_mask], dtype=np.int64),
+        })
+    return feeds
+
+
+def convert_one(spec: ModelSpec, texts: list[str]) -> Path:
+    out_dir = export_one(spec)
+    neg_rewrite.apply(out_dir / "model.onnx", fixture_feeds(out_dir, texts))
+    return out_dir
+
+
 def main() -> int:
     OUTPUT_ROOT.mkdir(exist_ok=True)
 
+    df = pd.read_csv(PARITY_CSV)
+    texts = [
+        format_input(CourseInput(
+            subject_code=str(row.subject_code),
+            catalog_number=str(row.catalog_number),
+            course_title=str(row.course_title),
+        ))
+        for row in df.itertuples()
+    ]
+
     for spec in MODELS:
         try:
-            convert_one(spec)
+            convert_one(spec, texts)
         except subprocess.CalledProcessError:
             print(f"\nFAIL: {spec.display_name} conversion failed", file=sys.stderr)
             return 1
