@@ -31,7 +31,8 @@
       }
     },
     "resources": {
-      "runtimes/cpu": "runtimes/cpu"
+      "runtimes/cpu": "runtimes/cpu",
+      "resources/docs/2010-college-course-map.pdf": "docs/2010-college-course-map.pdf"
     },
     "icon": [
       "icons/32x32.png",

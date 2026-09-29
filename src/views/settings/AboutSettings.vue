@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from "vue";
 import { commands } from "../../bindings";
 import packageJson from "../../../package.json";
 
@@ -10,6 +11,13 @@ const version: string = packageJson.version;
 // folder so the WebView needs no opener permission.
 async function openLogs(): Promise<void> {
   await commands.openLogsDir();
+}
+
+// The bundled NCES report the CCM taxonomy comes from (EPI-115).
+const reportError = ref<string | null>(null);
+async function openReport(): Promise<void> {
+  const result = await commands.openCcmReference();
+  reportError.value = result.status === "error" ? result.error : null;
 }
 </script>
 
@@ -30,6 +38,18 @@ async function openLogs(): Promise<void> {
         <UButton size="xs" variant="outline" @click="openLogs">Open logs folder</UButton>
         <span class="text-xs text-(--ui-text-muted)">
           Attach app.log to a bug report — it holds diagnostics only, no course data.
+        </span>
+      </dd>
+      <dt class="text-(--ui-text-muted)">CCM reference</dt>
+      <dd class="flex flex-col gap-1">
+        <span class="flex items-center gap-3">
+          <UButton size="xs" variant="outline" @click="openReport">Open 2010 College Course Map</UButton>
+          <span v-if="reportError" class="text-xs text-(--ui-color-error-500)">{{ reportError }}</span>
+        </span>
+        <span class="text-xs text-(--ui-text-muted)">
+          Bryan, M. &amp; Simone, S. (2012). 2010 College Course Map (NCES 2012-162rev). National
+          Center for Education Statistics, Institute of Education Sciences, U.S. Department of
+          Education. Washington, DC. Public domain.
         </span>
       </dd>
     </dl>

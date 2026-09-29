@@ -466,7 +466,11 @@ mod tests {
         };
         assert_eq!(six("05.0207")?.0, "Women\u{2019}s Studies.");
         assert!(six("13.9998")?.0.ends_with("Group Process in Education."));
-        assert!(six("40.0201")?.1.starts_with("A general course that focuses on the planetary"));
+        assert!(
+            six("40.0201")?
+                .1
+                .starts_with("A general course that focuses on the planetary")
+        );
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn)?;

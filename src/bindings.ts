@@ -294,6 +294,30 @@ async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>>
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * The whole taxonomy (2,167 static rows), ordered by code. Search and
+ * filtering happen in the frontend — a small fixed set, not a course table.
+ */
+async listCcmTaxonomy() : Promise<Result<CcmEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_ccm_taxonomy") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open the bundled NCES report in the platform PDF viewer. Rust-side opener
+ * call, like `open_logs_dir`: no capability widening for the `WebView`.
+ */
+async openCcmReference() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_ccm_reference") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -329,6 +353,11 @@ classifications: number;
  * noisy 0% on a fresh DB).
  */
 cacheHitRate: number | null }
+/**
+ * One `ccm_taxonomy` row. 2-digit rows carry `title_short`, 6-digit rows
+ * carry `description`; there are no 4-digit rows.
+ */
+export type CcmEntry = { digitLevel: number; code: string; title: string; titleShort: string | null; description: string | null }
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.

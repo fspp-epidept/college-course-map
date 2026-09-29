@@ -1,4 +1,6 @@
 import type { Component } from "vue";
+import CcmPanel from "../views/ccm/CcmPanel.vue";
+import CcmSidebar from "../views/ccm/CcmSidebar.vue";
 import DatasetsPanel from "../views/datasets/DatasetsPanel.vue";
 import DatasetsSidebar from "../views/datasets/DatasetsSidebar.vue";
 import ModelsPanel from "../views/models/ModelsPanel.vue";
@@ -11,7 +13,7 @@ import SettingsPanel from "../views/settings/SettingsPanel.vue";
 import SettingsSidebar from "../views/settings/SettingsSidebar.vue";
 
 /** Stable id for each top-level "activity" (entry in the activity bar). */
-export type ActivityId = "overview" | "datasets" | "runs" | "models" | "settings";
+export type ActivityId = "overview" | "datasets" | "runs" | "models" | "ccm" | "settings";
 
 export interface ActivityDef {
   id: ActivityId;
@@ -58,6 +60,13 @@ export const activities: ActivityDef[] = [
     icon: "i-lucide-cpu",
     sidebar: ModelsSidebar,
     panel: ModelsPanel,
+  },
+  {
+    id: "ccm",
+    label: "CCM Reference",
+    icon: "i-lucide-book-open",
+    sidebar: CcmSidebar,
+    panel: CcmPanel,
   },
   {
     id: "settings",

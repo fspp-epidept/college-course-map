@@ -17,6 +17,7 @@ pub mod runs;
 // Public for the dev pack fetcher (examples/runtime_install.rs, EPI-73).
 pub mod runtime;
 pub mod seed;
+mod taxonomy;
 // Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
 #[cfg(target_os = "macos")]
 mod menu;
@@ -57,6 +58,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             runs::pause_run,
             runs::resume_run,
             runs::start_run,
+            taxonomy::list_ccm_taxonomy,
+            taxonomy::open_ccm_reference,
         ])
         .events(collect_events![
             models::ModelDownloadProgress,
