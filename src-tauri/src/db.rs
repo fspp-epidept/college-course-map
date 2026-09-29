@@ -50,6 +50,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         5,
         include_str!("../migrations/0005_source_file_encoding.sql"),
     ),
+    (
+        6,
+        include_str!("../migrations/0006_ccm_taxonomy_corrections.sql"),
+    ),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -263,14 +267,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 /// place database state gets established — don't add seeding at startup.
 fn post_migration(version: u32, conn: &Connection) -> Result<(), String> {
     match version {
-        3 => seed_ccm_taxonomy(conn),
+        // 0006 empties the table so existing databases pick up the corrected
+        // CSVs; fresh databases seed at 3 and again at 6.
+        3 | 6 => seed_ccm_taxonomy(conn),
         _ => Ok(()),
     }
 }
 
-/// Insert the CCM taxonomy from CSVs embedded at compile time (sourced from
-/// the official `ccm_taxonomy_{two,six}.xlsx`, converted + whitespace-cleaned;
-/// see migration 0003). 2-digit rows carry `title_short`, 6-digit rows carry
+/// Insert the CCM taxonomy from CSVs embedded at compile time (converted from
+/// the official `ccm_taxonomy_{two,six}.xlsx`, then corrected against the NCES
+/// 2012-162rev PDF; see migrations 0003 and 0006). 2-digit rows carry `title_short`, 6-digit rows carry
 /// `description`; the government publishes no 4-digit taxonomy.
 fn seed_ccm_taxonomy(conn: &Connection) -> Result<(), String> {
     insert_taxonomy_csv(
@@ -446,6 +452,21 @@ mod tests {
             .query_row("SELECT encoding FROM source_files", [], |r| r.get(0))
             .map_err(|e| e.to_string())?;
         assert_eq!(encoding.as_deref(), Some("utf-8"));
+
+        // 0006: corrected CSVs re-seeded (mojibake, truncated title, and
+        // neighbour-description contamination fixed against the NCES PDF).
+        let six = |code: &str| -> Result<(String, String), String> {
+            conn.query_row(
+                "SELECT title, description FROM ccm_taxonomy
+                 WHERE digit_level = 6 AND code = ?",
+                [code],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| e.to_string())
+        };
+        assert_eq!(six("05.0207")?.0, "Women\u{2019}s Studies.");
+        assert!(six("13.9998")?.0.ends_with("Group Process in Education."));
+        assert!(six("40.0201")?.1.starts_with("A general course that focuses on the planetary"));
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn)?;
