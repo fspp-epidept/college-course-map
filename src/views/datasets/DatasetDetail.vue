@@ -732,6 +732,9 @@ async function exportCsv(): Promise<void> {
                             {{ row.ccmDescription }}
                           </p>
                         </template>
+                        <p v-else-if="viewLevel === 4" class="text-(--ui-text-dimmed) text-xs">
+                          The CCM publishes no 4-digit titles.
+                        </p>
                         <p v-else class="text-(--ui-text-dimmed) text-xs">
                           No taxonomy entry for this code.
                         </p>
