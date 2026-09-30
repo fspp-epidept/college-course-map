@@ -6,7 +6,7 @@
 //!    a mixed file we refuse) and collects structurally broken rows.
 //! 2. [`validate_import`] — decoded full-file dry run with the column mapping
 //!    applied: the preview rows, what import will keep/skip, and per-column
-//!    value distributions (EPI-7).
+//!    value distributions.
 //!
 //! It also owns the shared input guards (file size, field size, column count)
 //! and [`open_csv`], the one CSV reader constructor every importer path uses,
@@ -181,7 +181,7 @@ impl<T> Samples<T> {
 
 /// Header aliases per logical field. Match is case-insensitive, exact equality
 /// — no fuzzy / contains matching, so a column named `subject_xyz` is *not* a
-/// `subject` match. The mapping UI (EPI-8) replaces this with explicit picks.
+/// `subject` match. A column-mapping UI will replace this with explicit picks.
 const SUBJECT_ALIASES: &[&str] = &[
     "subject_code",
     "sub_pref",
@@ -452,7 +452,7 @@ pub(crate) fn inspect(path: &Path) -> Result<Inspection, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 2: validate (decoded dry run, EPI-7)
+// Pass 2: validate (decoded dry run)
 // ---------------------------------------------------------------------------
 
 #[derive(Type, Serialize, Debug)]

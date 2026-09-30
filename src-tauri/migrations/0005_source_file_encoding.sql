@@ -1,4 +1,4 @@
--- Source file text encoding (EPI-113). Import now accepts legacy single-byte
+-- Source file text encoding. Import now accepts legacy single-byte
 -- CSVs (Windows-1252, Mac Roman) once the user confirms the encoding in the
 -- pre-flight; the WHATWG label is recorded so any later re-read of the source
 -- (refresh / drift checks) decodes it the same way.
