@@ -100,7 +100,8 @@ pub struct RuntimeManifest {
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum PackLayout {
-    /// Official onnxruntime archive: strip the single top-level directory so
+    /// Official onnxruntime archive: strip the single top-level directory and
+    /// keep only `lib/`'s dynamic libraries plus the license files, so
     /// contents land at `<pack>/lib/...`.
     Onnxruntime,
     /// Support-library wheels (EPI-84): extract only dynamic libraries,
@@ -408,15 +409,37 @@ fn is_dylib_name(name: &std::ffi::OsStr) -> bool {
     lossy.contains(".so") || lossy.ends_with(".dll") || lossy.ends_with(".dylib")
 }
 
+/// Top-level files of an onnxruntime archive that are kept alongside the
+/// libraries: the MIT license and the third-party notices it obliges us to
+/// redistribute.
+const ONNXRUNTIME_LICENSE_FILES: [&str; 2] = ["LICENSE", "ThirdPartyNotices.txt"];
+
 /// Where an archive entry lands under the pack dir, per layout. `None` =
 /// skip the entry.
 fn entry_target(path: &Path, layout: PackLayout) -> Option<PathBuf> {
     match layout {
         // Strip the archive's single top-level directory
-        // (`onnxruntime-<platform>-<version>/`) so contents land at `lib/...`.
+        // (`onnxruntime-<platform>-<version>/`) and keep only what the app
+        // loads or must redistribute. Headers, cmake/pkgconfig, dSYMs, PDBs,
+        // import libs and `testdata/` (which ships a test dylib) would bloat
+        // every bundle and, on macOS, put unsigned Mach-O files in front of
+        // notarization.
         PackLayout::Onnxruntime => {
-            let stripped: PathBuf = path.components().skip(1).collect();
-            (!stripped.as_os_str().is_empty()).then_some(stripped)
+            let mut rest = path
+                .components()
+                .skip(1)
+                .map(std::path::Component::as_os_str);
+            match (rest.next(), rest.next(), rest.next()) {
+                (Some(dir), Some(name), None) if dir == "lib" && is_dylib_name(name) => {
+                    Some(Path::new("lib").join(name))
+                }
+                (Some(name), None, None)
+                    if ONNXRUNTIME_LICENSE_FILES.iter().any(|f| name == *f) =>
+                {
+                    Some(PathBuf::from(name))
+                }
+                _ => None,
+            }
         }
         // Wheels nest libs per component (`nvidia/<comp>/lib/...`); keep only
         // dynamic libraries, flattened into `lib/`.
@@ -996,7 +1019,9 @@ pub(crate) fn relaunch_app(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{EpKind, RuntimeState, load_manifest};
+    use std::path::{Path, PathBuf};
+
+    use super::{EpKind, PackLayout, RuntimeState, entry_target, load_manifest};
 
     fn state(eps: &[&str]) -> RuntimeState {
         RuntimeState {
@@ -1031,6 +1056,44 @@ mod tests {
             state(&["tensorrt"]).registrable(&[EpKind::Cpu, EpKind::TensorRt]),
             [EpKind::Cpu, EpKind::TensorRt]
         );
+    }
+
+    /// Only `lib/`'s dynamic libraries and the license files survive
+    /// onnxruntime extraction, on every platform's archive layout.
+    #[test]
+    fn onnxruntime_layout_keeps_only_libs_and_licenses() {
+        let target = |p: &str| entry_target(Path::new(p), PackLayout::Onnxruntime);
+        let top = "onnxruntime-osx-arm64-1.24.2";
+        for kept in [
+            "lib/libonnxruntime.1.24.2.dylib",
+            "lib/libonnxruntime.dylib",
+            "lib/libonnxruntime.so.1.24.2",
+            "lib/onnxruntime_providers_cuda.dll",
+            "LICENSE",
+            "ThirdPartyNotices.txt",
+        ] {
+            assert_eq!(
+                target(&format!("{top}/{kept}")),
+                Some(PathBuf::from(kept)),
+                "{kept}"
+            );
+        }
+        for dropped in [
+            "",
+            "lib",
+            "lib/onnxruntime.lib",
+            "lib/onnxruntime.pdb",
+            "lib/cmake/onnxruntime/onnxruntimeConfig.cmake",
+            "lib/pkgconfig/libonnxruntime.pc",
+            "lib/libonnxruntime.1.24.2.dylib.dSYM",
+            "lib/libonnxruntime.1.24.2.dylib.dSYM/Contents/Resources/DWARF/libonnxruntime.1.24.2.dylib",
+            "include/onnxruntime_c_api.h",
+            "testdata/libcustom_op_library.dylib",
+            "README.md",
+            "VERSION_NUMBER",
+        ] {
+            assert_eq!(target(&format!("{top}/{dropped}")), None, "{dropped}");
+        }
     }
 
     /// The startup sweep must remove `.part` archives and staging dirs while
@@ -1100,7 +1163,7 @@ mod tests {
             // Runtime packs (they carry EPs) must pin the lockstep ONNX
             // Runtime version in their URLs; libs packs pin NVIDIA versions.
             if !pack.eps.is_empty() {
-                assert_eq!(pack.layout, super::PackLayout::Onnxruntime, "{}", pack.id);
+                assert_eq!(pack.layout, PackLayout::Onnxruntime, "{}", pack.id);
                 for archive in &pack.archives {
                     assert!(
                         archive.url.contains(&manifest.ort_version),
@@ -1120,7 +1183,7 @@ mod tests {
                 assert!(
                     manifest.pack.iter().any(|p| &p.id == libs_id
                         && p.target == pack.target
-                        && p.layout == super::PackLayout::FlatDylibs),
+                        && p.layout == PackLayout::FlatDylibs),
                     "{}: libs pack '{libs_id}' missing for target {}",
                     pack.id,
                     pack.target

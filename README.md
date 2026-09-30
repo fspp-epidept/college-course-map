@@ -20,7 +20,7 @@ Download the installer for your platform from the [latest release](https://githu
 - **Linux**: the `.AppImage` (mark it executable, then run it), or the `.deb` / `.rpm` for your distribution
 
 > [!NOTE]
-> Builds are not yet code-signed. Windows SmartScreen will warn on first launch: click **More info**, then **Run anyway**. On macOS, Control-click the app and choose **Open**; if it is still blocked, approve it under **System Settings → Privacy & Security → Open Anyway**.
+> The macOS build is signed and notarized by Apple, so it opens without a Gatekeeper prompt. Windows builds aren't code-signed yet, so SmartScreen warns on first launch: click **More info**, then **Run anyway**.
 
 ## Quick start
 
@@ -49,13 +49,6 @@ The app writes a diagnostic log to `logs/app.log` in its data folder. It records
 - Windows: `%APPDATA%\college-course-map\logs`
 - macOS: `~/Library/Application Support/college-course-map/logs`
 - Linux: `~/.local/share/college-course-map/logs`
-
-> [!NOTE]
-> The macOS build is not yet signed or notarized, so Gatekeeper reports the downloaded app as damaged. Copy the app to `/Applications`, then clear the quarantine flag once:
->
-> ```sh
-> xattr -d com.apple.quarantine "/Applications/course-classifier.app"
-> ```
 
 ## Development
 
