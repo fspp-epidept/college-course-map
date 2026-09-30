@@ -28,6 +28,15 @@ pub fn format_input(course: &CourseInput) -> String {
     format!("{subject_code} {catalog_number} --- {course_title}")
 }
 
+/// `courses.content_hash`: blake3 of the formatted model input. Computed over
+/// decoded text, so it is independent of the source file's encoding.
+#[must_use]
+pub fn content_hash(course: &CourseInput) -> String {
+    blake3::hash(format_input(course).as_bytes())
+        .to_hex()
+        .to_string()
+}
+
 #[derive(Debug, Deserialize)]
 struct FormatSpec {
     version: String,

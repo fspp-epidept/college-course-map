@@ -39,6 +39,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tauri-plugin-dialog = "2"
 csv = "1"
+encoding_rs = "0.8"
+encoding_rs_io = "0.1"
 # load-dynamic: nothing is linked at build time; the ONNX Runtime dylib is
 # resolved from a runtime pack (runtimes.toml) and loaded via ort::init_from at
 # startup. EP features only gate the Rust config API — which EPs actually exist
