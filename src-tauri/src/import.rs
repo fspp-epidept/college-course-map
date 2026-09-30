@@ -13,7 +13,7 @@
 //!
 //! [`Appender`]: duckdb::Appender
 
-use std::{fs::File, io::BufReader, path::Path};
+use std::{fs::File, path::Path};
 
 use blake3::Hasher;
 use chrono::Utc;
@@ -25,12 +25,13 @@ use uuid::Uuid;
 
 use crate::{
     db::AppDb,
-    format::{CourseInput, format_input},
+    format::{CourseInput, content_hash},
+    preflight::{
+        ColumnMap, MAX_COLUMNS, TextEncoding, check_mapping, mapped_cells, open_csv, stat_source,
+        truncate,
+    },
 };
 
-const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
-const MAX_FIELD_BYTES: usize = 8 * 1024;
-const MAX_COLUMNS: usize = 256;
 /// blake3 read chunk for streaming the file hash.
 const HASH_CHUNK: usize = 1024 * 1024;
 /// Rows per `appender.flush()`. The Appender batches internally; explicit
@@ -47,6 +48,10 @@ pub(crate) struct ImportRequest {
     pub display_name: Option<String>,
     /// Optional row cap; `None` means import every row.
     pub limit: Option<u64>,
+    /// Confirmed by the user from `inspect_csv`'s encoding report.
+    pub encoding: TextEncoding,
+    /// The mapping `validate_import` returned; re-checked against the header.
+    pub mapping: ColumnMap,
 }
 
 /// Response from `import_csv`: the dataset has been queued and is already
@@ -56,70 +61,6 @@ pub(crate) struct ImportRequest {
 pub(crate) struct ImportStarted {
     pub dataset_id: String,
     pub source_file_id: i64,
-}
-
-/// Header aliases per logical field. Match is case-insensitive, exact equality
-/// — no fuzzy / contains matching, so a column named `subject_xyz` is *not* a
-/// `subject` match. The mapping UI (#62) replaces this with explicit picks.
-const SUBJECT_ALIASES: &[&str] = &[
-    "subject_code",
-    "sub_pref",
-    "subject",
-    "subj",
-    "dept",
-    "department",
-];
-const CATALOG_ALIASES: &[&str] = &[
-    "catalog_number",
-    "course",
-    "course_number",
-    "number",
-    "cat_no",
-    "catalog",
-];
-const TITLE_ALIASES: &[&str] = &[
-    "course_title",
-    "title",
-    "inventory_course_title",
-    "name",
-    "course_name",
-];
-
-/// Indexes of the mapped columns in the CSV's header order. Persisted to
-/// `source_files.column_mapping` so export can reconstruct the original row
-/// layout (mapped cells live in the structured `courses` columns, everything
-/// else in `extra_columns`). Indexes, not header names: CSVs may repeat a
-/// header name, and indexes stay unambiguous.
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub(crate) struct ColumnMap {
-    pub subject: usize,
-    pub catalog: usize,
-    pub title: usize,
-}
-
-fn detect_mapping(headers: &[String]) -> Result<ColumnMap, String> {
-    let lc: Vec<String> = headers.iter().map(|h| h.to_ascii_lowercase()).collect();
-    let find = |aliases: &[&str]| -> Option<usize> {
-        aliases
-            .iter()
-            .find_map(|alias| lc.iter().position(|h| h == alias))
-    };
-    let subject = find(SUBJECT_ALIASES);
-    let catalog = find(CATALOG_ALIASES);
-    let title = find(TITLE_ALIASES);
-
-    match (subject, catalog, title) {
-        (Some(s), Some(c), Some(t)) => Ok(ColumnMap {
-            subject: s,
-            catalog: c,
-            title: t,
-        }),
-        _ => Err(format!(
-            "could not auto-detect required columns. \
-             Found headers: {headers:?}. Need one each of: \
-             subject={SUBJECT_ALIASES:?}, catalog={CATALOG_ALIASES:?}, title={TITLE_ALIASES:?}"
-        )),
-    }
 }
 
 #[tauri::command]
@@ -135,16 +76,7 @@ pub(crate) fn import_csv(
 ) -> Result<ImportStarted, String> {
     let path_str = req.path;
     let p = Path::new(&path_str);
-    let metadata = std::fs::metadata(p).map_err(|e| format!("stat {path_str}: {e}"))?;
-    if !metadata.is_file() {
-        return Err(format!("{path_str}: not a regular file"));
-    }
-    let size_bytes = metadata.len();
-    if size_bytes > MAX_FILE_BYTES {
-        return Err(format!(
-            "{path_str}: {size_bytes} bytes exceeds {MAX_FILE_BYTES}-byte cap"
-        ));
-    }
+    let size_bytes = stat_source(p)?;
 
     let imported_hash = hash_file(p)?;
     let display_name = req
@@ -164,14 +96,15 @@ pub(crate) fn import_csv(
 
     // Validate before we open a transaction so we never insert an empty
     // source_files row on a doomed import.
-    let headers = read_headers(p)?;
+    let headers = read_headers(p, req.encoding)?;
     if headers.len() > MAX_COLUMNS {
         return Err(format!(
             "{} columns exceeds {MAX_COLUMNS}-column cap",
             headers.len()
         ));
     }
-    let mapping = detect_mapping(&headers)?;
+    let mapping = req.mapping;
+    check_mapping(mapping, headers.len())?;
 
     let now = Utc::now().to_rfc3339();
     let dataset_id = Uuid::new_v4().to_string();
@@ -190,8 +123,8 @@ pub(crate) fn import_csv(
             .query_row(
                 "INSERT INTO source_files
                     (path, display_name, imported_at, imported_hash, size_bytes,
-                     original_headers, column_mapping)
-                 VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                     original_headers, column_mapping, encoding)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
                 params![
                     path_str,
                     &display_name,
@@ -200,6 +133,7 @@ pub(crate) fn import_csv(
                     i64::try_from(size_bytes).unwrap_or(i64::MAX),
                     &headers_json,
                     &mapping_json,
+                    req.encoding.label(),
                 ],
                 |row| row.get(0),
             )
@@ -221,6 +155,7 @@ pub(crate) fn import_csv(
         app: app.clone(),
         path: path_str,
         dataset_id: dataset_id.clone(),
+        encoding: req.encoding,
         mapping,
         limit: req.limit,
     };
@@ -236,6 +171,7 @@ struct ImportTask {
     app: AppHandle,
     path: String,
     dataset_id: String,
+    encoding: TextEncoding,
     mapping: ColumnMap,
     limit: Option<u64>,
 }
@@ -251,11 +187,7 @@ impl ImportTask {
     /// Stream the CSV and bulk-insert in fixed-size batches.
     /// Returns `(imported, skipped)`.
     fn run_inner(&self) -> Result<(u64, u64), String> {
-        let path = Path::new(&self.path);
-        let file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .from_reader(BufReader::new(file));
+        let mut reader = open_csv(Path::new(&self.path), self.encoding)?;
 
         let mut imported: u64 = 0;
         let mut skipped: u64 = 0;
@@ -269,18 +201,7 @@ impl ImportTask {
                 break;
             }
             let record = record.map_err(|e| format!("read row {row_index}: {e}"))?;
-            let subject = record
-                .get(self.mapping.subject)
-                .map(str::trim)
-                .unwrap_or_default();
-            let catalog = record
-                .get(self.mapping.catalog)
-                .map(str::trim)
-                .unwrap_or_default();
-            let title = record
-                .get(self.mapping.title)
-                .map(str::trim)
-                .unwrap_or_default();
+            let [subject, catalog, title] = mapped_cells(&record, self.mapping);
 
             if subject.is_empty() || catalog.is_empty() || title.is_empty() {
                 skipped += 1;
@@ -292,14 +213,11 @@ impl ImportTask {
             let catalog = truncate(catalog.to_owned());
             let title = truncate(title.to_owned());
 
-            let formatted = format_input(&CourseInput {
+            let content_hash = content_hash(&CourseInput {
                 subject_code: subject.clone(),
                 catalog_number: catalog.clone(),
                 course_title: title.clone(),
             });
-            let mut hasher = Hasher::new();
-            hasher.update(formatted.as_bytes());
-            let content_hash = hasher.finalize().to_hex().to_string();
 
             batch.push(BatchRow {
                 row_index,
@@ -474,11 +392,8 @@ fn extra_columns_json(
         .map_err(|e| format!("serialize extra columns: {e}"))
 }
 
-fn read_headers(path: &Path) -> Result<Vec<String>, String> {
-    let file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-    let mut reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(BufReader::new(file));
+fn read_headers(path: &Path, encoding: TextEncoding) -> Result<Vec<String>, String> {
+    let mut reader = open_csv(path, encoding)?;
     Ok(reader
         .headers()
         .map_err(|e| format!("read headers: {e}"))?
@@ -504,20 +419,10 @@ fn hash_file(path: &Path) -> Result<String, String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn truncate(mut s: String) -> String {
-    if s.len() > MAX_FIELD_BYTES {
-        let mut cut = MAX_FIELD_BYTES;
-        while !s.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        s.truncate(cut);
-    }
-    s
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{ColumnMap, extra_columns_json};
+    use super::extra_columns_json;
+    use crate::preflight::ColumnMap;
 
     /// Unmapped cells are keyed by column index; mapped cells are excluded;
     /// a file with only mapped columns produces `None` (NULL in the DB).

@@ -82,19 +82,6 @@ async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, s
     else return { status: "error", error: e  as any };
 }
 },
-/**
- * Read up to [`SAMPLE_ROW_LIMIT`] rows from the CSV at `path`, returning the
- * headers + sample rows + file metadata. Never persists anything — the only
- * side effect is opening the file for reading.
- */
-async previewCsv(path: string) : Promise<Result<CsvPreview, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("preview_csv", { path }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async listDatasets() : Promise<Result<DatasetSummary[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_datasets") };
@@ -126,7 +113,7 @@ async importCsv(req: ImportRequest) : Promise<Result<ImportStarted, string>> {
 },
 /**
  * Open the logs folder in the platform file manager (Settings → About).
- * Rust-side opener call: no capability widening for the WebView.
+ * Rust-side opener call: no capability widening for the `WebView`.
  */
 async openLogsDir() : Promise<Result<null, string>> {
     try {
@@ -195,6 +182,22 @@ async modelsStatus() : Promise<Result<ModelStatus[], string>> {
 async reloadModels() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reload_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async inspectCsv(path: string) : Promise<Result<Inspection, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("inspect_csv", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async validateImport(path: string, encoding: TextEncoding) : Promise<Result<Validation, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("validate_import", { path, encoding }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -339,6 +342,20 @@ export type ColorRamps = { primary?: ColorRamp | null; secondary?: ColorRamp | n
  * `light` / `dark` — drives `VueUse` `useColorMode().preference` on the frontend.
  */
 export type ColorScheme = "light" | "dark"
+/**
+ * Indexes of the mapped columns in the CSV's header order. Persisted to
+ * `source_files.column_mapping` so export can reconstruct the original row
+ * layout (mapped cells live in the structured `courses` columns, everything
+ * else in `extra_columns`). Indexes, not header names: CSVs may repeat a
+ * header name, and indexes stay unambiguous.
+ */
+export type ColumnMap = { subject: number; catalog: number; title: number }
+export type ColumnStats = { header: string; empty: number; distinct: number; 
+/**
+ * True when [`DISTINCT_CAP`] was hit: `distinct` is a lower bound and
+ * `top` only reflects values seen before the cap.
+ */
+distinctCapped: boolean; top: ValueCount[] }
 export type CoursePage = { rows: CourseRow[]; total: number }
 export type CourseRow = { id: number; rowIndex: number; subjectCode: string | null; catalogNumber: string | null; courseTitle: string | null; contentHash: string; 
 /**
@@ -374,7 +391,6 @@ ccmTitleLevel: number | null }
  * content hashes count once per course row), matching what a run would report.
  */
 export type CoverageRow = { modelId: number; digitLevel: number; classified: number; total: number }
-export type CsvPreview = { headers: string[]; sampleRows: string[][]; totalColumns: number; sizeBytes: number }
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -398,6 +414,14 @@ importState: string; importError: string | null }
  * having caught any progress events (EPI-74).
  */
 export type DownloadSnapshot = { file: string; received: number; total: number }
+/**
+ * Verdict of the encoding scan. `Legacy` means some fields aren't UTF-8 and
+ * no field contains valid non-ASCII UTF-8 — consistent with a single-byte
+ * codepage, which the user must pick (the bytes can't tell Windows-1252 from
+ * Mac Roman). `Mixed` means both kinds appear, so no single encoding reads
+ * the whole file correctly.
+ */
+export type EncodingReport = { kind: "utf8" } | { kind: "legacy"; invalid: Samples<InvalidField> } | { kind: "mixed"; invalid: Samples<InvalidField>; utf8NonAsciiFields: number }
 /**
  * Execution providers the app knows how to register, in the shape the
  * settings priority list stores. `Cpu` is a real list entry ("allowed as
@@ -427,12 +451,35 @@ displayName: string | null;
 /**
  * Optional row cap; `None` means import every row.
  */
-limit: number | null }
+limit: number | null; 
+/**
+ * Confirmed by the user from `inspect_csv`'s encoding report.
+ */
+encoding: TextEncoding; 
+/**
+ * The mapping `validate_import` returned; re-checked against the header.
+ */
+mapping: ColumnMap }
 /**
  * Response from `import_csv`: the dataset has been queued and is already
  * streaming rows in. The frontend polls `list_datasets` from here.
  */
 export type ImportStarted = { datasetId: string; sourceFileId: number }
+export type Inspection = { sizeBytes: number; 
+/**
+ * Data records, excluding the header.
+ */
+rows: number; headerFields: number; encoding: EncodingReport; 
+/**
+ * Records whose field count differs from the header's. Import requires
+ * zero.
+ */
+raggedRows: Samples<RaggedRow> }
+/**
+ * A field that isn't valid UTF-8, rendered under each legacy candidate so
+ * the user can pick the one that reads correctly.
+ */
+export type InvalidField = { row: number; column: string; windows1252: string; macRoman: string }
 export type ListCoursesRequest = { datasetId: string; 
 /**
  * Optional model id for the joined classification + probability columns.
@@ -448,6 +495,7 @@ modelId: number | null;
  * the range predicate lets the index drive the scan.
  */
 cursor: number | null; limit: number }
+export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title: ColumnStats }
 /**
  * Per-file download progress. `received`/`total` are bytes; `bytes_per_sec`
  * is measured over the emission window (EPI-65). The frontend derives
@@ -477,6 +525,7 @@ download: DownloadSnapshot | null }
  * frontend responds by refetching `models_status`.
  */
 export type ModelsStateChanged = Record<string, never>
+export type RaggedRow = { row: number; fields: number }
 /**
  * Row granularity of the export (EPI-78).
  */
@@ -574,6 +623,10 @@ platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[];
  */
 notices: string[] }
 /**
+ * A count of occurrences plus the first few examples.
+ */
+export type Samples<T> = { count: number; first: T[] }
+/**
  * The semantic `--ui-*` tokens. Field names render to the token suffix; the
  * applier prepends `--ui-` (e.g. `bg_muted` -> `--ui-bg-muted`).
  */
@@ -616,6 +669,11 @@ cudaLibraryDir?: string | null;
  * relaunch (ONNX Runtime is init-once).
  */
 preferredPack?: string | null }
+export type SkippedRow = { row: number; 
+/**
+ * Headers of the required columns that were empty.
+ */
+missing: string[] }
 export type StartRunRequest = { 
 /**
  * A run always classifies the dataset with every manifest model
@@ -628,6 +686,14 @@ datasetId: string }
  */
 export type StartRunResponse = { runId: string; rowsTotal: number }
 /**
+ * Text encoding of a source CSV. `Utf8` covers files with or without a BOM;
+ * the legacy variants are the two single-byte codepages Excel writes for
+ * plain "CSV": Windows-1252 on Windows, Mac Roman on macOS. Both are ASCII
+ * supersets, so CSV structure (delimiters, quotes, newlines) parses
+ * identically under every variant.
+ */
+export type TextEncoding = "utf8" | "windows1252" | "macRoman"
+/**
  * A full theme. `id` is the filename stem (set after load), never read from the
  * file body — `deny_unknown_fields` rejects an `id` key in the JSON.
  */
@@ -636,6 +702,25 @@ export type Theme = { name: string; colorScheme: ColorScheme; font?: string | nu
  * Lightweight listing entry (no token payload) for the theme registry.
  */
 export type ThemeSummary = { id: string; name: string; colorScheme: ColorScheme }
+export type Validation = { headers: string[]; sampleRows: string[][]; 
+/**
+ * Auto-detected from header aliases. `import_csv` takes it back verbatim.
+ */
+mapping: ColumnMap; 
+/**
+ * Data records, excluding the header.
+ */
+rows: number; 
+/**
+ * Records with subject, catalog, and title all non-empty — what import
+ * will ingest.
+ */
+importable: number; skipped: Samples<SkippedRow>; 
+/**
+ * Cells longer than the per-field cap; import truncates them.
+ */
+truncatedFields: number; columns: MappedColumns }
+export type ValueCount = { value: string; count: number }
 
 /** tauri-specta globals **/
 

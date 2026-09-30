@@ -25,7 +25,10 @@ use specta::Type;
 use tauri::Manager as _;
 use tauri_plugin_dialog::DialogExt as _;
 
-use crate::{db::AppDb, import::ColumnMap};
+use crate::{
+    db::AppDb,
+    preflight::{ColumnMap, check_mapping},
+};
 
 /// Row granularity of the export (EPI-78).
 #[derive(Type, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,13 +372,8 @@ fn resolve_export_inputs(
                 .map_err(|e| format!("parse stored original_headers: {e}"))?;
             let mapping: ColumnMap = serde_json::from_str(&mapping_json)
                 .map_err(|e| format!("parse stored column_mapping: {e}"))?;
-            let in_bounds = |i: usize| i < headers.len();
-            if !(in_bounds(mapping.subject)
-                && in_bounds(mapping.catalog)
-                && in_bounds(mapping.title))
-            {
-                return Err("stored column_mapping index out of header bounds".to_owned());
-            }
+            check_mapping(mapping, headers.len())
+                .map_err(|e| format!("stored column_mapping: {e}"))?;
             RowLayout::Original { headers, mapping }
         }
         (RowMode::All, ..) => RowLayout::Legacy,

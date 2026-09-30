@@ -1,6 +1,5 @@
 mod config;
 mod courses;
-mod csv_io;
 mod datasets;
 pub mod db;
 mod export;
@@ -11,6 +10,7 @@ mod logging;
 pub mod manifest;
 mod metrics;
 mod models;
+mod preflight;
 // Public for the resume verification harness (examples/check_resume.rs,
 // EPI-39), which drives the real RunPipeline against a scratch database.
 pub mod runs;
@@ -36,7 +36,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             courses::get_classification_coverage,
             courses::list_courses_with_results,
             courses::model_id_for_digit_level,
-            csv_io::preview_csv,
             datasets::list_datasets,
             export::export_results,
             import::import_csv,
@@ -47,6 +46,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             models::load_models,
             models::models_status,
             models::reload_models,
+            preflight::inspect_csv,
+            preflight::validate_import,
             runtime::download_runtime,
             runtime::relaunch_app,
             runtime::runtime_status,

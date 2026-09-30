@@ -46,6 +46,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         4,
         include_str!("../migrations/0004_roundtrip_export_top5.sql"),
     ),
+    (
+        5,
+        include_str!("../migrations/0005_source_file_encoding.sql"),
+    ),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -431,6 +435,17 @@ mod tests {
              FROM inference_results",
         )
         .map_err(|e| e.to_string())?;
+
+        // 0005: source file encoding, defaulting pre-existing rows to UTF-8.
+        conn.execute_batch(
+            "INSERT INTO source_files (path, display_name, imported_at, imported_hash)
+             VALUES ('a.csv', 'a', now(), 'h')",
+        )
+        .map_err(|e| e.to_string())?;
+        let encoding: Option<String> = conn
+            .query_row("SELECT encoding FROM source_files", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        assert_eq!(encoding.as_deref(), Some("utf-8"));
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn)?;
