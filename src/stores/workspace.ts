@@ -27,7 +27,7 @@ export const useWorkspace = defineStore(
     // sidebars when the backing row disappears (e.g. after db:clear-data).
     const selectedDatasetId = ref<string | null>(null);
     const selectedRunId = ref<string | null>(null);
-    // CCM Reference selection (EPI-115): a taxonomy code, 2- or 6-digit. The
+    // CCM Reference selection: a taxonomy code, 2- or 6-digit. The
     // taxonomy is static, so no pruning — the detail shows "not found" if a
     // persisted code ever disappears.
     const selectedCcmCode = ref<string | null>(null);

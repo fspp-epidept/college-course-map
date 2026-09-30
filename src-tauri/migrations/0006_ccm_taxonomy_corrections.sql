@@ -1,4 +1,4 @@
--- CCM taxonomy corrections (EPI-115).
+-- CCM taxonomy corrections.
 --
 -- The 6-digit CSV seeded by 0003 came from a flawed text extraction of the
 -- NCES report. It was corrected against the official PDF (NCES 2012-162rev,

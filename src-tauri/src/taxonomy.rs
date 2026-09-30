@@ -1,4 +1,4 @@
-//! CCM taxonomy reference (EPI-115): the read command behind the CCM
+//! CCM taxonomy reference: the read command behind the CCM
 //! Reference activity, and the bundled NCES report it points users to.
 
 use serde::Serialize;

@@ -13,7 +13,7 @@ async function openLogs(): Promise<void> {
   await commands.openLogsDir();
 }
 
-// The bundled NCES report the CCM taxonomy comes from (EPI-115).
+// The bundled NCES report the CCM taxonomy comes from.
 const reportError = ref<string | null>(null);
 async function openReport(): Promise<void> {
   const result = await commands.openCcmReference();
