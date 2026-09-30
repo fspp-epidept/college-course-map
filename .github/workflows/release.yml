@@ -85,26 +85,31 @@ jobs:
     steps:
       # The `release` environment gates on the workflow's ref, but a dispatch
       # builds whatever commit `inputs.tag` names — and anyone with write
-      # access can push a tag. Refuse a tag whose commit isn't on main (which
-      # is PR-only), so unreviewed code never runs with the signing secrets.
-      - name: Verify dispatched tag is on main
+      # access can push a tag. Resolve the tag to a commit SHA once, refuse
+      # it unless that commit is on main (which is PR-only), and check out
+      # that exact SHA, so unreviewed code never runs with the signing
+      # secrets and a tag moved mid-run can't swap the commit.
+      - name: Resolve dispatched tag to a commit on main
+        id: dispatch
         if: github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$RELEASE_TAG" --jq .status)"
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha)"
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq .status)"
           if [[ "$status" != "behind" && "$status" != "identical" ]]; then
-            echo "::error::$RELEASE_TAG is not an ancestor of main (compare status: $status)"
+            echo "::error::$RELEASE_TAG ($sha) is not on main (compare status: $status)"
             exit 1
           fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       # On push the tag was created on this workflow's own trigger commit, so
-      # the default checkout ref IS the released commit; on dispatch we must
-      # check out the tag itself (main may have moved past it).
+      # the default checkout ref IS the released commit; on dispatch we check
+      # out the tag's verified commit (main may have moved past it).
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+          ref: ${{ steps.dispatch.outputs.sha }}
 
       # Reclaim ~30 GB of preinstalled toolchains before the release-profile
       # compile + deb/rpm/AppImage staging (same guard as ci.yml, where the
