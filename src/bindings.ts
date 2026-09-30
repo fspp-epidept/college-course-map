@@ -369,9 +369,9 @@ classification: string | null;
 probability: number | null; 
 /**
  * Official CCM title for the code, joined from `ccm_taxonomy`. For
- * 4-digit codes (no published taxonomy exists) and 6-digit codes missing
- * from the table, this is the 2-digit parent's title — `ccm_title_level`
- * says which level matched.
+ * 6-digit codes missing from the table, this is the 2-digit parent's
+ * title — `ccm_title_level` says which level matched. Always `None` for
+ * 4-digit codes: the CCM publishes no 4-digit titles (EPI-112).
  */
 ccmTitle: string | null; ccmTitleShort: string | null; 
 /**

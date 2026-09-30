@@ -14,9 +14,10 @@
 //! file — with one model-column set appended per exported digit level:
 //! `ccm{2|4|6}digit_code`, `ccm…_prob`, `ccm…_title`, and (when requested)
 //! the numbered rank 1–5 candidate columns, where rank 1 duplicates the top-1
-//! columns. Datasets imported before migration 0004 (and derived/seeded
-//! datasets) have no stored header layout and keep the legacy fixed-column
-//! shape. The unique-rows mode collapses to one row per distinct classified
+//! columns. The 4-digit set has no title columns: the CCM publishes no
+//! 4-digit titles (EPI-112). Datasets imported before migration 0004 (and
+//! derived/seeded datasets) have no stored header layout and keep the legacy
+//! fixed-column shape. The unique-rows mode collapses to one row per distinct classified
 //! input; per-row fields (school, year, extras) are ambiguous for a merged
 //! row, so it emits only the assembled-input columns.
 
@@ -172,13 +173,21 @@ fn rank_code_expr(digit_level: u8, k: u8) -> String {
     }
 }
 
+/// Whether a digit level has official CCM titles. The government publishes
+/// titles only at the 2- and 6-digit levels; 4-digit exports carry no title
+/// columns rather than a parent title presented as a 4-digit one (EPI-112).
+fn has_titles(digit_level: u8) -> bool {
+    digit_level != 4
+}
+
 /// Which candidate ranks the export touches: rank 1 always (it feeds the
 /// top-1 trio's title join), 2–5 only when the numbered columns are on.
 fn ranks(include_top: bool) -> &'static [u8] {
     if include_top { &[1, 2, 3, 4, 5] } else { &[1] }
 }
 
-/// SELECT expressions for one model's appended columns: the top-1 trio, then
+/// SELECT expressions for one model's appended columns: the top-1 trio (a
+/// code/prob pair for levels without titles, see [`has_titles`]), then
 /// — when requested — the numbered rank 1–5 candidate columns (rank 1
 /// duplicates the top-1 values by stakeholder decision). Taxonomy titles use
 /// the same exact-level-else-2-digit-parent fallback as the results view
@@ -196,14 +205,21 @@ fn model_column_exprs(digit_level: u8, include_top: bool) -> Vec<String> {
         }
     };
 
+    let titled = has_titles(digit_level);
+
     let mut cols = vec![
         format!(
             "{} AS {prefix}_code",
             injection_escaped(&rank_code_expr(digit_level, 1))
         ),
         format!("r{digit_level}.probability AS {prefix}_prob"),
-        format!("{} AS {prefix}_title", injection_escaped(&title_expr(1))),
     ];
+    if titled {
+        cols.push(format!(
+            "{} AS {prefix}_title",
+            injection_escaped(&title_expr(1))
+        ));
+    }
     if include_top {
         for k in 1..=5_u8 {
             cols.push(format!(
@@ -211,10 +227,12 @@ fn model_column_exprs(digit_level: u8, include_top: bool) -> Vec<String> {
                 injection_escaped(&rank_code_expr(digit_level, k))
             ));
             cols.push(format!("{} AS {prefix}_prob{k}", prob_expr(k)));
-            cols.push(format!(
-                "{} AS {prefix}_title{k}",
-                injection_escaped(&title_expr(k))
-            ));
+            if titled {
+                cols.push(format!(
+                    "{} AS {prefix}_title{k}",
+                    injection_escaped(&title_expr(k))
+                ));
+            }
         }
     }
     cols
@@ -222,7 +240,8 @@ fn model_column_exprs(digit_level: u8, include_top: bool) -> Vec<String> {
 
 /// LEFT JOINs for one model: its `inference_results` alias (`r{d}`) plus the
 /// per-rank taxonomy resolution — exact match at the model's digit level
-/// (`t{d}_{k}`), 2-digit parent by code prefix (`p{d}_{k}`).
+/// (`t{d}_{k}`), 2-digit parent by code prefix (`p{d}_{k}`). Levels without
+/// titles ([`has_titles`]) get no taxonomy joins.
 fn model_joins(model: ExportModel, include_top: bool) -> String {
     let d = model.digit_level;
     let base = format!(
@@ -231,6 +250,9 @@ fn model_joins(model: ExportModel, include_top: bool) -> String {
           ON r{d}.model_id = {id} AND r{d}.content_hash = c.content_hash",
         id = model.model_id,
     );
+    if !has_titles(d) {
+        return base;
+    }
     let taxonomy = ranks(include_top)
         .iter()
         .map(|&k| {
@@ -727,6 +749,49 @@ mod tests {
         Ok(())
     }
 
+    /// 4-digit column sets carry codes and probabilities only — no title
+    /// columns, top-1 or numbered (EPI-112): the CCM publishes no 4-digit
+    /// titles, so a 2-digit parent title would masquerade as one.
+    #[test]
+    fn four_digit_columns_have_no_titles() -> Result<(), String> {
+        let conn = scratch_conn()?;
+        conn.execute_batch(
+            "INSERT INTO courses VALUES
+                 ('ds', 0, 'MATH', '201', 'Calculus', NULL, NULL, NULL, 'h1');
+             INSERT INTO inference_results VALUES
+                 (5, 'h1', '27.01', 0.8, '45.06', 0.1, '27.03', 0.05,
+                  '11.01', 0.02, '26.01', 0.01);",
+        )
+        .map_err(|e| e.to_string())?;
+
+        let four = [ExportModel {
+            model_id: 5,
+            digit_level: 4,
+        }];
+        let (rows, contents) = run_copy(&conn, |out| {
+            export_sql("ds", &four, &RowLayout::Legacy, true, RowMode::All, out)
+        })?;
+        assert_eq!(rows, 1);
+        let mut lines = contents.lines();
+        let header = lines.next().unwrap_or_default();
+        assert!(
+            header.ends_with(
+                "school_year_enrolled,ccm4digit_code,ccm4digit_prob,\
+                 ccm4digit_code1,ccm4digit_prob1,ccm4digit_code2,ccm4digit_prob2,\
+                 ccm4digit_code3,ccm4digit_prob3,ccm4digit_code4,ccm4digit_prob4,\
+                 ccm4digit_code5,ccm4digit_prob5"
+            ),
+            "header = {header}"
+        );
+        let row = lines.next().unwrap_or_default();
+        assert!(
+            row.ends_with("27.01,0.8,27.01,0.8,45.06,0.1,27.03,0.05,11.01,0.02,26.01,0.01"),
+            "row = {row}"
+        );
+        assert_eq!(lines.next(), None);
+        Ok(())
+    }
+
     /// Combined multi-model export (EPI-80): one column set per digit level,
     /// ascending; a level with no cached result exports as empty cells
     /// (partial coverage stays visible rather than erroring).
@@ -771,17 +836,17 @@ mod tests {
                 "row_index,subject_code,catalog_number,course_title,school_name,\
                  school_year_enrolled,\
                  ccm2digit_code,ccm2digit_prob,ccm2digit_title,\
-                 ccm4digit_code,ccm4digit_prob,ccm4digit_title,\
+                 ccm4digit_code,ccm4digit_prob,\
                  ccm6digit_code,ccm6digit_prob,ccm6digit_title"
             )
         );
         // 2- and 6-digit results present; the never-classified 4-digit level
-        // exports empty cells between them.
+        // exports empty cells between them, and has no title column (EPI-112).
         assert_eq!(
             lines.next(),
             Some(
                 "0,MATH,201,Calculus,A,2024,\
-                 27,0.97,Mathematics and Statistics,,,,\
+                 27,0.97,Mathematics and Statistics,,,\
                  27.0101,0.9,\"Mathematics, General\""
             )
         );

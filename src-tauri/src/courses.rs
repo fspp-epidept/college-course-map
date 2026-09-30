@@ -44,9 +44,9 @@ pub(crate) struct CourseRow {
     /// Softmax confidence at argmax, `(0, 1]`. See `docs/model-confidence.md`.
     pub probability: Option<f64>,
     /// Official CCM title for the code, joined from `ccm_taxonomy`. For
-    /// 4-digit codes (no published taxonomy exists) and 6-digit codes missing
-    /// from the table, this is the 2-digit parent's title — `ccm_title_level`
-    /// says which level matched.
+    /// 6-digit codes missing from the table, this is the 2-digit parent's
+    /// title — `ccm_title_level` says which level matched. Always `None` for
+    /// 4-digit codes: the CCM publishes no 4-digit titles (EPI-112).
     pub ccm_title: Option<String>,
     pub ccm_title_short: Option<String>,
     /// Only 6-digit taxonomy rows carry descriptions.
@@ -173,8 +173,9 @@ struct ResultInfo {
 /// page of course rows. One index probe per hash against the
 /// `(model_id, content_hash)` PK. The model's digit level drives the taxonomy
 /// join: exact match at the model's own level, else the 2-digit parent by
-/// code prefix (the government publishes no 4-digit taxonomy, and the parent
-/// also covers any 6-digit code absent from the table).
+/// code prefix for any 6-digit code absent from the table. 4-digit results
+/// get no title: the government publishes no 4-digit taxonomy, and a parent
+/// title would read as a 4-digit one (EPI-112).
 fn attach_results(
     conn: &duckdb::Connection,
     model_id: i64,
@@ -210,6 +211,7 @@ fn attach_results(
            ON p.digit_level = 2 AND p.code = substr(r.classification, 1, 2)
          WHERE r.model_id = ? AND r.content_hash IN ({placeholders})"
     );
+    let parent_fallback = digit_level != 4;
     let digit_i64 = i64::from(digit_level);
     let mut params: Vec<&dyn duckdb::ToSql> = Vec::with_capacity(collected.len() + 2);
     params.push(&digit_i64);
@@ -228,8 +230,12 @@ fn attach_results(
             let exact_title: Option<String> = r.get(3)?;
             let exact_short: Option<String> = r.get(4)?;
             let exact_desc: Option<String> = r.get(5)?;
-            let parent_title: Option<String> = r.get(6)?;
-            let parent_short: Option<String> = r.get(7)?;
+            let (parent_title, parent_short): (Option<String>, Option<String>) = if parent_fallback
+            {
+                (r.get(6)?, r.get(7)?)
+            } else {
+                (None, None)
+            };
             let info = if exact_title.is_some() {
                 ResultInfo {
                     classification: r.get(1)?,
