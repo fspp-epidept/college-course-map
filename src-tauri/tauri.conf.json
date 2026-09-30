@@ -26,6 +26,7 @@
     "active": true,
     "targets": "all",
     "publisher": "Education Policy Initiative",
+    "copyright": "© 2026 Regents of the University of Michigan",
     "macOS": {
       "signingIdentity": "-"
     },
