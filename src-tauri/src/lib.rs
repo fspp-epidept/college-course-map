@@ -11,6 +11,7 @@ pub mod manifest;
 mod metrics;
 mod models;
 mod preflight;
+mod profile;
 // Public for the resume verification harness (examples/check_resume.rs,
 // EPI-39), which drives the real RunPipeline against a scratch database.
 pub mod runs;
