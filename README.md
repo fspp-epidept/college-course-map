@@ -50,6 +50,21 @@ The app writes a diagnostic log to `logs/app.log` in its data folder. It records
 - macOS: `~/Library/Application Support/college-course-map/logs`
 - Linux: `~/.local/share/college-course-map/logs`
 
+## Resetting and uninstalling
+
+To start over without uninstalling, open **Settings → General** and click **Reset app data…**. The app relaunches and deletes every dataset, run, cached result, downloaded model, and runtime pack before it starts. Settings and custom themes are kept unless you tick **Also reset settings and themes**.
+
+Uninstalling removes the app but not its data, which can reach several GB with models and GPU runtime packs:
+
+- **Windows**: in the uninstaller, tick **Delete the application data**. That removes the `college-course-map` folders below. Updates never delete data
+- **macOS and Linux**: no uninstaller runs, so delete the folders by hand after removing the app (dragging it to the Trash, or removing the `.deb` / `.rpm` / `.AppImage`)
+
+| OS | Folders |
+| --- | --- |
+| Windows | `%APPDATA%\college-course-map`, `%LOCALAPPDATA%\college-course-map` |
+| macOS | `~/Library/Application Support/college-course-map`, `~/Library/Caches/college-course-map` |
+| Linux | `~/.config/college-course-map`, `~/.local/share/college-course-map` |
+
 ## Development
 
 Everything below is for working on the app itself. If you installed a release build, you're done; none of this applies.
