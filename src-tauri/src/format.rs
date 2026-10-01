@@ -1,7 +1,9 @@
 //! Canonical model-input formatter — Rust mirror of `scripts/models/_lib/format.py`.
 //!
 //! `TEMPLATE`, `FIELDS`, and `FORMAT_VERSION` are the contract; `assert_matches_spec`
-//! reads the JSON the Python pipeline emits and panics on drift.
+//! reads the committed `scripts/models/_lib/format_spec.json` and the
+//! `matches_python_spec` test fails on drift. The user-facing description of
+//! the contract is `docs/input-contract.md`.
 
 use std::path::Path;
 
@@ -76,5 +78,12 @@ mod tests {
             course_title: "Calculus I".into(),
         };
         assert_eq!(format_input(&c), "MATH 101 --- Calculus I");
+    }
+
+    #[test]
+    fn matches_python_spec() -> anyhow::Result<()> {
+        let spec =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/models/_lib/format_spec.json");
+        assert_matches_spec(&spec)
     }
 }

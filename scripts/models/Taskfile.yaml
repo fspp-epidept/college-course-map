@@ -69,6 +69,12 @@ tasks:
     deps: [verify]
     cmds: [uv run python validate.py --size=full]
 
+  sensitivity:
+    desc: 'Measure how input malformations move predictions (default: 1k sample)'
+    deps: [convert]
+    cmds:
+      - uv run python sensitivity.py {{.CLI_ARGS}}
+
   upload:
     desc: Push converted ONNX models to your HF namespace (one repo per model)
     deps: [verify]

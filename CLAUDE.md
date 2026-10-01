@@ -12,6 +12,7 @@ Sources of truth (in this order):
 - **The maintainer's knowledge base** — durable cross-cutting knowledge: ADRs, design decisions, context (setup in `CLAUDE.local.md`).
 - **This file (`CLAUDE.md`)** — durable repo-scoped conventions, ground rules, and decisions that survive across sessions.
 - **`docs/keybinds.md`** — the three-layer keyboard-shortcut model (OS global / Tauri menu accelerator / WebView), per-shortcut decision rule, the concrete shortcut table for this app, and the `useNativeMenu` bridging composable.
+- **`docs/input-contract.md`** — what the three input fields (subject code, catalog number, course title) must look like, what the app does to them on the way to the model, and the checks it runs on them.
 
 ## Workflow
 
