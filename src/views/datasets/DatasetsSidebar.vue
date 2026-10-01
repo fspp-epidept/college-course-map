@@ -1,14 +1,11 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { watch } from "vue";
 import type { DatasetSummary } from "../../bindings";
-import ImportCsvDialog from "../../components/ImportCsvDialog.vue";
 import { useDatasets } from "../../composables/useDatasets";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
 const { data: datasets, isPending, isError, error } = useDatasets();
-
-const importOpen = ref(false);
 
 function open(dataset: DatasetSummary): void {
   workspace.selectDataset(dataset.id);
@@ -90,12 +87,10 @@ watch(
     <button
       type="button"
       class="mt-2 text-left rounded px-2 py-1.5 text-sm text-(--ui-text-muted) hover:bg-(--ui-bg-muted) flex items-center gap-2"
-      @click="importOpen = true"
+      @click="workspace.openImportDialog()"
     >
       <UIcon name="i-lucide-plus" class="size-4" />
       <span>Import CSV</span>
     </button>
-
-    <ImportCsvDialog v-model:open="importOpen" />
   </div>
 </template>

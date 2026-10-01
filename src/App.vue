@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { listen } from "@tauri-apps/api/event";
-import { onBeforeUnmount, onMounted } from "vue";
 import AppTitleBar from "./components/AppTitleBar.vue";
+import ImportCsvDialog from "./components/ImportCsvDialog.vue";
 import ActivityBar from "./components/workbench/ActivityBar.vue";
 import CommandPalette from "./components/workbench/CommandPalette.vue";
 import MainPanel from "./components/workbench/MainPanel.vue";
 import PrimarySidebar from "./components/workbench/PrimarySidebar.vue";
 import ResizeHandle from "./components/workbench/ResizeHandle.vue";
+import { useNativeMenu } from "./composables/useNativeMenu";
 import { useRunLifecycleRefresh } from "./composables/useRuns";
 import { useWorkspace } from "./stores/workspace";
 
@@ -20,22 +20,18 @@ useRunLifecycleRefresh();
 // custom titlebar. See decision #102.
 const isMacOS = import.meta.env.TAURI_ENV_PLATFORM === "macos";
 
-// Cmd/Ctrl-B sidebar toggle. On macOS the native menu accelerator intercepts the
-// keypress (Layer 2 — see docs/keybinds.md) and emits `menu:toggle_sidebar`; the
-// WebView never sees Cmd-B, so defineShortcuts is a no-op there. On Windows/Linux
-// there is no native menu yet (#104), so Layer 3 carries the binding directly.
-// Both paths call the same store action — duplication of effect, not of binding.
-defineShortcuts({
-  meta_b: () => workspace.toggleSidebar(),
-});
+// Every macOS native menu item routes through here (docs/keybinds.md).
+useNativeMenu();
 
-let unlistenToggleSidebar: (() => void) | undefined;
-onMounted(async () => {
-  unlistenToggleSidebar = await listen("menu:toggle_sidebar", () => workspace.toggleSidebar());
-});
-onBeforeUnmount(() => {
-  unlistenToggleSidebar?.();
-});
+// Cmd/Ctrl-B sidebar toggle. On macOS the native menu accelerator owns the
+// keypress (Layer 2 — see docs/keybinds.md) and arrives via useNativeMenu, so
+// the WebView binding is registered only on Windows/Linux, where there is no
+// native menu (#104). Never both: a key seen by both layers would toggle twice.
+if (!isMacOS) {
+  defineShortcuts({
+    meta_b: () => workspace.toggleSidebar(),
+  });
+}
 </script>
 
 <template>
@@ -59,8 +55,11 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Cmd/Ctrl-K opens the palette via UDashboardSearch's own defineShortcuts
-         binding (works standalone, no UDashboardGroup needed). -->
+    <!-- Cmd/Ctrl-K: the native menu accelerator on macOS, UDashboardSearch's
+         own defineShortcuts binding on Windows/Linux (see CommandPalette). -->
     <CommandPalette />
+
+    <!-- Root-mounted so the File menu can open it from any activity. -->
+    <ImportCsvDialog v-model:open="workspace.importDialogOpen" />
   </UApp>
 </template>

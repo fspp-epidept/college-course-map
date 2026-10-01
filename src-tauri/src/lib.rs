@@ -19,8 +19,8 @@ pub mod runs;
 pub mod runtime;
 pub mod seed;
 mod taxonomy;
-// Native menu is macOS-only; Windows/Linux use custom in-WebView chrome (decision #102).
-#[cfg(target_os = "macos")]
+// The native menu is macOS-only (Windows/Linux use custom in-WebView chrome,
+// decision #102); the module itself builds everywhere for its typed event.
 mod menu;
 
 use tauri_specta::{Builder, collect_commands, collect_events};
@@ -64,6 +64,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             taxonomy::open_ccm_reference,
         ])
         .events(collect_events![
+            menu::MenuActionTriggered,
             models::ModelDownloadProgress,
             models::ModelsStateChanged,
             runtime::RuntimeDownloadProgress,

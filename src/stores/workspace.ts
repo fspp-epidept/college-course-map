@@ -41,6 +41,14 @@ export const useWorkspace = defineStore(
     // (the titlebar search button) can toggle the same UDashboardSearch instance.
     const commandPaletteOpen = ref(false);
 
+    // Import dialog open state, lifted so the File menu (useNativeMenu) and the
+    // Datasets sidebar button open the same root-mounted ImportCsvDialog.
+    const importDialogOpen = ref(false);
+
+    // A Classify/Export request from the menu for the selected dataset.
+    // DatasetDetail consumes it and runs the same function its button does.
+    const pendingDatasetAction = ref<"classify" | "export" | null>(null);
+
     // Settings activity has sub-sections. We route between them via this store
     // rather than vue-router so workbench state stays in one place. New
     // sections: extend `SettingsSectionId` in config/settingsSections.ts.
@@ -55,6 +63,8 @@ export const useWorkspace = defineStore(
     }
 
     function selectDataset(id: string | null): void {
+      // A menu request targets the dataset selected when it was made.
+      if (id !== selectedDatasetId.value) pendingDatasetAction.value = null;
       selectedDatasetId.value = id;
     }
 
@@ -78,6 +88,14 @@ export const useWorkspace = defineStore(
       commandPaletteOpen.value = !commandPaletteOpen.value;
     }
 
+    function openImportDialog(): void {
+      importDialogOpen.value = true;
+    }
+
+    function requestDatasetAction(action: "classify" | "export"): void {
+      pendingDatasetAction.value = action;
+    }
+
     return {
       activeActivityId,
       selectedDatasetId,
@@ -86,6 +104,8 @@ export const useWorkspace = defineStore(
       sidebarOpen,
       sidebarWidthRem,
       commandPaletteOpen,
+      importDialogOpen,
+      pendingDatasetAction,
       activeSettingsSection,
       setActiveActivity,
       setActiveSettingsSection,
@@ -95,12 +115,14 @@ export const useWorkspace = defineStore(
       toggleSidebar,
       setSidebarWidth,
       toggleCommandPalette,
+      openImportDialog,
+      requestDatasetAction,
     };
   },
   {
-    // Persist what should survive reload. sidebarOpen + commandPaletteOpen are
-    // per-session (a demo opens with the sidebar showing and the palette
-    // closed). The storage key is versioned: "workspace" carried the tabbed
+    // Persist what should survive reload. sidebarOpen, commandPaletteOpen,
+    // importDialogOpen and pendingDatasetAction are per-session (a demo opens
+    // with the sidebar showing and the palette closed). The storage key is versioned: "workspace" carried the tabbed
     // era's shape (tabsByActivity etc.) and is deliberately orphaned rather
     // than migrated (EPI-58).
     persist: {

@@ -34,12 +34,12 @@ For each keyboard shortcut you want, walk this checklist:
 
 | Action | Shortcut | Menu home |
 |--------|----------|-----------|
+| About | — | App |
+| Settings | `CmdOrCtrl+,` | App |
+| Quit | (predefined) | App |
 | Import CSV | `CmdOrCtrl+O` | File |
 | Export Results | `CmdOrCtrl+E` | File |
-| Open Recent | `CmdOrCtrl+Shift+O` | File |
-| Quit | (predefined) | File / App |
 | Cut/Copy/Paste/SelectAll | (predefined) | Edit |
-| Preferences | `CmdOrCtrl+,` | Edit / App |
 | Start Classification | `CmdOrCtrl+R` | Run |
 | Pause Run | `CmdOrCtrl+.` | Run |
 | Toggle Sidebar | `CmdOrCtrl+B` | View |
@@ -47,6 +47,8 @@ For each keyboard shortcut you want, walk this checklist:
 | Toggle Devtools | `CmdOrCtrl+Shift+I` | View (dev only) |
 | Minimize | (predefined) | Window |
 | Bring All to Front | (predefined) | Window (macOS) |
+
+On macOS the first submenu is always the application menu (titled with the app name), so About, Settings and Quit live there rather than under Help/Edit/File. There is no Open Recent: it was a placeholder with no feature behind it (#195); add it back with the feature.
 
 ### Frontend shortcuts (Layer 3, via Nuxt UI's `defineShortcuts` or `@vueuse/core`)
 
@@ -70,55 +72,34 @@ This pattern generalizes. Anything that opens a global UI (search, settings, run
 
 ## Implementation pattern
 
-Rust side defines the menu and emits events when items are clicked:
+Every custom menu item is a variant of the Rust `MenuAction` enum (`src-tauri/src/menu.rs`). Its serde name is the native item id, and tauri-specta exports it to `src/bindings.ts` as a string union. A click (or accelerator) emits one typed event, `MenuActionTriggered { action }`; there are no per-item `menu:<id>` events.
 
 ```rust
-let toggle_palette = MenuItemBuilder::new("Show Command Palette")
-    .id("toggle_command_palette")
-    .accelerator("CmdOrCtrl+K")
-    .build(app)?;
+// menu.rs — placement is data, so a test can check it on any platform
+const FILE_ACTIONS: &[MenuAction] = &[MenuAction::ImportCsv, MenuAction::ExportResults];
 
-// Add to View submenu, then on the global on_menu_event handler:
-app.on_menu_event(move |app, event| {
-    match event.id().0.as_str() {
-        "import_csv" => { app.emit("menu:import_csv", ()).unwrap(); }
-        "toggle_command_palette" => { app.emit("menu:toggle_command_palette", ()).unwrap(); }
-        "start_classification" => { app.emit("menu:start_classification", ()).unwrap(); }
-        // ...
-        _ => {}
-    }
-});
+// handle_event: parse the item id back into a MenuAction and emit it
+MenuActionTriggered { action }.emit(app)
 ```
 
-Frontend side has a single composable that bridges menu events to whatever app-level state needs to react:
+The frontend side is `src/composables/useNativeMenu.ts`:
 
-```typescript
-// composables/useNativeMenu.ts
-import { listen } from '@tauri-apps/api/event'
-import { onMounted, onUnmounted } from 'vue'
+- `useMenuActions()` returns a `Record<MenuAction, () => void>`. Each handler calls the action the in-app UI already uses (workspace store actions, the shared `usePauseRun` mutation, the root-mounted import dialog). Classify and Export are component-local to `DatasetDetail`, so their handlers set `workspace.pendingDatasetAction`; `DatasetDetail` consumes it and runs exactly what its button would, or toasts the same blocker that disables the button.
+- `useNativeMenu()` listens for `MenuActionTriggered` and dispatches through that table. `App.vue` calls it once.
+- The Windows/Linux custom titlebar menu (#104) should dispatch through `useMenuActions()` too.
 
-export function useNativeMenu() {
-  const palette = useCommandPalette()
-  const sidebar = useSidebar()
-  const importDialog = useImportDialog()
-  // ...
+Adding an item can't skip a handler. Coverage is checked at both ends:
 
-  let unlisteners: Array<() => void> = []
+- `menu::tests::every_action_is_placed_exactly_once` (`cargo test`) checks that every `MenuAction` variant sits in the menu layout exactly once, under the id the frontend receives.
+- vue-tsc (`task check`) fails if the handler table is missing a variant or has a key that is no longer a variant.
 
-  onMounted(async () => {
-    unlisteners.push(await listen('menu:toggle_command_palette', () => palette.toggle()))
-    unlisteners.push(await listen('menu:toggle_sidebar', () => sidebar.toggle()))
-    unlisteners.push(await listen('menu:import_csv', () => importDialog.open()))
-    // ...
-  })
+Toggle Devtools is the one custom item handled in Rust (a webview concern, debug builds only), so it is a plain id, not a `MenuAction`.
 
-  onUnmounted(() => {
-    unlisteners.forEach(fn => fn())
-  })
-}
-```
+### Never bind a menu shortcut at two layers
 
-Call `useNativeMenu()` once in the root component. All menu events route through it. The composable becomes the inventory of "things the native menu can trigger" — a single file you can audit when adding a new menu item.
+On macOS the menu accelerator owns the keypress (Layer 2), so the matching WebView bindings are registered only on Windows/Linux: `App.vue`'s `meta_b` `defineShortcuts`, and `CommandPalette`'s `UDashboardSearch` `shortcut` prop (empty on macOS, which never matches). If both layers saw the key, a toggle would fire twice and cancel itself out.
+
+This rests on an assumption not yet verified on a Mac: that a native accelerator such as `Cmd-K` reaches the menu even while the WebView has focus. If testing shows WKWebView swallows it instead, the fix is to drop the accelerator from that menu item, not to bind the key at both layers.
 
 ## The discoverability dividend
 
@@ -132,6 +113,8 @@ For an admin tool used by Excel-trained registrars, this matters more than for a
 
 **Conflicts with system shortcuts.** Avoid `CmdOrCtrl+H` (Hide on macOS), `CmdOrCtrl+M` (Minimize on macOS, conflicts with some Linux WMs), `CmdOrCtrl+W` (Close Window — usually you want this to work as expected, don't override). Standard menu items like `quit()`, `hide()`, `minimize()` get the right accelerators automatically; lean on them.
 
-**Modal/dialog state.** When a modal is open, you usually want global shortcuts to be suppressed. Menu accelerators *don't* care about modal state — they fire regardless. Two options: disable menu items programmatically when a modal opens (Tauri 2 supports this via `MenuItemBuilder::enabled(false)` and runtime updates), or have menu event handlers check current app state and bail if a modal is open. The second is simpler. Add the check inside the `useNativeMenu` composable: if a modal is open, ignore most menu events except Quit and Help.
+**Modal/dialog state.** When a modal is open, you usually want global shortcuts to be suppressed. Menu accelerators *don't* care about modal state — they fire regardless. Two options: disable menu items programmatically when a modal opens (Tauri 2 supports this via `MenuItemBuilder::enabled(false)` and runtime updates), or have menu event handlers check current app state and bail if a modal is open. The second is simpler, and would go in `useMenuActions`. Not done yet: today every handler is safe to run over an open modal (they switch activity, toggle chrome, or open a dialog).
+
+**Actions that need a selection.** Export and Start Classification act on the selected dataset. With none selected, the handler switches to Datasets and toasts "Select a dataset first". The items are not disabled natively, which would mean syncing selection state into Rust.
 
 **Devtools shortcut in production builds.** Tauri ships with `Cmd+Option+I` / `F12` enabled in dev builds and disabled in release builds by default. If you add Toggle Devtools as a menu item, gate it on a build-time flag so it doesn't appear in shipped builds.
