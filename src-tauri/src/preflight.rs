@@ -19,7 +19,6 @@
 //! line count — the spreadsheet row is still what Excel shows.
 
 use std::{
-    collections::HashMap,
     fs::File,
     io::{BufReader, Read},
     path::Path,
@@ -29,6 +28,8 @@ use encoding_rs::{Encoding, MACINTOSH, WINDOWS_1252};
 use encoding_rs_io::DecodeReaderBytesBuilder;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+
+use crate::profile::{InputProfile, InputProfiler, MappedColumns};
 
 /// 1 GiB hard cap. Real working CSVs top out around 200 MB; rejecting anything
 /// bigger keeps a malformed multi-GB file from stalling a pass indefinitely.
@@ -44,15 +45,6 @@ const PREVIEW_ROWS: usize = 5;
 const SAMPLE_LIMIT: usize = 10;
 /// Characters of a cell shown in an issue sample.
 const DISPLAY_CHARS: usize = 200;
-/// Distinct values tracked per mapped column. Past the cap, known values keep
-/// counting and new ones are dropped (`distinct_capped`), bounding memory on
-/// 2M-row files where nearly every title is unique.
-const DISTINCT_CAP: usize = 100_000;
-/// Bytes of a value used as its distribution key, so the cap above bounds
-/// memory at ~`DISTINCT_CAP * STAT_KEY_BYTES` per column even for hostile cells.
-const STAT_KEY_BYTES: usize = 256;
-/// Most frequent values reported per mapped column.
-const TOP_VALUES: usize = 10;
 
 const UTF16_MESSAGE: &str =
     "this file is UTF-16 encoded. Re-save it as \"CSV UTF-8\" and choose it again.";
@@ -129,7 +121,7 @@ pub(crate) fn truncate(s: String) -> String {
     truncate_to(s, MAX_FIELD_BYTES)
 }
 
-fn truncate_to(mut s: String, max_bytes: usize) -> String {
+pub(crate) fn truncate_to(mut s: String, max_bytes: usize) -> String {
     if s.len() > max_bytes {
         let mut cut = max_bytes;
         while !s.is_char_boundary(cut) {
@@ -140,18 +132,18 @@ fn truncate_to(mut s: String, max_bytes: usize) -> String {
     s
 }
 
-fn display(s: &str) -> String {
+pub(crate) fn display(s: &str) -> String {
     s.chars().take(DISPLAY_CHARS).collect()
 }
 
 /// Spreadsheet row of the `index`-th data record (0-based): the header is
 /// row 1, so data starts at row 2.
-fn spreadsheet_row(index: u64) -> u64 {
+pub(crate) fn spreadsheet_row(index: u64) -> u64 {
     index + 2
 }
 
 /// A count of occurrences plus the first few examples.
-#[derive(Type, Serialize, Debug)]
+#[derive(Type, Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Samples<T> {
     pub count: u64,
@@ -159,7 +151,7 @@ pub(crate) struct Samples<T> {
 }
 
 impl<T> Samples<T> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             count: 0,
             first: Vec::new(),
@@ -167,7 +159,7 @@ impl<T> Samples<T> {
     }
 
     /// Count one occurrence; build the example only while under the limit.
-    fn push(&mut self, example: impl FnOnce() -> T) {
+    pub(crate) fn push(&mut self, example: impl FnOnce() -> T) {
         self.count += 1;
         if self.first.len() < SAMPLE_LIMIT {
             self.first.push(example());
@@ -470,7 +462,10 @@ pub(crate) struct Validation {
     pub skipped: Samples<SkippedRow>,
     /// Cells longer than the per-field cap; import truncates them.
     pub truncated_fields: u64,
+    /// `profile.columns`, kept here for the dialog's column grid.
     pub columns: MappedColumns,
+    /// Field shapes, checks, findings, and sample model inputs.
+    pub profile: InputProfile,
 }
 
 #[derive(Type, Serialize, Debug)]
@@ -479,33 +474,6 @@ pub(crate) struct SkippedRow {
     pub row: u64,
     /// Headers of the required columns that were empty.
     pub missing: Vec<String>,
-}
-
-#[derive(Type, Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MappedColumns {
-    pub subject: ColumnStats,
-    pub catalog: ColumnStats,
-    pub title: ColumnStats,
-}
-
-#[derive(Type, Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ColumnStats {
-    pub header: String,
-    pub empty: u64,
-    pub distinct: u64,
-    /// True when [`DISTINCT_CAP`] was hit: `distinct` is a lower bound and
-    /// `top` only reflects values seen before the cap.
-    pub distinct_capped: bool,
-    pub top: Vec<ValueCount>,
-}
-
-#[derive(Type, Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ValueCount {
-    pub value: String,
-    pub count: u64,
 }
 
 #[tauri::command]
@@ -517,60 +485,6 @@ pub(crate) async fn validate_import(
     tauri::async_runtime::spawn_blocking(move || validate(Path::new(&path), encoding))
         .await
         .map_err(|e| format!("validate task panicked: {e}"))?
-}
-
-struct ColumnTally {
-    header: String,
-    empty: u64,
-    counts: HashMap<String, u64>,
-    capped: bool,
-}
-
-impl ColumnTally {
-    fn new(header: String) -> Self {
-        Self {
-            header,
-            empty: 0,
-            counts: HashMap::new(),
-            capped: false,
-        }
-    }
-
-    fn observe(&mut self, value: &str) {
-        if value.is_empty() {
-            self.empty += 1;
-            return;
-        }
-        let key = truncate_to(value.to_owned(), STAT_KEY_BYTES);
-        if let Some(n) = self.counts.get_mut(&key) {
-            *n += 1;
-        } else if self.counts.len() < DISTINCT_CAP {
-            self.counts.insert(key, 1);
-        } else {
-            self.capped = true;
-        }
-    }
-
-    fn finish(self) -> ColumnStats {
-        let distinct = self.counts.len() as u64;
-        let mut top: Vec<ValueCount> = self
-            .counts
-            .into_iter()
-            .map(|(value, count)| ValueCount {
-                value: display(&value),
-                count,
-            })
-            .collect();
-        top.sort_unstable_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
-        top.truncate(TOP_VALUES);
-        ColumnStats {
-            header: self.header,
-            empty: self.empty,
-            distinct,
-            distinct_capped: self.capped,
-            top,
-        }
-    }
 }
 
 pub(crate) fn validate(path: &Path, encoding: TextEncoding) -> Result<Validation, String> {
@@ -590,15 +504,15 @@ pub(crate) fn validate(path: &Path, encoding: TextEncoding) -> Result<Validation
     }
     let mapping = detect_mapping(&headers)?;
     let header = |i: usize| headers.get(i).cloned().unwrap_or_default();
-    let mut tallies = [
-        ColumnTally::new(header(mapping.subject)),
-        ColumnTally::new(header(mapping.catalog)),
-        ColumnTally::new(header(mapping.title)),
+    let mapped_headers = [
+        header(mapping.subject),
+        header(mapping.catalog),
+        header(mapping.title),
     ];
+    let mut profiler = InputProfiler::new(mapped_headers.clone());
 
     let mut sample_rows = Vec::with_capacity(PREVIEW_ROWS);
     let mut rows: u64 = 0;
-    let mut importable: u64 = 0;
     let mut skipped = Samples::new();
     let mut truncated_fields: u64 = 0;
     let mut record = csv::StringRecord::new();
@@ -614,38 +528,31 @@ pub(crate) fn validate(path: &Path, encoding: TextEncoding) -> Result<Validation
         truncated_fields += record.iter().filter(|f| f.len() > MAX_FIELD_BYTES).count() as u64;
 
         let cells = mapped_cells(&record, mapping);
-        for (tally, cell) in tallies.iter_mut().zip(cells) {
-            tally.observe(cell);
-        }
-        if cells.iter().all(|c| !c.is_empty()) {
-            importable += 1;
-        } else {
+        profiler.observe(row, cells);
+        if cells.iter().any(|c| c.is_empty()) {
             skipped.push(|| SkippedRow {
                 row,
-                missing: tallies
+                missing: mapped_headers
                     .iter()
                     .zip(cells)
                     .filter(|(_, c)| c.is_empty())
-                    .map(|(t, _)| t.header.clone())
+                    .map(|(h, _)| h.clone())
                     .collect(),
             });
         }
     }
 
-    let [subject, catalog, title] = tallies;
+    let profile = profiler.finish();
     Ok(Validation {
         headers,
         sample_rows,
         mapping,
         rows,
-        importable,
+        importable: profile.importable,
         skipped,
         truncated_fields,
-        columns: MappedColumns {
-            subject: subject.finish(),
-            catalog: catalog.finish(),
-            title: title.finish(),
-        },
+        columns: profile.columns.clone(),
+        profile,
     })
 }
 
@@ -657,7 +564,10 @@ mod tests {
         ColumnMap, EncodingReport, Inspection, TextEncoding, check_mapping, inspect, mapped_cells,
         open_csv, validate,
     };
-    use crate::format::{CourseInput, content_hash};
+    use crate::{
+        format::{CourseInput, content_hash},
+        profile::FindingCode,
+    };
 
     const HEADER: &[u8] = b"sub_pref,course,course_title\r\n";
 
@@ -857,6 +767,40 @@ mod tests {
         assert_eq!(top, vec![("ECON", 3), ("MATH", 1)]);
         assert!(!subject.distinct_capped);
         assert_eq!(got.columns.title.empty, 1);
+        Ok(())
+    }
+
+    /// A catalog column that already carries the subject is the mapping
+    /// mistake the profiler exists for: the dry run reports it with the
+    /// doubled model input before Import is clicked.
+    #[test]
+    fn validate_profiles_combined_catalog_column() -> Result<(), String> {
+        let body = csv(&[
+            b"PSYC,PSYC 4325,ABNORMAL PSYCHOLOGY",
+            b"PSYC,PSYC 2301,GENERAL PSYCHOLOGY",
+            b"ECON,2301,PRINCIPLES OF MICRO",
+            b"ECON,,ORPHAN",
+        ]);
+        let got = validate(&fixture("combined.csv", &body)?, TextEncoding::Utf8)?;
+        let profile = &got.profile;
+        assert_eq!((profile.rows, profile.importable), (4, 3));
+        assert_eq!(profile.skipped.catalog, 1);
+        assert_eq!(profile.columns.catalog.header, got.columns.catalog.header);
+        let finding = profile
+            .findings
+            .iter()
+            .find(|f| f.code == FindingCode::CatalogHasSubjectPrefix)
+            .ok_or("no prefix finding")?;
+        assert_eq!(finding.count, 2);
+        assert_eq!(
+            finding
+                .examples
+                .first
+                .first()
+                .map(|s| (s.row, s.input.as_str())),
+            Some((2, "PSYC PSYC 4325 --- ABNORMAL PSYCHOLOGY"))
+        );
+        assert_eq!(profile.samples.len(), 3);
         Ok(())
     }
 

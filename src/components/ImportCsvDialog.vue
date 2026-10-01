@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { computed, ref, watch } from "vue";
 import { commands, type Inspection, type TextEncoding, type Validation } from "../bindings";
+import InputProfilePanel from "./InputProfilePanel.vue";
 
 const isOpen = defineModel<boolean>("open", { default: false });
 
@@ -372,9 +373,12 @@ watch(isOpen, (next) => {
             </div>
           </div>
 
+          <InputProfilePanel :profile="validation.profile" />
+
           <p class="text-xs text-(--ui-text-dimmed)">
-            Subject, catalog, and title columns are detected by header name. The import runs in
-            the background; you'll see the row count tick up live in the sidebar.
+            Subject, catalog, and title columns are detected by header name. The input checks
+            above inform; they don't block the import. The import runs in the background; you'll
+            see the row count tick up live in the sidebar.
           </p>
         </div>
 

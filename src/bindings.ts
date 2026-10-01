@@ -358,6 +358,7 @@ cacheHitRate: number | null }
  * carry `description`; there are no 4-digit rows.
  */
 export type CcmEntry = { digitLevel: number; code: string; title: string; titleShort: string | null; description: string | null }
+export type CheckCount = { code: FindingCode; count: number }
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.
@@ -472,6 +473,30 @@ modelIds: number[];
  * `ccm…_title5`) per exported model. Export-dialog toggle (EPI-98).
  */
 includeTopCandidates: boolean; rowMode: RowMode }
+export type Field = "subject" | "catalog" | "title" | "row"
+/**
+ * Length and character-shape summary of one field over importable rows.
+ */
+export type FieldShape = { 
+/**
+ * Char counts over non-empty values.
+ */
+lenMin: number; lenMedian: number; lenMax: number; 
+/**
+ * Collapsed character-class shapes, most common first, at most 8.
+ */
+topShapes: ValueCount[] }
+export type FieldShapes = { subject: FieldShape; catalog: FieldShape; title: FieldShape }
+export type Finding = { code: FindingCode; severity: Severity; field: Field; count: number; 
+/**
+ * `count / importable`; 0.0 for dataset-level checks with no row count.
+ */
+rate: number; examples: Samples<Sample> }
+/**
+ * Declared in report order: warnings, then notes. `checks` and `findings`
+ * follow this order.
+ */
+export type FindingCode = "catalog_has_subject_prefix" | "subject_has_number" | "catalog_numeric_coerced" | "catalog_no_digits" | "catalog_has_whitespace" | "catalog_too_long" | "catalog_low_cardinality" | "subject_too_long" | "subject_high_cardinality" | "title_no_letters" | "title_too_long" | "title_repeats_code" | "title_short" | "catalog_short" | "subject_lowercase" | "title_mixed_case" | "encoding_damage" | "inner_whitespace_runs"
 export type ImportRequest = { path: string; 
 /**
  * Falls back to the filename when null/blank.
@@ -494,6 +519,32 @@ mapping: ColumnMap }
  * streaming rows in. The frontend polls `list_datasets` from here.
  */
 export type ImportStarted = { datasetId: string; sourceFileId: number }
+export type InputProfile = { version: number; 
+/**
+ * Data records seen, excluding the header.
+ */
+rows: number; 
+/**
+ * Rows with subject, catalog, and title all non-empty after trim.
+ */
+importable: number; 
+/**
+ * Rows with at least one empty required field, by which field was empty.
+ * A row missing two fields counts in both.
+ */
+skipped: SkipCounts; columns: MappedColumns; fields: FieldShapes; 
+/**
+ * Every check's raw count, whether or not it crossed its threshold.
+ */
+checks: CheckCount[]; 
+/**
+ * Checks that crossed their threshold, warnings first.
+ */
+findings: Finding[]; 
+/**
+ * Assembled model-input strings, spread across the file, distinct.
+ */
+samples: Sample[] }
 export type Inspection = { sizeBytes: number; 
 /**
  * Data records, excluding the header.
@@ -651,6 +702,7 @@ platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[];
  * damaged-pack fallback, missing CUDA directory, failed preloads.
  */
 notices: string[] }
+export type Sample = { row: number; input: string }
 /**
  * A count of occurrences plus the first few examples.
  */
@@ -698,6 +750,8 @@ cudaLibraryDir?: string | null;
  * relaunch (ONNX Runtime is init-once).
  */
 preferredPack?: string | null }
+export type Severity = "warning" | "info"
+export type SkipCounts = { total: number; subject: number; catalog: number; title: number }
 export type SkippedRow = { row: number; 
 /**
  * Headers of the required columns that were empty.
@@ -748,7 +802,15 @@ importable: number; skipped: Samples<SkippedRow>;
 /**
  * Cells longer than the per-field cap; import truncates them.
  */
-truncatedFields: number; columns: MappedColumns }
+truncatedFields: number; 
+/**
+ * `profile.columns`, kept here for the dialog's column grid.
+ */
+columns: MappedColumns; 
+/**
+ * Field shapes, checks, findings, and sample model inputs.
+ */
+profile: InputProfile }
 export type ValueCount = { value: string; count: number }
 
 /** tauri-specta globals **/
