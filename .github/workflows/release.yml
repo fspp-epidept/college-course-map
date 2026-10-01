@@ -38,7 +38,7 @@ jobs:
       # to satisfy required status checks. On token expiry this job fails
       # with a 401 until a fresh PAT is stored:
       #   gh secret set RELEASE_PLEASE_TOKEN --repo fspp-epidept/college-course-map
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
         id: release
         with:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
@@ -53,9 +53,11 @@ jobs:
   # its legs would also need a model-fetch pre-step reading src-tauri/
   # models.toml (same URL scheme + sha256 verify as models.rs::download_one).
   #
-  # Unsigned for now. Signing lands as env vars on the tauri-action step,
-  # no restructuring: TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) for the updater
-  # (EPI-55), APPLE_CERTIFICATE/APPLE_ID etc. for macOS (EPI-1/21/22).
+  # macOS is Developer ID signed + notarized; Windows and Linux are unsigned
+  # for now. The Apple credentials are secrets of the `release` environment,
+  # which only the macOS leg enters, so the other legs never see them.
+  # Actions are pinned by commit SHA because the macOS leg runs them with
+  # those secrets in scope.
   #
   # macOS runners bill 10x minutes on this repo — this matrix runs on
   # release events only, never per-PR.
@@ -77,15 +79,37 @@ jobs:
         # bundles a DuckDB that compiles under VS 18.
         platform: ${{ github.event_name == 'workflow_dispatch' && fromJSON(inputs.platforms) || fromJSON('["ubuntu-latest", "macos-latest", "windows-2022"]') }}
     runs-on: ${{ matrix.platform }}
+    environment: ${{ matrix.platform == 'macos-latest' && 'release' || '' }}
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
+      # The `release` environment gates on the workflow's ref, but a dispatch
+      # builds whatever commit `inputs.tag` names — and anyone with write
+      # access can push a tag. Resolve the tag to a commit SHA once, refuse
+      # it unless that commit is on main (which is PR-only), and check out
+      # that exact SHA, so unreviewed code never runs with the signing
+      # secrets and a tag moved mid-run can't swap the commit.
+      - name: Resolve dispatched tag to a commit on main
+        id: dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha)"
+          status="$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" --jq .status)"
+          if [[ "$status" != "behind" && "$status" != "identical" ]]; then
+            echo "::error::$RELEASE_TAG ($sha) is not on main (compare status: $status)"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       # On push the tag was created on this workflow's own trigger commit, so
-      # the default checkout ref IS the released commit; on dispatch we must
-      # check out the tag itself (main may have moved past it).
-      - uses: actions/checkout@v4
+      # the default checkout ref IS the released commit; on dispatch we check
+      # out the tag's verified commit (main may have moved past it).
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+          ref: ${{ steps.dispatch.outputs.sha }}
 
       # Reclaim ~30 GB of preinstalled toolchains before the release-profile
       # compile + deb/rpm/AppImage staging (same guard as ci.yml, where the
@@ -97,9 +121,9 @@ jobs:
             /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           df -h /
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: pnpm
@@ -115,7 +139,7 @@ jobs:
 
       # rust-toolchain.toml pins the toolchain; the rustup shim installs it
       # on first cargo invocation.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: src-tauri
           cache-on-failure: true
@@ -143,13 +167,54 @@ jobs:
           mkdir -p src-tauri/runtimes/cpu
           cargo run --quiet --manifest-path src-tauri/Cargo.toml --example runtime_install -- cpu
 
+      # Tauri's bundler signs the main binary and the app, but not Mach-O
+      # files under Resources/ — and notarization rejects any Mach-O that
+      # lacks a Developer ID signature with a secure timestamp. Sign the
+      # runtime pack's dylibs in place; the signature is embedded in each
+      # file, so it survives the bundler's resource copy. The API key is
+      # written out here because Tauri takes it as a path.
+      - name: Sign ONNX Runtime pack, stage notarization key (macOS)
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          keychain="$RUNNER_TEMP/ort-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+          find src-tauri/runtimes/cpu -type f -name '*.dylib' -not -path '*.dSYM/*' -print0 \
+            | xargs -0 codesign --force --timestamp --options runtime \
+              --sign "$APPLE_SIGNING_IDENTITY"
+          security delete-keychain "$keychain"
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+
       # release-please owns tag/release creation; tagName points tauri-action
       # at that existing release (gated on release_created, so it exists and
       # is non-draft, matching releaseDraft's default) — it must never create
       # its own. release-please-action exposes no release-id output, hence
       # tagName rather than releaseId.
-      - uses: tauri-apps/tauri-action@v1
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty outside the macOS leg (no `release` environment there).
+          # APPLE_API_KEY_PATH comes from the signing step via GITHUB_ENV.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
