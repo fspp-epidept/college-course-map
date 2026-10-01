@@ -54,6 +54,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         6,
         include_str!("../migrations/0006_ccm_taxonomy_corrections.sql"),
     ),
+    (
+        7,
+        include_str!("../migrations/0007_dataset_input_profile.sql"),
+    ),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -214,7 +218,7 @@ pub fn db_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "no platform data directory available".to_owned())
 }
 
-fn migrate(conn: &Connection) -> Result<(), String> {
+pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version    INTEGER PRIMARY KEY,
@@ -471,6 +475,10 @@ mod tests {
                 .1
                 .starts_with("A general course that focuses on the planetary")
         );
+
+        // 0007: the import worker's input profile, NULL for older datasets.
+        conn.prepare("SELECT input_profile FROM datasets")
+            .map_err(|e| e.to_string())?;
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn)?;
