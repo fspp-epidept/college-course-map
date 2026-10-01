@@ -27,6 +27,10 @@ export const useWorkspace = defineStore(
     // sidebars when the backing row disappears (e.g. after db:clear-data).
     const selectedDatasetId = ref<string | null>(null);
     const selectedRunId = ref<string | null>(null);
+    // CCM Reference selection: a taxonomy code, 2- or 6-digit. The
+    // taxonomy is static, so no pruning — the detail shows "not found" if a
+    // persisted code ever disappears.
+    const selectedCcmCode = ref<string | null>(null);
 
     // Primary sidebar visibility. Per-session for now (not persisted) so a
     // demo opens with the sidebar showing every time.
@@ -58,6 +62,10 @@ export const useWorkspace = defineStore(
       selectedRunId.value = id;
     }
 
+    function selectCcmCode(code: string | null): void {
+      selectedCcmCode.value = code;
+    }
+
     function toggleSidebar(): void {
       sidebarOpen.value = !sidebarOpen.value;
     }
@@ -74,6 +82,7 @@ export const useWorkspace = defineStore(
       activeActivityId,
       selectedDatasetId,
       selectedRunId,
+      selectedCcmCode,
       sidebarOpen,
       sidebarWidthRem,
       commandPaletteOpen,
@@ -82,6 +91,7 @@ export const useWorkspace = defineStore(
       setActiveSettingsSection,
       selectDataset,
       selectRun,
+      selectCcmCode,
       toggleSidebar,
       setSidebarWidth,
       toggleCommandPalette,
@@ -99,6 +109,7 @@ export const useWorkspace = defineStore(
         "activeActivityId",
         "selectedDatasetId",
         "selectedRunId",
+        "selectedCcmCode",
         "sidebarWidthRem",
         "activeSettingsSection",
       ],
