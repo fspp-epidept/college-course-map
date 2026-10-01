@@ -82,6 +82,20 @@ async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, s
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The input profile the import worker stored on the dataset (profile.rs),
+ * or `None` when the dataset is unknown or predates the profile. A stored
+ * profile that fails to parse is an error, not `None`: the UI must not
+ * present a broken profile as "not available".
+ */
+async getInputProfile(datasetId: string) : Promise<Result<InputProfile | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_input_profile", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listDatasets() : Promise<Result<DatasetSummary[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_datasets") };

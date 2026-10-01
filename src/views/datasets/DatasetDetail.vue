@@ -2,8 +2,10 @@
 import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
+import InputProfilePanel from "../../components/InputProfilePanel.vue";
+import { INPUT_FINDINGS } from "../../config/inputFindings";
 import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
-import { useDatasets } from "../../composables/useDatasets";
+import { useDatasets, useInputProfile } from "../../composables/useDatasets";
 import {
   resumeBlockerText,
   useLatestRun,
@@ -140,12 +142,34 @@ const isImporting = computed(() => dataset.value?.importState === "importing");
 const importFailed = computed(() => dataset.value?.importState === "failed");
 
 // When import finishes (or fails), refresh the courses + coverage queries
-// exactly once so the table fills in.
+// exactly once so the table fills in, and the input profile the worker
+// stored on completion.
 watch(isImporting, (now, before) => {
   if (before && !now) {
     queryClient.invalidateQueries({ queryKey: ["courses", currentDatasetId.value] });
     queryClient.invalidateQueries({ queryKey: ["coverage", currentDatasetId.value] });
+    queryClient.invalidateQueries({ queryKey: ["inputProfile", currentDatasetId.value] });
   }
+});
+
+// --- Input check ---
+// The profile the import worker persisted (profile.rs). Null for datasets
+// imported before input checks existed; those say so rather than recompute.
+const { data: inputProfile, isPending: inputProfilePending } = useInputProfile(currentDatasetId);
+const profileOpen = ref(false);
+const profileWarnings = computed(
+  () => inputProfile.value?.findings.filter((f) => f.severity === "warning") ?? [],
+);
+const profileSummary = computed(() => {
+  const p = inputProfile.value;
+  if (!p) return null;
+  if (p.findings.length === 0) return "Input check: no issues";
+  const warnings = profileWarnings.value.length;
+  const notes = p.findings.length - warnings;
+  const parts: string[] = [];
+  if (warnings > 0) parts.push(`${warnings} ${warnings === 1 ? "warning" : "warnings"}`);
+  if (notes > 0) parts.push(`${notes} ${notes === 1 ? "note" : "notes"}`);
+  return `Input check: ${parts.join(", ")}`;
 });
 
 const classifyDisabled = computed(
@@ -348,6 +372,39 @@ async function exportCsv(): Promise<void> {
       class="rounded-lg border border-(--ui-color-error-500)/40 bg-(--ui-color-error-500)/10 px-4 py-3 text-sm text-(--ui-color-error-500)"
     >
       Import failed: {{ dataset.importError }}
+    </div>
+
+    <!-- Input check: the profile the import worker stored. The banner above
+         covers the importing state; nothing renders until the query settles. -->
+    <div
+      v-if="!isImporting && !inputProfilePending && dataset?.importState === 'ready'"
+      class="rounded-lg border border-(--ui-border) px-4 py-3 text-sm flex flex-col gap-2"
+    >
+      <template v-if="inputProfile">
+        <button
+          type="button"
+          class="flex items-center gap-2 text-left text-(--ui-text) cursor-pointer"
+          :aria-expanded="profileOpen"
+          @click="profileOpen = !profileOpen"
+        >
+          <UIcon
+            :name="profileOpen ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'"
+            class="size-4 text-(--ui-text-muted)"
+          />
+          <span class="font-medium">{{ profileSummary }}</span>
+          <span
+            v-if="profileWarnings.length > 0"
+            class="text-xs text-(--ui-color-warning-500)"
+          >
+            {{ profileWarnings.map((f) => INPUT_FINDINGS[f.code].title).join(" · ") }}
+          </span>
+        </button>
+        <InputProfilePanel v-if="profileOpen" :profile="inputProfile" />
+      </template>
+      <p v-else class="text-(--ui-text-muted)">
+        Input check: not available. This dataset was imported before input checks existed;
+        re-import the file to check it.
+      </p>
     </div>
 
     <section class="flex flex-col gap-3">

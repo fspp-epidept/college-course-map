@@ -27,9 +27,10 @@ use crate::{
     db::AppDb,
     format::{CourseInput, content_hash},
     preflight::{
-        ColumnMap, MAX_COLUMNS, TextEncoding, check_mapping, mapped_cells, open_csv, stat_source,
-        truncate,
+        ColumnMap, MAX_COLUMNS, TextEncoding, check_mapping, mapped_cells, open_csv,
+        spreadsheet_row, stat_source, truncate,
     },
+    profile::{InputProfile, InputProfiler},
 };
 
 /// blake3 read chunk for streaming the file hash.
@@ -179,18 +180,25 @@ struct ImportTask {
 impl ImportTask {
     fn run(self) {
         match self.run_inner() {
-            Ok((imported, _skipped)) => self.mark_ready(imported),
+            Ok((imported, profile)) => self.mark_ready(imported, &profile),
             Err(err) => self.mark_failed(&err),
         }
     }
 
-    /// Stream the CSV and bulk-insert in fixed-size batches.
-    /// Returns `(imported, skipped)`.
-    fn run_inner(&self) -> Result<(u64, u64), String> {
+    /// Stream the CSV and bulk-insert in fixed-size batches. Every record
+    /// read also feeds the input profile, so a `limit`-capped import profiles
+    /// only the rows it read. Returns `(imported, profile)`.
+    fn run_inner(&self) -> Result<(u64, InputProfile), String> {
         let mut reader = open_csv(Path::new(&self.path), self.encoding)?;
+        let headers = reader.headers().map_err(|e| format!("read headers: {e}"))?;
+        let header = |i: usize| truncate(headers.get(i).unwrap_or_default().to_owned());
+        let mut profiler = InputProfiler::new([
+            header(self.mapping.subject),
+            header(self.mapping.catalog),
+            header(self.mapping.title),
+        ]);
 
         let mut imported: u64 = 0;
-        let mut skipped: u64 = 0;
         let mut row_index: i64 = 0;
         let mut batch: Vec<BatchRow> = Vec::with_capacity(BATCH_SIZE);
 
@@ -201,10 +209,14 @@ impl ImportTask {
                 break;
             }
             let record = record.map_err(|e| format!("read row {row_index}: {e}"))?;
-            let [subject, catalog, title] = mapped_cells(&record, self.mapping);
+            let cells = mapped_cells(&record, self.mapping);
+            profiler.observe(
+                spreadsheet_row(u64::try_from(row_index).unwrap_or(u64::MAX)),
+                cells,
+            );
+            let [subject, catalog, title] = cells;
 
             if subject.is_empty() || catalog.is_empty() || title.is_empty() {
-                skipped += 1;
                 row_index += 1;
                 continue;
             }
@@ -243,7 +255,7 @@ impl ImportTask {
             self.flush(&batch)?;
         }
         // Final row_count is set in mark_ready.
-        Ok((imported, skipped))
+        Ok((imported, profiler.finish()))
     }
 
     /// Bulk-insert one batch via the `DuckDB` Appender. `appender_with_columns`
@@ -305,7 +317,15 @@ impl ImportTask {
         Ok(())
     }
 
-    fn mark_ready(&self, imported: u64) {
+    fn mark_ready(&self, imported: u64, profile: &InputProfile) {
+        // Serialize before taking the lock: `mark_failed` takes it too.
+        let profile_json = match serde_json::to_string(profile) {
+            Ok(json) => json,
+            Err(e) => {
+                self.mark_failed(&format!("serialize input profile: {e}"));
+                return;
+            }
+        };
         let db = self.app.state::<AppDb>();
         let Ok(conn) = db.rw() else {
             log::error!(
@@ -314,12 +334,15 @@ impl ImportTask {
             );
             return;
         };
+        // The JSON column takes the string directly (VARCHAR -> JSON cast).
         if let Err(e) = conn.execute(
             "UPDATE datasets
-                SET row_count = ?, import_state = 'ready', import_error = NULL
+                SET row_count = ?, import_state = 'ready', import_error = NULL,
+                    input_profile = ?
               WHERE id = ?",
             params![
                 i64::try_from(imported).unwrap_or(i64::MAX),
+                &profile_json,
                 &self.dataset_id,
             ],
         ) {
@@ -459,6 +482,50 @@ mod tests {
             title: 2,
         };
         assert!(extra_columns_json(&three, mapping_three)?.is_none());
+        Ok(())
+    }
+
+    /// `mark_ready` writes the serialized profile into the JSON column as a
+    /// plain string parameter, and `get_input_profile` reads it back through
+    /// `::VARCHAR`. Round-trips through the real schema.
+    #[test]
+    fn input_profile_round_trips_through_json_column() -> Result<(), String> {
+        use crate::profile::InputProfiler;
+
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        crate::db::migrate(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
+             VALUES ('d1', 't', 'file', now(), 0, 'importing')",
+        )
+        .map_err(|e| e.to_string())?;
+
+        let mut profiler = InputProfiler::new(["s".into(), "c".into(), "t".into()]);
+        profiler.observe(2, ["PSYC", "PSYC 4325", "ABNORMAL"]);
+        profiler.observe(3, ["ECON", "", "MICRO"]);
+        let profile = profiler.finish();
+        let json = serde_json::to_string(&profile).map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE datasets SET input_profile = ? WHERE id = ?",
+            duckdb::params![&json, "d1"],
+        )
+        .map_err(|e| e.to_string())?;
+
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT input_profile::VARCHAR FROM datasets WHERE id = ?",
+                ["d1"],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let back: crate::profile::InputProfile =
+            serde_json::from_str(stored.as_deref().ok_or("NULL profile")?)
+                .map_err(|e| e.to_string())?;
+        assert_eq!(
+            (back.rows, back.importable, back.skipped.catalog),
+            (2, 1, 1)
+        );
+        assert_eq!(back.samples.first().map(|s| s.row), Some(2));
         Ok(())
     }
 

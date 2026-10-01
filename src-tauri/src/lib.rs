@@ -38,6 +38,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             courses::get_classification_coverage,
             courses::list_courses_with_results,
             courses::model_id_for_digit_level,
+            datasets::get_input_profile,
             datasets::list_datasets,
             export::export_results,
             import::import_csv,

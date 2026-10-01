@@ -2,11 +2,12 @@
 //! creation) land alongside this module as Phase 7 work picks up; for now
 //! this is just the listing endpoint that the Datasets activity tab consumes.
 
+use duckdb::OptionalExt;
 use serde::Serialize;
 use specta::Type;
 use tauri::State;
 
-use crate::db::AppDb;
+use crate::{db::AppDb, profile::InputProfile};
 
 /// One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
 /// strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -64,4 +65,32 @@ pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>,
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+/// The input profile the import worker stored on the dataset (profile.rs),
+/// or `None` when the dataset is unknown or predates the profile. A stored
+/// profile that fails to parse is an error, not `None`: the UI must not
+/// present a broken profile as "not available".
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects State by value; cannot be taken by reference at the macro layer"
+)]
+pub(crate) fn get_input_profile(
+    dataset_id: String,
+    db: State<'_, AppDb>,
+) -> Result<Option<InputProfile>, String> {
+    let conn = db.ro()?;
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT input_profile::VARCHAR FROM datasets WHERE id = ?",
+            [&dataset_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    json.map(|j| serde_json::from_str(&j).map_err(|e| format!("parse input profile: {e}")))
+        .transpose()
 }
