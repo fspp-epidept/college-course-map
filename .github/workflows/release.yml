@@ -201,14 +201,13 @@ jobs:
           printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
           echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
 
-      # release-please owns tag/release creation; tagName points tauri-action
-      # at that existing release (gated on release_created, so it exists and
-      # is non-draft, matching releaseDraft's default) — it must never create
-      # its own. release-please-action exposes no release-id output, hence
-      # tagName rather than releaseId.
+      # Build only. release-please solely owns the release (tag, title,
+      # body): given tagName/releaseId, tauri-action updates the release and
+      # PATCHes its body to empty, so it gets no release inputs at all and
+      # the next step attaches the installers.
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
+        id: tauri
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Empty outside the macOS leg (no `release` environment there).
           # APPLE_API_KEY_PATH comes from the signing step via GITHUB_ENV.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -216,5 +215,28 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-        with:
-          tagName: ${{ env.RELEASE_TAG }}
+
+      # artifactPaths is emitted before tauri-action tars the macOS .app
+      # directory into <app>.app.tar.gz, so a directory entry means "upload
+      # its tarball", renamed to tauri-action's <name>_<version>_<arch>
+      # release-asset scheme. tauri-action no longer writes the updater's
+      # latest.json; generate it here when the updater lands.
+      - name: Upload installers to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          APP_VERSION: ${{ steps.tauri.outputs.appVersion }}
+        run: |
+          files=()
+          while IFS= read -r path; do
+            if [[ -d "$path" ]]; then
+              case "$(uname -m)" in arm64) arch=aarch64 ;; *) arch=x64 ;; esac
+              tarball="$(dirname "$path")/$(basename "$path" .app)_${APP_VERSION}_${arch}.app.tar.gz"
+              mv "$path.tar.gz" "$tarball"
+              files+=("$tarball")
+            else
+              files+=("$path")
+            fi
+          done < <(jq -r '.[]' <<<"$ARTIFACT_PATHS")
+          gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
