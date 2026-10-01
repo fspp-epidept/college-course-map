@@ -1,7 +1,7 @@
 //! Diagnostic log file (EPI-109). Every 0.4.0 field bug needed testers to
 //! run `ProcDump` or redirect stderr to recover a panic message, because the
 //! release exe has no console and the app's breadcrumbs were `eprintln!`.
-//! The `log` facade now writes to `<data>/college-course-map/logs/app.log`
+//! The `log` facade now writes to `<local data>/college-course-map/logs/app.log`
 //! (product-dir convention, not Tauri's identifier-based log dir) and to
 //! stdout for dev runs.
 //!
@@ -18,7 +18,6 @@ use std::path::PathBuf;
 use log::LevelFilter;
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
-const PRODUCT_DIR: &str = "college-course-map";
 const LOGS_SUBDIR: &str = "logs";
 const LOG_NAME: &str = "app";
 
@@ -26,11 +25,9 @@ const LOG_NAME: &str = "app";
 /// so disk use is bounded at about twice this figure.
 const MAX_FILE_SIZE: u128 = 2_000_000;
 
-/// `<data>/college-course-map/logs`.
+/// `<local data>/college-course-map/logs`.
 pub(crate) fn logs_dir() -> Result<PathBuf, String> {
-    dirs::data_dir()
-        .map(|dir| dir.join(PRODUCT_DIR).join(LOGS_SUBDIR))
-        .ok_or_else(|| "no platform data directory available".to_owned())
+    Ok(crate::paths::data_dir()?.join(LOGS_SUBDIR))
 }
 
 /// The log plugin, registered right after the boot plugin so every startup

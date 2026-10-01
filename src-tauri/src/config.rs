@@ -1,7 +1,7 @@
 //! Theme + general-settings persistence (theming decision #106).
 //!
 //! All config file I/O lives here; the frontend never touches disk. Files live
-//! under the product-named config dir `college-course-map` (via `dirs::config_dir`,
+//! under the product-named config dir `college-course-map` (via `paths::config_dir`,
 //! not Tauri's identifier-based `app_config_dir`):
 //!
 //! - `settings.json` — general settings; `activeTheme` references a theme by id.
@@ -202,20 +202,12 @@ impl Default for Settings {
     }
 }
 
-const PRODUCT_DIR: &str = "college-course-map";
-
-fn config_root() -> Result<PathBuf, String> {
-    dirs::config_dir()
-        .map(|dir| dir.join(PRODUCT_DIR))
-        .ok_or_else(|| "no platform config directory available".to_owned())
-}
-
 fn themes_dir() -> Result<PathBuf, String> {
-    Ok(config_root()?.join("themes"))
+    Ok(crate::paths::config_dir()?.join("themes"))
 }
 
 fn settings_path() -> Result<PathBuf, String> {
-    Ok(config_root()?.join("settings.json"))
+    Ok(crate::paths::config_dir()?.join("settings.json"))
 }
 
 /// Create the config root and `themes/` dir if absent. Idempotent.
