@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import type { Finding, InputProfile } from "../bindings";
 import { INPUT_FINDINGS } from "../config/inputFindings";
+import InputSamples from "./InputSamples.vue";
 
 // Renders an input profile (src-tauri/src/profile.rs): the sample model
 // inputs and the findings that crossed their thresholds. Used by the import
@@ -35,10 +36,7 @@ function countLine(f: Finding): string {
   <div class="flex flex-col gap-3 text-sm">
     <div class="flex flex-col gap-1">
       <span class="font-medium text-(--ui-text)">How rows are sent to the model</span>
-      <ul v-if="profile.samples.length > 0" class="font-mono text-xs text-(--ui-text-muted)">
-        <li v-for="s in profile.samples" :key="s.row" class="truncate">{{ s.input }}</li>
-      </ul>
-      <p v-else class="text-xs text-(--ui-text-dimmed)">No importable rows to show.</p>
+      <InputSamples :samples="profile.samples" />
     </div>
 
     <p v-if="profile.findings.length === 0" class="text-(--ui-text-muted)">

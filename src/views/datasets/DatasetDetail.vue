@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
 import { commands } from "../../bindings";
 import InputProfilePanel from "../../components/InputProfilePanel.vue";
+import InputSamples from "../../components/InputSamples.vue";
 import { INPUT_FINDINGS } from "../../config/inputFindings";
 import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useDatasets, useInputProfile } from "../../composables/useDatasets";
@@ -465,6 +466,30 @@ async function exportCsv(): Promise<void> {
               </template>
             </li>
           </ul>
+          <!-- What the model will read (decision 2026-09-30): the stored
+               profile's samples and its warnings, so a bad mapping is visible
+               at the moment of decision. Informational; Start run stays on. -->
+          <div class="flex flex-col gap-1 text-xs">
+            <template v-if="inputProfile">
+              <p class="text-(--ui-text-muted)">
+                Classification uses the subject code, catalog number, and course title of each
+                row. Examples from this dataset:
+              </p>
+              <InputSamples :samples="inputProfile.samples" />
+              <template v-if="profileWarnings.length > 0">
+                <ul class="text-(--ui-color-warning-500)">
+                  <li v-for="f in profileWarnings" :key="f.code">
+                    {{ INPUT_FINDINGS[f.code].title }} ({{ f.count.toLocaleString() }}
+                    {{ f.rate === 0 ? "distinct values" : "rows" }})
+                  </li>
+                </ul>
+                <p class="text-(--ui-text-dimmed)">Details are in the input check above.</p>
+              </template>
+            </template>
+            <p v-else-if="!inputProfilePending" class="text-(--ui-text-dimmed)">
+              This dataset has no input check; re-import the file to see one.
+            </p>
+          </div>
           <p class="text-(--ui-text-dimmed) text-xs">
             Runs locally on this machine, one model at a time. You can keep
             working while it runs.
