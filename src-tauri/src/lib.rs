@@ -81,9 +81,20 @@ pub fn run() {
     logging::install_panic_hook();
     let specta = specta_builder();
 
-    // The log plugin goes first so every later step — DB open, runtime
-    // pack, model autoload — lands in the file (EPI-109).
+    // Single-instance must be registered first (plugin docs): a second launch
+    // exits in its setup, before it can touch the DuckDB file lock (#207),
+    // and the running instance surfaces its window instead. The log plugin
+    // comes next so every later step — DB open, runtime pack, model
+    // autoload — lands in the file (EPI-109).
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager as _;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(logging::plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
