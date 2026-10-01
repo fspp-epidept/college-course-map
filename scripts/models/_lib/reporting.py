@@ -72,3 +72,50 @@ def render_validation_report(results: list[dict[str, Any]], meta: dict[str, Any]
     lines.append("Per-row mismatches (predicted ≠ panel label) live in the run's")
     lines.append("`disagreements.csv`. See `output/validation/<run-id>/`.")
     return "\n".join(lines) + "\n"
+
+
+def render_sensitivity_report(meta: dict[str, Any]) -> str:
+    preferred = ", ".join(meta.get("preferred_providers", []))
+    lines = [
+        "# Input sensitivity report",
+        "",
+        f"Generated: {meta['generated_at']}",
+        "",
+        f"- Source CSV: `{meta['source_csv']}`",
+        f"- Sample: `{meta['sample_mode']}` ({meta['sample_size']:,} unique inputs, seed {meta['seed']})",
+        f"- Execution provider (actual): {meta['execution_provider']}",
+        f"- Preferred order: {preferred}",
+        "",
+        "How much each model's predictions change when a correctly formatted",
+        "input is damaged the way a bad export or column mapping damages it.",
+        "Every variant is assembled by the real formatter from altered fields;",
+        "the baseline row is the unaltered input. Flip rate is the share of",
+        "inputs whose top-1 prediction differs from the baseline prediction.",
+        "Mean top-1 probability shows whether confidence reacts to the damage.",
+        "",
+        "**CIP agreement is a CIP/CCM overlap measurement, not model accuracy.**",
+        "The panel's `inventory_cip_*` columns contain federal **CIP codes**; the",
+        "models output **CCM codes** — a distinct hierarchical taxonomy. The two",
+        "overlap heavily at the broad 2-digit level and diverge as specificity",
+        "increases, so the column is a directional proxy: a drop against the",
+        "baseline row means the damage moved predictions away from the panel",
+        "label. Codes are canonicalized the same way as in `validate.py`.",
+        "",
+        "See `docs/input-contract.md` for the input rules these numbers justify.",
+    ]
+    for level in meta["levels"]:
+        lines += [
+            "",
+            f"## {level['display_name']}",
+            "",
+            f"Panel label column: `{level['label_column']}`.",
+            "",
+            "| Variant | Predictions changed | Mean top-1 probability | CIP agreement |",
+            "|---|---:|---:|---:|",
+        ]
+        for r in level["results"]:
+            lines.append(
+                f"| {r['variant']} | {r['flip_rate']:.1%} "
+                f"| {r['mean_top1_prob']:.3f} | {r['cip_agreement']:.1%} |"
+            )
+    return "\n".join(lines) + "\n"

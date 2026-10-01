@@ -3,9 +3,9 @@
 Format B per annamp's model card:
     https://huggingface.co/annamp/classifying-courses-at-scale-two-digit-roberta-base
 
-The Tauri Rust app must produce byte-identical strings. The JSON spec emitted
-by `export_spec()` is the contract — Rust reads that file at build time and
-asserts its assembler matches.
+The Tauri Rust app must produce byte-identical strings. Running this module
+writes `_lib/format_spec.json`, the committed cross-language contract; the
+Rust test `format::matches_python_spec` fails if `format.rs` drifts from it.
 """
 from __future__ import annotations
 

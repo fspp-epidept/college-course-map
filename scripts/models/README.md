@@ -10,16 +10,17 @@ Build-time tooling. Converts annamp's PyTorch CCM classifiers to ONNX, verifies 
 scripts/models/
 ├── pyproject.toml         uv-managed Python project
 ├── uv.lock                committed lockfile (deterministic conversion)
-├── _lib/                  shared module (model specs, format, inference, reporting, neg_rewrite)
+├── _lib/                  shared module (model specs, format + committed format_spec.json, inference, reporting, neg_rewrite)
 ├── convert.py             optimum-cli export + fp32 Neg→Mul pass, idempotent
 ├── verify.py              ONNX vs PyTorch parity on a synthetic corpus
 ├── validate.py            CIP/CCM overlap rate on labeled panel data
+├── sensitivity.py         how input malformations move predictions, on panel data
 ├── upload.py              push to HF, one repo per spec + a collection; idempotent
 ├── manifest.py            regenerate src-tauri/models.toml from the published repos
 ├── data/
 │   └── parity_inputs.csv  20-row synthetic corpus, committed
 ├── output/                generated ONNX, parity results, validation runs (gitignored)
-└── reports/               committed markdown summaries (parity-latest, validation-latest)
+└── reports/               committed markdown summaries (parity-latest, validation-latest, sensitivity-latest)
 ```
 
 ## Run it
@@ -32,6 +33,7 @@ task models:convert     # 6–15 min: download + export 3 models
 task models:verify      # 1–3 min: parity check
 task models:validate    # ~30s on GPU: 10k sample of validation.csv
 task models:validate:full  # full panel (~30–60 min on a 4070-class GPU)
+task models:sensitivity -- --size 5k  # ~1 min on GPU: input-malformation sensitivity
 task models:all         # convert + verify
 task models:upload      # push converted models to the HF namespace
 task models:manifest    # regenerate src-tauri/models.toml from the published repos
@@ -68,7 +70,13 @@ The model input format is locked in `_lib/format.py`:
 {subject_code} {catalog_number} --- {course_title}
 ```
 
-This matches annamp's model card. The Tauri Rust app must produce byte-identical strings — `convert.py` writes `output/format_spec.json` as the cross-language contract.
+This matches annamp's model card. The Tauri Rust app must produce byte-identical strings. The committed cross-language contract is `_lib/format_spec.json` (regenerate with `uv run python _lib/format.py` after changing `format.py`); the Rust test `format::matches_python_spec` fails if `src-tauri/src/format.rs` drifts from it. `convert.py` also writes a copy to `output/format_spec.json` alongside the exports. The user-facing description of the three input fields and the checks the app runs is `docs/input-contract.md`.
+
+## Sensitivity
+
+`sensitivity.py` measures how much each model's top-1 prediction moves when a correctly formatted input is damaged the way a bad export or column mapping damages it: subject repeated in the catalog number, `4325.0` from a spreadsheet, lowercase, swapped or missing fields, and so on. It samples distinct `(subject, catalog, title)` rows from the same panel `validate.py` reads (same `--csv` / env var / default resolution), assembles every variant through `_lib/format.py`, and reports per variant the flip rate against the baseline prediction, the mean top-1 probability, and CIP agreement. The committed `reports/sensitivity-latest.md` comes from a `--size 5k` run; `--levels` selects models, `--seed` defaults to 114.
+
+Limits: CIP agreement is the same CIP/CCM proxy as in `validate.py`, not accuracy; the sample comes from one state's panel whose titles are uppercase and truncated at 30 characters, so case and length effects may differ on other registrars' exports. The flip rate is the primary number. The results back the field rules and import checks in `docs/input-contract.md`.
 
 ## Model families
 
