@@ -463,7 +463,8 @@ export type DatasetSummary = { id: string; title: string; sourceKind: string; im
 rowCount: number; 
 /**
  * `importing` while the background worker is still streaming rows in,
- * `ready` when complete, `failed` when the worker errored.
+ * `ready` when complete, `failed` when the worker errored or the app
+ * closed mid-import.
  */
 importState: string; importError: string | null }
 /**
