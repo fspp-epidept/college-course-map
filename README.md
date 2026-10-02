@@ -50,6 +50,18 @@ The app writes a diagnostic log to `logs/app.log` in its data folder. It records
 - macOS: `~/Library/Application Support/college-course-map/logs`
 - Linux: `~/.local/share/college-course-map/logs`
 
+### Restoring your data after an update
+
+Before an update changes the database, the app copies it to `app.duckdb.pre-<version>.bak` next to `app.duckdb` (one level above `logs`). `<version>` is the app version that made the change. To go back:
+
+1. Quit the app.
+2. Install a version older than `<version>`.
+3. Rename `app.duckdb` out of the way, then rename the `.bak` file to `app.duckdb`.
+
+A version of the app that is older than its data refuses to open it and names the version to install. Versions 0.5.0 and earlier do not make that check.
+
+**Reset app data** deletes this backup along with everything else.
+
 ## Resetting and uninstalling
 
 To start over without uninstalling, open **Settings → General** and click **Reset app data…**. The app relaunches and deletes every dataset, run, cached result, downloaded model, and runtime pack before it starts. Settings and custom themes are kept unless you tick **Also reset settings and themes**.
@@ -122,6 +134,7 @@ The ones you'll reach for most:
 | `task check:throughput` | Benchmark batched inference over a CSV |
 | `task runtimes:fetch -- cuda` | Fetch the CUDA runtime pack for GPU development |
 | `task db:reset` / `task seed:demo` | Reset the dev database / seed it with fixture data |
+| `task db:fixture` | Write the upgrade-test fixture for the current schema and DuckDB version |
 | `task build` | Build the installer bundle for this platform |
 
 ### Model-conversion pipeline

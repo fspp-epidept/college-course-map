@@ -2,7 +2,11 @@
 //! Truncates and reseeds demo fixtures. See `src/seed.rs` for what's inserted.
 
 fn main() -> anyhow::Result<()> {
-    let db = course_classifier_lib::db::AppDb::open().map_err(|e| anyhow::anyhow!(e))?;
+    let db = course_classifier_lib::db::AppDb::open(
+        "dev",
+        &course_classifier_lib::boot::Progress::none(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     course_classifier_lib::seed::run(&db).map_err(|e| anyhow::anyhow!(e))?;
     let path = course_classifier_lib::db::db_path().map_err(|e| anyhow::anyhow!(e))?;
     println!("Seeded demo data at {}", path.display());

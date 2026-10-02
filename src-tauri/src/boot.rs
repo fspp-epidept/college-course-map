@@ -53,13 +53,12 @@ use crate::{
 /// phase names only work that is really happening: `UpgradingSchema` is
 /// entered only while a schema migration runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
-pub(crate) enum Phase {
+pub enum Phase {
     MigratingData,
     OpeningDatabase,
-    #[expect(
-        dead_code,
-        reason = "#204 enters it from `AppDb::open` while a migration runs"
-    )]
+    /// The pre-upgrade copy of the database (#204). Set by `AppDb::open_at`,
+    /// not by a step.
+    BackingUp,
     UpgradingSchema,
     LoadingRuntime,
 }
@@ -317,6 +316,14 @@ impl Boot {
             ..Self::default()
         }
     }
+
+    /// The boot state as the boot screen would read it.
+    pub(crate) fn state(&self) -> Result<BootState, String> {
+        self.state
+            .lock()
+            .map(|tracked| tracked.state.clone())
+            .map_err(|_| "boot state poisoned".to_owned())
+    }
 }
 
 /// Marks the step runner finished when dropped, so [`shutdown`] stops waiting
@@ -348,20 +355,22 @@ pub(crate) fn services(app: &AppHandle) -> Result<&Services, String> {
 /// Progress and cancel for a long step, free of Tauri so code below the boot
 /// path (`AppDb::open_at`, a data-dir copy loop) and its tests can take one.
 /// [`Progress::none`] is the form for callers outside startup.
-pub(crate) struct Progress<'a> {
+pub struct Progress<'a> {
     boot: Option<&'a Boot>,
+}
+
+impl std::fmt::Debug for Progress<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Progress")
+            .field("attached", &self.boot.is_some())
+            .finish()
+    }
 }
 
 impl<'a> Progress<'a> {
     /// Never cancelled, reports nowhere.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "first non-test callers are the harnesses of `AppDb::open_at` (#204)"
-        )
-    )]
-    pub(crate) fn none() -> Self {
+    #[must_use]
+    pub fn none() -> Self {
         Self { boot: None }
     }
 
@@ -372,7 +381,7 @@ impl<'a> Progress<'a> {
     /// Report progress within the current step. Callers report as often as
     /// they like; the event is throttled here, except for the last report
     /// (`done >= total`).
-    pub(crate) fn report(&self, done: u64, total: u64) {
+    pub fn report(&self, done: u64, total: u64) {
         if let Some(boot) = self.boot {
             boot.update(done < total, |state| {
                 state.done = done;
@@ -384,7 +393,7 @@ impl<'a> Progress<'a> {
     /// Record the phase startup is in. The runner sets each step's phase; a
     /// step that spans two (`AppDb::open_at` moving on to a backup or
     /// migration) moves it on itself, so a failure reports the right one.
-    pub(crate) fn phase(&self, phase: Phase) {
+    pub fn phase(&self, phase: Phase) {
         if let Some(boot) = self.boot {
             boot.update(false, |state| {
                 state.phase = Some(phase);
@@ -398,7 +407,7 @@ impl<'a> Progress<'a> {
     /// Say what the current step is doing, in the user's words. The runner
     /// sets each step's label; a step says more when it finds real work
     /// (moving data out of Roaming, creating a new database).
-    pub(crate) fn detail(&self, text: &str) {
+    pub fn detail(&self, text: &str) {
         if let Some(boot) = self.boot {
             boot.update(false, |state| {
                 state.detail = Some(text.to_owned());
@@ -420,7 +429,8 @@ impl<'a> Progress<'a> {
 
     /// Whether shutdown has asked startup to stop. Long steps check it
     /// between files or chunks.
-    pub(crate) fn cancelled(&self) -> bool {
+    #[must_use]
+    pub fn cancelled(&self) -> bool {
         self.boot
             .is_some_and(|boot| boot.cancel.load(Ordering::Relaxed))
     }
@@ -758,7 +768,8 @@ fn open_database(ctx: &mut Ctx<'_>) -> Result<(), String> {
     if !db::db_path()?.exists() {
         ctx.progress.detail("Creating a new database");
     }
-    let db = AppDb::open()?;
+    let version = ctx.app.package_info().version.to_string();
+    let db = AppDb::open(&version, &ctx.progress)?;
     ctx.notices.extend(db.recovery_notice().map(str::to_owned));
     ctx.db = Some(db);
     Ok(())

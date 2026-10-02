@@ -479,6 +479,7 @@ mod tests {
         sweep_orphaned_imports,
     };
     use crate::{
+        boot::Progress,
         db::AppDb,
         preflight::{ColumnMap, TextEncoding},
     };
@@ -502,7 +503,7 @@ mod tests {
     #[test]
     fn sweep_fails_importing_datasets_only() -> Result<(), String> {
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
-        crate::db::migrate(&conn)?;
+        crate::db::migrate(&conn, &Progress::none())?;
         conn.execute_batch(
             "INSERT INTO datasets
                 (id, title, source_kind, imported_at, row_count, import_state, import_error)
@@ -577,7 +578,7 @@ mod tests {
         // `ready` bystander the sweep must not touch.
         let db_path = root.join("app.duckdb");
         {
-            let db = AppDb::open_at(db_path.clone())?;
+            let db = AppDb::open_at(db_path.clone(), "test", &Progress::none())?;
             let conn = db.rw()?;
             let source_file_id: i64 = conn
                 .query_row(
@@ -632,7 +633,7 @@ mod tests {
              or never ran (was the child test renamed?)"
         );
 
-        let db = AppDb::open_at(db_path)?;
+        let db = AppDb::open_at(db_path, "test", &Progress::none())?;
         let conn = db.rw()?;
         assert_eq!(
             import_state(&conn, KILL_DATASET_ID)?,
@@ -681,7 +682,7 @@ mod tests {
         else {
             return Ok(());
         };
-        let db = &AppDb::open_at(db_path.into())?;
+        let db = &AppDb::open_at(db_path.into(), "test", &Progress::none())?;
         let task = ImportTask {
             path: csv_path,
             dataset_id: KILL_DATASET_ID.to_owned(),
@@ -757,7 +758,7 @@ mod tests {
         use crate::profile::InputProfiler;
 
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
-        crate::db::migrate(&conn)?;
+        crate::db::migrate(&conn, &Progress::none())?;
         conn.execute_batch(
             "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
              VALUES ('d1', 't', 'file', now(), 0, 'importing')",
