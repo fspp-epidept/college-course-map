@@ -36,6 +36,7 @@ use tauri_specta::{Builder, collect_commands, collect_events};
 fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
+            boot::boot_state,
             config::list_themes,
             config::read_theme,
             config::read_settings,
@@ -70,6 +71,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             taxonomy::open_ccm_reference,
         ])
         .events(collect_events![
+            boot::BootStateChanged,
             menu::MenuActionTriggered,
             models::ModelDownloadProgress,
             models::ModelsStateChanged,
