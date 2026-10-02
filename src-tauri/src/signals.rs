@@ -29,8 +29,7 @@ const SHUTDOWN: &[i32] = &[SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGXFSZ];
 /// Install the handlers and the thread that turns a delivered signal into an
 /// event-loop exit. Tauri's `App::run` exits 0 whatever code is requested.
 pub(crate) fn install(app: &tauri::AppHandle) -> Result<(), String> {
-    let mut signals =
-        Signals::new(SHUTDOWN).map_err(|e| format!("install signal handlers: {e}"))?;
+    let mut signals = Signals::new(SHUTDOWN).map_err(|e| e.to_string())?;
     let app = app.clone();
     std::thread::Builder::new()
         .name("signals".to_owned())

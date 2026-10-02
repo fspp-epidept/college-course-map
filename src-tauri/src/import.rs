@@ -325,9 +325,12 @@ impl ImportTask {
                 return;
             }
         };
-        let Ok(conn) = boot::services(&self.app).and_then(|services| services.db.rw()) else {
-            log::error!("import {}: no database at mark_ready", self.dataset_id);
-            return;
+        let conn = match boot::services(&self.app).and_then(|services| services.db.rw()) {
+            Ok(conn) => conn,
+            Err(e) => {
+                log::error!("import {}: {e} at mark_ready", self.dataset_id);
+                return;
+            }
         };
         // The JSON column takes the string directly (VARCHAR -> JSON cast).
         if let Err(e) = conn.execute(
@@ -353,9 +356,12 @@ impl ImportTask {
     }
 
     fn mark_failed(&self, err: &str) {
-        let Ok(conn) = boot::services(&self.app).and_then(|services| services.db.rw()) else {
-            log::error!("import {}: no database at mark_failed", self.dataset_id);
-            return;
+        let conn = match boot::services(&self.app).and_then(|services| services.db.rw()) {
+            Ok(conn) => conn,
+            Err(e) => {
+                log::error!("import {}: {e} at mark_failed", self.dataset_id);
+                return;
+            }
         };
         if let Err(e) = conn.execute(
             "UPDATE datasets SET import_state = 'failed', import_error = ? WHERE id = ?",

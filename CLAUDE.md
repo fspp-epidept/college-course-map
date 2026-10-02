@@ -110,9 +110,9 @@ These are decisions to respect, not re-litigate:
   | # | Where | Step |
   |---|-------|------|
   | 1 | plugin 1 | single-instance gate |
-  | 2 | plugin 2, `boot::plugin` | manage `Boot`; `PRE_LOGGER` table: signal handlers, then anything that must precede the logger (fast, windowless, nothing logged) |
+  | 2 | plugin 2, `boot::plugin` | manage `Boot`; `PRE_LOGGER` table: signal handlers, then anything that must precede the logger (fast, windowless; `log::` calls are lost, so report outcomes as notices) |
   | 3 | plugins 3+ | log, opener, dialog |
-  | 4 | `setup()` → `boot::start` | mount events; manage `ModelStore`, `DownloadState`, `RunRegistry`; macOS decorations |
+  | 4 | `setup()` | mount events, then `boot::start`: manage `ModelStore`, `DownloadState`, `RunRegistry`; macOS decorations; log and carry over the `PRE_LOGGER` notices |
   | 5 | `STEPS` table | `OpeningDatabase`: open database. `UpgradingSchema`: sweep runs, manifest rows, checkpoint. `LoadingRuntime`: load runtime. (`MigratingData` is the first phase.) |
   | 6 | ready | publish `{db, catalog, runtime}` to `Boot`; start model autoload |
 

@@ -33,8 +33,8 @@ pub(crate) fn logs_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "no platform data directory available".to_owned())
 }
 
-/// The log plugin, registered first so every later startup step is
-/// captured. A missing data directory only costs the file target — stdout
+/// The log plugin, registered right after the boot plugin so every startup
+/// step after the pre-logger ones is captured (see `boot.rs`). A missing data directory only costs the file target — stdout
 /// still works — and is reported the one way that can't depend on the
 /// logger.
 pub(crate) fn plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {

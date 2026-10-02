@@ -39,6 +39,10 @@ use crate::{
 /// (#224) reports.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Phase {
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "first row off Unix is the data migration (#205)")
+    )]
     MigratingData,
     OpeningDatabase,
     UpgradingSchema,
@@ -112,6 +116,9 @@ pub(crate) struct Boot {
     cancel: AtomicBool,
     /// The phase startup is in, as last set through [`Progress::phase`].
     phase: Mutex<Option<Phase>>,
+    /// Notices from [`PRE_LOGGER`], held until [`start`] can log them and
+    /// hand them on with its own.
+    pre_logger_notices: Mutex<Vec<String>>,
     /// Whether the step runner is done, for [`shutdown`] to wait on.
     finished: Mutex<bool>,
     finished_cv: Condvar,
@@ -124,16 +131,18 @@ impl Boot {
             .get()
             .ok_or_else(|| "The app is still starting.".to_owned())
     }
+}
 
-    fn phase(&self) -> Option<Phase> {
-        self.phase.lock().ok().and_then(|phase| *phase)
-    }
+/// Marks the step runner finished when dropped, so [`shutdown`] stops waiting
+/// however the runner ends: published, failed, or panicked.
+struct Finished<'a>(&'a Boot);
 
-    fn mark_finished(&self) {
-        if let Ok(mut finished) = self.finished.lock() {
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut finished) = self.0.finished.lock() {
             *finished = true;
         }
-        self.finished_cv.notify_all();
+        self.0.finished_cv.notify_all();
     }
 }
 
@@ -183,6 +192,12 @@ impl<'a> Progress<'a> {
         }
     }
 
+    /// The phase last recorded, if any.
+    fn recorded(&self) -> Option<Phase> {
+        self.boot
+            .and_then(|boot| boot.phase.lock().ok().and_then(|phase| *phase))
+    }
+
     /// Whether shutdown has asked startup to stop. Long steps check it
     /// between files or chunks.
     pub(crate) fn cancelled(&self) -> bool {
@@ -195,7 +210,6 @@ impl<'a> Progress<'a> {
 /// the slots steps fill.
 pub(crate) struct Ctx<'a> {
     pub app: &'a AppHandle,
-    boot: &'a Boot,
     pub progress: Progress<'a>,
     /// Non-fatal startup conditions, shown in Settings through the runtime
     /// notices.
@@ -209,7 +223,6 @@ impl<'a> Ctx<'a> {
     fn new(app: &'a AppHandle, boot: &'a Boot) -> Self {
         Self {
             app,
-            boot,
             progress: Progress::of(boot),
             notices: Vec::new(),
             db: None,
@@ -217,15 +230,16 @@ impl<'a> Ctx<'a> {
             runtime: None,
         }
     }
-
-    fn db(&self) -> Result<&AppDb, String> {
-        self.db
-            .as_ref()
-            .ok_or_else(|| "database not open".to_owned())
-    }
 }
 
-/// Run `steps` in order, logging each one's duration. Stops at the first
+/// The database a step needs, taken as `opened(ctx.db.as_ref())` so the
+/// borrow covers that slot only and the step can still push notices.
+pub(crate) fn opened(db: Option<&AppDb>) -> Result<&AppDb, String> {
+    db.ok_or_else(|| "database not open".to_owned())
+}
+
+/// Run `steps` in order, logging each one's duration (a no-op for
+/// [`PRE_LOGGER`], which runs before the logger). Stops at the first
 /// error, or before the next row once shutdown has set the cancel flag.
 fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), String> {
     for step in steps {
@@ -235,7 +249,7 @@ fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), String> {
         ctx.progress.phase(step.phase);
         let started = Instant::now();
         (step.run)(ctx).map_err(|e| {
-            let phase = ctx.boot.phase().unwrap_or(step.phase);
+            let phase = ctx.progress.recorded().unwrap_or(step.phase);
             format!("{phase:?}: {}: {e}", step.name)
         })?;
         log::info!("startup: {} ({:?})", step.name, started.elapsed());
@@ -250,7 +264,11 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .setup(|app, _api| {
             app.manage(Boot::default());
             let boot = app.state::<Boot>();
-            run_steps(PRE_LOGGER, &mut Ctx::new(app, &boot))?;
+            let mut ctx = Ctx::new(app, &boot);
+            run_steps(PRE_LOGGER, &mut ctx)?;
+            if let Ok(mut notices) = boot.pre_logger_notices.lock() {
+                *notices = ctx.notices;
+            }
             Ok(())
         })
         .build()
@@ -258,6 +276,8 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 
 /// The `setup()` half of startup: run [`STEPS`] and publish what they built.
 pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
+    let boot = app.state::<Boot>();
+    let finished = Finished(&boot);
     // Models load lazily: the store starts empty and a
     // background thread fills it when the manifest files are already on
     // disk (always, for airgap; post-download for connected). Commands that
@@ -279,10 +299,15 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| format!("window decorations: {e}"))?;
     }
 
-    let boot = app.state::<Boot>();
     let mut ctx = Ctx::new(app, &boot);
-    let result = run_steps(STEPS, &mut ctx).and_then(|()| publish(ctx));
-    boot.mark_finished();
+    if let Ok(mut notices) = boot.pre_logger_notices.lock() {
+        ctx.notices = std::mem::take(&mut notices);
+    }
+    for notice in &ctx.notices {
+        log::warn!("startup: {notice}");
+    }
+    let result = run_steps(STEPS, &mut ctx).and_then(|()| publish(&boot, ctx));
+    drop(finished);
     result?;
     models::autoload_if_present(app);
     Ok(())
@@ -291,14 +316,13 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
 /// Hand the services the steps built to [`Boot`]. Notices collected by steps
 /// join the runtime's own, the one startup-conditions surface Settings
 /// renders.
-fn publish(ctx: Ctx<'_>) -> Result<(), String> {
+fn publish(boot: &Boot, ctx: Ctx<'_>) -> Result<(), String> {
     let missing = |slot: &str| format!("startup finished without {slot}");
     let db = ctx.db.ok_or_else(|| missing("a database"))?;
     let catalog = ctx.catalog.ok_or_else(|| missing("a model catalog"))?;
     let mut runtime = ctx.runtime.ok_or_else(|| missing("a runtime"))?;
     runtime.notices.extend(ctx.notices);
-    ctx.boot
-        .services
+    boot.services
         .set(Services {
             db,
             catalog,
@@ -318,9 +342,7 @@ const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// the writer briefly, and a refused checkpoint just leaves the WAL for the
 /// next open.
 pub(crate) fn shutdown(app: &AppHandle) {
-    let Some(boot) = app.try_state::<Boot>() else {
-        return;
-    };
+    let boot = app.state::<Boot>();
     boot.cancel.store(true, Ordering::Relaxed);
     if let Ok(finished) = boot.finished.lock() {
         let waited = boot
@@ -356,7 +378,7 @@ fn open_database(ctx: &mut Ctx<'_>) -> Result<(), String> {
 /// from a previous one. Flip it to `interrupted` (resumable) before any
 /// command can observe it.
 fn sweep_runs(ctx: &mut Ctx<'_>) -> Result<(), String> {
-    let swept = runs::sweep_orphaned_runs(&*ctx.db()?.rw()?)?;
+    let swept = runs::sweep_orphaned_runs(&*opened(ctx.db.as_ref())?.rw()?)?;
     if swept > 0 {
         log::info!("startup: swept {swept} orphaned running run(s) to interrupted");
     }
@@ -368,7 +390,8 @@ fn sweep_runs(ctx: &mut Ctx<'_>) -> Result<(), String> {
 /// earlier families stay put for their cached results but are never
 /// selected).
 fn manifest_rows(ctx: &mut Ctx<'_>) -> Result<(), String> {
-    let catalog = manifest::resolve_model_rows(&*ctx.db()?.rw()?, manifest::load()?)?;
+    let catalog =
+        manifest::resolve_model_rows(&*opened(ctx.db.as_ref())?.rw()?, manifest::load()?)?;
     ctx.catalog = Some(catalog);
     Ok(())
 }
@@ -378,7 +401,7 @@ fn manifest_rows(ctx: &mut Ctx<'_>) -> Result<(), String> {
 /// written after this point, and the next open has that much less WAL to
 /// replay. Not fatal.
 fn checkpoint(ctx: &mut Ctx<'_>) -> Result<(), String> {
-    if let Err(e) = ctx.db()?.checkpoint() {
+    if let Err(e) = opened(ctx.db.as_ref())?.checkpoint() {
         log::warn!("startup: checkpoint skipped: {e}");
     }
     Ok(())
