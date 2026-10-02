@@ -12,7 +12,7 @@ const activity = computed(() => activityById(workspace.activeActivityId));
     class="flex-1 min-w-0 flex flex-col bg-(--ui-bg)"
     aria-label="Main view"
   >
-    <!-- One panel per activity (EPI-58 master/detail). Datasets and Runs
+    <!-- One panel per activity (master/detail). Datasets and CCM Reference
          render their sidebar selection's detail; selection lives in the
          workspace store, so switching activities and back restores it. -->
     <div v-if="activity" class="flex-1 min-h-0 overflow-auto">

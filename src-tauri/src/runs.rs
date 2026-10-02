@@ -1,8 +1,8 @@
 //! Async run pipeline. `start_run` inserts a runs row in `running` state,
 //! returns the run id immediately, and offloads the batched inference loop to
 //! a blocking task that ticks `runs.rows_processed` per flushed super-chunk
-//! (`FLUSH_SIZE`, EPI-89) so the frontend can poll progress via `get_run`
-//! (see `useRun`).
+//! (`FLUSH_SIZE`, EPI-89) so the frontend can poll progress via
+//! `get_latest_run` (see `useLatestRun`).
 //!
 //! Polling-based progress is intentional: `TanStack` Query already drives
 //! everything else, and the same data flow that powers the static run detail
@@ -458,24 +458,6 @@ fn stmt_err<T, E: std::fmt::Display>(res: Result<T, E>, ctx: &str) -> Result<T, 
     res.map_err(|e| format!("{ctx}: {e}"))
 }
 
-#[tauri::command]
-#[specta::specta]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri command arguments are deserialized by value"
-)]
-pub(crate) fn get_run(
-    id: String,
-    store: State<'_, ModelStore>,
-    boot: State<'_, Boot>,
-) -> Result<RunDetail, String> {
-    let Services { db, catalog, .. } = boot.ready()?;
-    let conn = db.ro()?;
-    query_run_detail(&conn, "WHERE r.id = ?", &id)?
-        .map(|found| finish_run_detail(found, catalog, &store))
-        .ok_or_else(|| format!("run {id}: not found"))
-}
-
 /// Most recent run for a dataset, or `None` if the dataset has never been
 /// classified. The dataset tab's run surface card derives from this — backend
 /// state, not component memory — so it survives tab close/reopen and app
@@ -525,7 +507,7 @@ pub(crate) struct StartRunRequest {
 }
 
 /// Response from `start_run`: the run has been queued and is already updating
-/// its own row. The frontend polls `get_run(run_id)` from here.
+/// its own row. The frontend polls `get_latest_run` for its dataset from here.
 #[derive(Type, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StartRunResponse {
@@ -713,7 +695,7 @@ pub(crate) fn start_run(
     // spawn_blocking owns the synchronous ORT calls. tauri::async_runtime
     // dispatches the closure onto the runtime's blocking pool, which doesn't
     // starve the async executor that handles other IPC calls (notably the
-    // polling `get_run`).
+    // polling `get_latest_run`).
     tauri::async_runtime::spawn_blocking(move || task.run());
 
     Ok(StartRunResponse { run_id, rows_total })

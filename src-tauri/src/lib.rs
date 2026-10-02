@@ -69,7 +69,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             runtime::runtime_status,
             runs::delete_run,
             runs::get_latest_run,
-            runs::get_run,
             runs::list_runs,
             runs::pause_run,
             runs::resume_run,

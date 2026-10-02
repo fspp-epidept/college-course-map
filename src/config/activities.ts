@@ -7,13 +7,11 @@ import ModelsPanel from "../views/models/ModelsPanel.vue";
 import ModelsSidebar from "../views/models/ModelsSidebar.vue";
 import OverviewPanel from "../views/overview/OverviewPanel.vue";
 import OverviewSidebar from "../views/overview/OverviewSidebar.vue";
-import RunsPanel from "../views/runs/RunsPanel.vue";
-import RunsSidebar from "../views/runs/RunsSidebar.vue";
 import SettingsPanel from "../views/settings/SettingsPanel.vue";
 import SettingsSidebar from "../views/settings/SettingsSidebar.vue";
 
 /** Stable id for each top-level "activity" (entry in the activity bar). */
-export type ActivityId = "overview" | "datasets" | "runs" | "models" | "ccm" | "settings";
+export type ActivityId = "overview" | "datasets" | "models" | "ccm" | "settings";
 
 export interface ActivityDef {
   id: ActivityId;
@@ -22,7 +20,7 @@ export interface ActivityDef {
   /** Component rendered inside the primary sidebar when this activity is active. */
   sidebar: Component;
   /** The component rendered as the main panel. Master/detail activities
-   *  (Datasets, Runs) render their sidebar selection's detail here (EPI-58). */
+   *  (Datasets, CCM Reference) render their sidebar selection's detail here. */
   panel: Component;
   /** Anchor this activity at the bottom of the activity bar (Settings). */
   pinToBottom?: boolean;
@@ -46,13 +44,6 @@ export const activities: ActivityDef[] = [
     icon: "i-lucide-database",
     sidebar: DatasetsSidebar,
     panel: DatasetsPanel,
-  },
-  {
-    id: "runs",
-    label: "Runs",
-    icon: "i-lucide-play",
-    sidebar: RunsSidebar,
-    panel: RunsPanel,
   },
   {
     id: "models",
