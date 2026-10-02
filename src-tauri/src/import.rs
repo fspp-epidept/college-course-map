@@ -496,8 +496,9 @@ mod tests {
     }
 
     /// The startup sweep fails every `importing` dataset with the
-    /// plain-language message and leaves terminal states alone, including a
-    /// `failed` row's own error.
+    /// plain-language message and leaves everything else alone: terminal
+    /// states, a `failed` row's own error, and the NULL state of seeded or
+    /// pre-0002 datasets (which `list_datasets` reads as `ready`).
     #[test]
     fn sweep_fails_importing_datasets_only() -> Result<(), String> {
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
@@ -507,7 +508,8 @@ mod tests {
                 (id, title, source_kind, imported_at, row_count, import_state, import_error)
              VALUES ('stuck',  't', 'file', now(), 5000, 'importing', NULL),
                     ('ready',  't', 'file', now(), 10,   'ready',     NULL),
-                    ('failed', 't', 'file', now(), 0,    'failed',    'read row 3: bad')",
+                    ('failed', 't', 'file', now(), 0,    'failed',    'read row 3: bad'),
+                    ('legacy', 't', 'file', now(), 10,   NULL,        NULL)",
         )
         .map_err(|e| e.to_string())?;
 
@@ -524,6 +526,14 @@ mod tests {
             import_state(&conn, "failed")?,
             ("failed".to_owned(), Some("read row 3: bad".to_owned()))
         );
+        let legacy: Option<String> = conn
+            .query_row(
+                "SELECT import_state FROM datasets WHERE id = 'legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert_eq!(legacy, None);
         assert_eq!(sweep_orphaned_imports(&conn)?, 0);
         Ok(())
     }
@@ -537,6 +547,15 @@ mod tests {
     /// kill lands on any realistic machine.
     const KILL_ROWS: usize = 100 * BATCH_SIZE;
 
+    fn write_synthetic_csv(path: &std::path::Path, rows: usize) -> std::io::Result<()> {
+        let mut out = BufWriter::new(std::fs::File::create(path)?);
+        writeln!(out, "subject,catalog,title")?;
+        for i in 0..rows {
+            writeln!(out, "TEST,{i},Synthetic resilience course number {i}")?;
+        }
+        out.flush()
+    }
+
     /// Kill the process mid-import, reopen, sweep: the dataset the dead
     /// worker left `importing` ends up `failed` with the plain-language
     /// message. The child is this same test binary running
@@ -547,19 +566,12 @@ mod tests {
     #[test]
     fn kill_mid_import_is_swept_to_failed() -> Result<(), String> {
         let root = std::env::temp_dir().join(format!("ccm-import-kill-{}", std::process::id()));
+        // A failed earlier run leaves its scratch dir behind; pids recycle.
+        std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
         let csv_path = root.join("courses.csv");
-        {
-            let file = std::fs::File::create(&csv_path).map_err(|e| e.to_string())?;
-            let mut out = BufWriter::new(file);
-            writeln!(out, "subject,catalog,title").map_err(|e| e.to_string())?;
-            for i in 0..KILL_ROWS {
-                writeln!(out, "TEST,{i},Synthetic resilience course number {i}")
-                    .map_err(|e| e.to_string())?;
-            }
-            out.flush().map_err(|e| e.to_string())?;
-        }
+        write_synthetic_csv(&csv_path, KILL_ROWS).map_err(|e| format!("write csv: {e}"))?;
 
         // Seed what `import_csv` inserts before it spawns the worker, plus a
         // `ready` bystander the sweep must not touch.
