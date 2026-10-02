@@ -16,8 +16,9 @@ use tauri::{AppHandle, Manager as _, State};
 use tauri_specta::Event;
 
 use crate::{
+    boot::{self, Boot},
     inference::{self, ModelStore},
-    manifest::{ModelCatalog, files_present},
+    manifest::files_present,
 };
 
 // Download-path-only imports; the airgap flavor compiles the downloader out.
@@ -177,10 +178,11 @@ pub(crate) fn active_models_root(app: &AppHandle) -> Result<PathBuf, String> {
 )]
 pub(crate) fn models_status(
     app: AppHandle,
-    catalog: State<'_, ModelCatalog>,
+    boot: State<'_, Boot>,
     store: State<'_, ModelStore>,
     downloads: State<'_, DownloadState>,
 ) -> Result<Vec<ModelStatus>, String> {
+    let catalog = &boot.ready()?.catalog;
     let root = active_models_root(&app)?;
     let loaded = store.is_loaded();
     let loading = store.is_loading();
@@ -270,7 +272,7 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
         // Only providers the loaded pack carries are ever attempted
         // (EPI-104): a settings entry the pack lacks is dropped here, not
         // discovered by a failed registration.
-        let runtime = app.state::<crate::runtime::RuntimeState>();
+        let runtime = &boot::services(app)?.runtime;
         let eps = runtime.registrable(&settings.execution_providers);
         for skipped in settings
             .execution_providers
@@ -319,7 +321,7 @@ pub(crate) fn autoload_if_present(app: &AppHandle) {
     std::thread::spawn(move || {
         let all_present = (|| -> Result<bool, String> {
             let root = active_models_root(&app)?;
-            let catalog = app.state::<ModelCatalog>();
+            let catalog = &boot::services(&app)?.catalog;
             Ok(catalog
                 .manifest
                 .model
@@ -371,7 +373,7 @@ pub(crate) async fn download_models(app: AppHandle) -> Result<(), String> {
 #[cfg(not(feature = "airgap"))]
 fn download_all(app: &AppHandle) -> Result<(), String> {
     let root = inference::models_root()?;
-    let catalog = app.state::<ModelCatalog>();
+    let catalog = &boot::services(app)?.catalog;
     let client = reqwest::blocking::Client::builder()
         .user_agent("college-course-map")
         .timeout(None) // model files are ~600 MB; no global deadline
@@ -605,7 +607,7 @@ fn download_one(
 #[cfg(not(feature = "airgap"))]
 fn repair_corrupt_files(app: &AppHandle) -> Result<usize, String> {
     let root = inference::models_root()?;
-    let catalog = app.state::<ModelCatalog>();
+    let catalog = &boot::services(app)?.catalog;
     let mut removed = 0;
     for entry in &catalog.manifest.model {
         for file in &entry.files {

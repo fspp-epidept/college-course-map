@@ -23,11 +23,10 @@
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::Manager as _;
 use tauri_plugin_dialog::DialogExt as _;
 
 use crate::{
-    db::AppDb,
+    boot,
     preflight::{ColumnMap, check_mapping},
 };
 
@@ -426,7 +425,7 @@ pub(crate) async fn export_results(
     app: tauri::AppHandle,
 ) -> Result<Option<ExportOutcome>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let db = app.state::<AppDb>();
+        let db = &boot::services(&app)?.db;
 
         let (title, models, layout) = {
             let conn = db.ro()?;

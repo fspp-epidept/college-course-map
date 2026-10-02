@@ -25,6 +25,7 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
+    boot::{self, Boot, Services},
     db::AppDb,
     format::{CourseInput, format_input},
     inference::{LoadedModel, ModelStore, classify_batch},
@@ -232,10 +233,10 @@ fn models_unready_message(store: &ModelStore) -> String {
     reason = "Tauri injects State by value; cannot be taken by reference at the macro layer"
 )]
 pub(crate) fn list_runs(
-    db: State<'_, AppDb>,
     store: State<'_, ModelStore>,
-    catalog: State<'_, ModelCatalog>,
+    boot: State<'_, Boot>,
 ) -> Result<Vec<RunSummary>, String> {
+    let Services { db, catalog, .. } = boot.ready()?;
     let conn = db.ro()?;
     // Active states float to the top, then most-recent first within each
     // ordering bucket. The frontend further regroups by state but the
@@ -307,7 +308,7 @@ pub(crate) fn list_runs(
         };
         summary.model_count = i64::try_from(model_ids.len().max(1)).unwrap_or(1);
         let (resumable, blockers) =
-            assess_resumability(&summary.state, &model_ids, &catalog, &store);
+            assess_resumability(&summary.state, &model_ids, catalog, &store);
         summary.resumable = resumable;
         summary.resume_blockers = blockers;
         Ok(summary)
@@ -448,13 +449,13 @@ fn stmt_err<T, E: std::fmt::Display>(res: Result<T, E>, ctx: &str) -> Result<T, 
 )]
 pub(crate) fn get_run(
     id: String,
-    db: State<'_, AppDb>,
     store: State<'_, ModelStore>,
-    catalog: State<'_, ModelCatalog>,
+    boot: State<'_, Boot>,
 ) -> Result<RunDetail, String> {
+    let Services { db, catalog, .. } = boot.ready()?;
     let conn = db.ro()?;
     query_run_detail(&conn, "WHERE r.id = ?", &id)?
-        .map(|found| finish_run_detail(found, &catalog, &store))
+        .map(|found| finish_run_detail(found, catalog, &store))
         .ok_or_else(|| format!("run {id}: not found"))
 }
 
@@ -470,17 +471,17 @@ pub(crate) fn get_run(
 )]
 pub(crate) fn get_latest_run(
     dataset_id: String,
-    db: State<'_, AppDb>,
     store: State<'_, ModelStore>,
-    catalog: State<'_, ModelCatalog>,
+    boot: State<'_, Boot>,
 ) -> Result<Option<RunDetail>, String> {
+    let Services { db, catalog, .. } = boot.ready()?;
     let conn = db.ro()?;
     Ok(query_run_detail(
         &conn,
         "WHERE r.dataset_id = ? ORDER BY r.created_at DESC LIMIT 1",
         &dataset_id,
     )?
-    .map(|found| finish_run_detail(found, &catalog, &store)))
+    .map(|found| finish_run_detail(found, catalog, &store)))
 }
 
 /// Digit level of the run's first `model_ids` entry, via the models table
@@ -563,11 +564,11 @@ pub fn sweep_orphaned_runs(conn: &duckdb::Connection) -> Result<usize, String> {
 pub(crate) fn start_run(
     req: StartRunRequest,
     app: AppHandle,
-    db: State<'_, AppDb>,
     store: State<'_, ModelStore>,
-    catalog: State<'_, ModelCatalog>,
+    boot: State<'_, Boot>,
     runs: State<'_, RunRegistry>,
 ) -> Result<StartRunResponse, String> {
+    let Services { db, catalog, .. } = boot.ready()?;
     // Fail fast if models aren't ready — caller gets a synchronous error
     // rather than a "queued then mysteriously failed" run. The store starts
     // empty on a connected-build first run (EPI-56) until download + load.
@@ -707,11 +708,11 @@ pub(crate) fn start_run(
 pub(crate) fn resume_run(
     run_id: String,
     app: AppHandle,
-    db: State<'_, AppDb>,
     store: State<'_, ModelStore>,
-    catalog: State<'_, ModelCatalog>,
+    boot: State<'_, Boot>,
     runs: State<'_, RunRegistry>,
 ) -> Result<StartRunResponse, String> {
+    let Services { db, catalog, .. } = boot.ready()?;
     let conn = db.rw()?;
 
     let (state, dataset_id, model_ids_json, rows_total): (String, String, String, Option<i64>) =
@@ -816,7 +817,18 @@ struct RunTask {
 
 impl RunTask {
     fn run(self) {
-        let db = self.app.state::<AppDb>();
+        // The command that spawned this task already required startup to
+        // have finished, so this only fails if that contract breaks.
+        let db = match boot::services(&self.app) {
+            Ok(services) => &services.db,
+            Err(e) => {
+                log::error!("run {}: {e}", self.pipeline.run_id);
+                self.app
+                    .state::<RunRegistry>()
+                    .remove(&self.pipeline.run_id);
+                return;
+            }
+        };
         let outcome =
             (|| {
                 // Clone the registry Arc out of the store once — the worker keeps
@@ -837,9 +849,9 @@ impl RunTask {
                         },
                     )?);
                 }
-                self.pipeline.execute(&db, &loaded)
+                self.pipeline.execute(db, &loaded)
             })();
-        self.pipeline.finalize(&db, outcome);
+        self.pipeline.finalize(db, outcome);
 
         // Run is terminal whichever branch ran: drop its cancel flag so the
         // registry doesn't leak an entry per completed run.

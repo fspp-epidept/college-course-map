@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::State;
 
-use crate::db::AppDb;
+use crate::boot::{Boot, Services};
 
 /// Hard cap on `limit`. Without this a malicious / buggy caller could ask for
 /// the whole dataset; bounding here keeps a single IPC response cheap.
@@ -71,10 +71,10 @@ pub(crate) struct CoursePage {
 )]
 pub(crate) fn list_courses_with_results(
     req: ListCoursesRequest,
-    db: State<'_, AppDb>,
+    boot: State<'_, Boot>,
 ) -> Result<CoursePage, String> {
     let limit = req.limit.clamp(1, MAX_PAGE_SIZE);
-    let conn = db.ro()?;
+    let conn = boot.ready()?.db.ro()?;
 
     // Use the cached `datasets.row_count` rather than a `COUNT(*)` against
     // the courses table — for a multi-million-row dataset the scan dominates
@@ -285,15 +285,11 @@ fn attach_results(
     clippy::needless_pass_by_value,
     reason = "Tauri command arguments are deserialized by value"
 )]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "Result is the stable IPC contract; frontend handles the wrapper"
-)]
 pub(crate) fn model_id_for_digit_level(
     digit_level: u8,
-    catalog: State<'_, crate::manifest::ModelCatalog>,
+    boot: State<'_, Boot>,
 ) -> Result<Option<i64>, String> {
-    Ok(catalog.model_id(digit_level))
+    Ok(boot.ready()?.catalog.model_id(digit_level))
 }
 
 /// Per-model classification coverage for one dataset: how many of its courses
@@ -318,9 +314,9 @@ pub(crate) struct CoverageRow {
 )]
 pub(crate) fn get_classification_coverage(
     dataset_id: String,
-    db: State<'_, AppDb>,
-    catalog: State<'_, crate::manifest::ModelCatalog>,
+    boot: State<'_, Boot>,
 ) -> Result<Vec<CoverageRow>, String> {
+    let Services { db, catalog, .. } = boot.ready()?;
     let conn = db.ro()?;
     // Cached row count, same rationale as the pager: COUNT(*) over a
     // multi-million-row partition is a scan we don't need.

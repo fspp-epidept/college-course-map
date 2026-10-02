@@ -7,7 +7,7 @@ use serde::Serialize;
 use specta::Type;
 use tauri::State;
 
-use crate::{db::AppDb, profile::InputProfile};
+use crate::{boot::Boot, profile::InputProfile};
 
 /// One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
 /// strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -35,8 +35,8 @@ pub(crate) struct DatasetSummary {
     clippy::needless_pass_by_value,
     reason = "Tauri injects State by value; cannot be taken by reference at the macro layer"
 )]
-pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>, String> {
-    let conn = db.ro()?;
+pub(crate) fn list_datasets(boot: State<'_, Boot>) -> Result<Vec<DatasetSummary>, String> {
+    let conn = boot.ready()?.db.ro()?;
     let mut stmt = conn
         .prepare(
             "SELECT d.id,
@@ -79,9 +79,9 @@ pub(crate) fn list_datasets(db: State<'_, AppDb>) -> Result<Vec<DatasetSummary>,
 )]
 pub(crate) fn get_input_profile(
     dataset_id: String,
-    db: State<'_, AppDb>,
+    boot: State<'_, Boot>,
 ) -> Result<Option<InputProfile>, String> {
-    let conn = db.ro()?;
+    let conn = boot.ready()?.db.ro()?;
     let json: Option<String> = conn
         .query_row(
             "SELECT input_profile::VARCHAR FROM datasets WHERE id = ?",

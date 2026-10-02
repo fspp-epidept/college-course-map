@@ -596,8 +596,8 @@ pub struct RuntimeState {
     pub eps: Vec<String>,
     /// Startup conditions the user must be able to see without a terminal
     /// (EPI-87): damaged-pack fallback, missing CUDA library directory,
-    /// failed preloads — and, from `lib.rs`, a database WAL set aside at
-    /// open (EPI-105). Fixed for the process lifetime; surfaced by
+    /// failed preloads — and, from the startup steps in `boot.rs`, a
+    /// database WAL set aside at open (EPI-105). Fixed for the process lifetime; surfaced by
     /// `runtime_status`.
     pub notices: Vec<String>,
 }
@@ -885,9 +885,10 @@ pub(crate) struct RuntimeStatus {
     reason = "Tauri command arguments are deserialized by value"
 )]
 pub(crate) fn runtime_status(
-    state: tauri::State<'_, RuntimeState>,
+    boot: tauri::State<'_, crate::boot::Boot>,
     store: tauri::State<'_, crate::inference::ModelStore>,
 ) -> Result<RuntimeStatus, String> {
+    let state = &boot.ready()?.runtime;
     let manifest = load_manifest()?;
     let packs = packs_for_target(&manifest)
         .into_iter()
