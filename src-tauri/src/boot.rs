@@ -38,7 +38,7 @@ use tauri::{AppHandle, Manager as _};
 use crate::{
     config,
     db::{self, AppDb},
-    inference, manifest,
+    import, inference, manifest,
     manifest::ModelCatalog,
     models, reset, runs, runtime,
 };
@@ -113,6 +113,11 @@ const STEPS: &[Step] = &[
         phase: Phase::UpgradingSchema,
         name: "sweep runs",
         run: sweep_runs,
+    },
+    Step {
+        phase: Phase::UpgradingSchema,
+        name: "sweep imports",
+        run: sweep_imports,
     },
     Step {
         phase: Phase::UpgradingSchema,
@@ -531,6 +536,16 @@ fn sweep_runs(ctx: &mut Ctx<'_>) -> Result<(), String> {
     let swept = runs::sweep_orphaned_runs(&*opened(ctx.db.as_ref())?.rw()?)?;
     if swept > 0 {
         log::info!("startup: swept {swept} orphaned running run(s) to interrupted");
+    }
+    Ok(())
+}
+
+/// Same for imports, which don't resume: an `importing` dataset becomes
+/// `failed` with a plain-language message.
+fn sweep_imports(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    let swept = import::sweep_orphaned_imports(&*opened(ctx.db.as_ref())?.rw()?)?;
+    if swept > 0 {
+        log::info!("startup: marked {swept} interrupted import(s) as failed");
     }
     Ok(())
 }

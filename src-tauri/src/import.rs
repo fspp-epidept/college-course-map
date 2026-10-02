@@ -25,6 +25,7 @@ use uuid::Uuid;
 
 use crate::{
     boot::{self, Boot},
+    db::AppDb,
     format::{CourseInput, content_hash},
     preflight::{
         ColumnMap, MAX_COLUMNS, TextEncoding, check_mapping, mapped_cells, open_csv,
@@ -154,14 +155,20 @@ pub(crate) fn import_csv(
     // Spawn the row loop. Owned values only so the closure has no borrowed
     // state to outlive.
     let task = ImportTask {
-        app: app.clone(),
         path: path_str,
         dataset_id: dataset_id.clone(),
         encoding: req.encoding,
         mapping,
         limit: req.limit,
     };
-    tauri::async_runtime::spawn_blocking(move || task.run());
+    tauri::async_runtime::spawn_blocking(move || {
+        // This command already required startup to have finished, so this
+        // only fails if that contract breaks.
+        match boot::services(&app) {
+            Ok(services) => task.run(&services.db),
+            Err(e) => log::error!("import {}: {e}", task.dataset_id),
+        }
+    });
 
     Ok(ImportStarted {
         dataset_id,
@@ -169,8 +176,10 @@ pub(crate) fn import_csv(
     })
 }
 
+/// The background row loop. Takes the database as a parameter rather than
+/// through the `AppHandle` so the kill-mid-import test can run it against a
+/// scratch database.
 struct ImportTask {
-    app: AppHandle,
     path: String,
     dataset_id: String,
     encoding: TextEncoding,
@@ -179,17 +188,17 @@ struct ImportTask {
 }
 
 impl ImportTask {
-    fn run(self) {
-        match self.run_inner() {
-            Ok((imported, profile)) => self.mark_ready(imported, &profile),
-            Err(err) => self.mark_failed(&err),
+    fn run(self, db: &AppDb) {
+        match self.run_inner(db) {
+            Ok((imported, profile)) => self.mark_ready(db, imported, &profile),
+            Err(err) => self.mark_failed(db, &err),
         }
     }
 
     /// Stream the CSV and bulk-insert in fixed-size batches. Every record
     /// read also feeds the input profile, so a `limit`-capped import profiles
     /// only the rows it read. Returns `(imported, profile)`.
-    fn run_inner(&self) -> Result<(u64, InputProfile), String> {
+    fn run_inner(&self, db: &AppDb) -> Result<(u64, InputProfile), String> {
         let mut reader = open_csv(Path::new(&self.path), self.encoding)?;
         let headers = reader.headers().map_err(|e| format!("read headers: {e}"))?;
         let header = |i: usize| truncate(headers.get(i).unwrap_or_default().to_owned());
@@ -244,16 +253,16 @@ impl ImportTask {
             row_index += 1;
 
             if batch.len() >= BATCH_SIZE {
-                self.flush(&batch)?;
+                self.flush(db, &batch)?;
                 batch.clear();
                 // Tick once per batch — at BATCH_SIZE=500 and ~50k rows/sec
                 // that's every ~10 ms, which is plenty for the 500 ms poll.
-                self.tick_row_count(imported)?;
+                self.tick_row_count(db, imported)?;
             }
         }
 
         if !batch.is_empty() {
-            self.flush(&batch)?;
+            self.flush(db, &batch)?;
         }
         // Final row_count is set in mark_ready.
         Ok((imported, profiler.finish()))
@@ -263,11 +272,11 @@ impl ImportTask {
     /// lets us omit the `id` (sequence default) + `is_classifiable` (TRUE
     /// default) + the nullable description / school / parse fields, so we only
     /// push the columns we actually care about.
-    fn flush(&self, batch: &[BatchRow]) -> Result<(), String> {
+    fn flush(&self, db: &AppDb, batch: &[BatchRow]) -> Result<(), String> {
         if batch.is_empty() {
             return Ok(());
         }
-        let conn = boot::services(&self.app)?.db.rw()?;
+        let conn = db.rw()?;
         let mut appender = conn
             .appender_with_columns(
                 "courses",
@@ -303,8 +312,8 @@ impl ImportTask {
         Ok(())
     }
 
-    fn tick_row_count(&self, imported: u64) -> Result<(), String> {
-        let conn = boot::services(&self.app)?.db.rw()?;
+    fn tick_row_count(&self, db: &AppDb, imported: u64) -> Result<(), String> {
+        let conn = db.rw()?;
         conn.execute(
             "UPDATE datasets SET row_count = ? WHERE id = ?",
             params![
@@ -316,16 +325,16 @@ impl ImportTask {
         Ok(())
     }
 
-    fn mark_ready(&self, imported: u64, profile: &InputProfile) {
+    fn mark_ready(&self, db: &AppDb, imported: u64, profile: &InputProfile) {
         // Serialize before taking the lock: `mark_failed` takes it too.
         let profile_json = match serde_json::to_string(profile) {
             Ok(json) => json,
             Err(e) => {
-                self.mark_failed(&format!("serialize input profile: {e}"));
+                self.mark_failed(db, &format!("serialize input profile: {e}"));
                 return;
             }
         };
-        let conn = match boot::services(&self.app).and_then(|services| services.db.rw()) {
+        let conn = match db.rw() {
             Ok(conn) => conn,
             Err(e) => {
                 log::error!("import {}: {e} at mark_ready", self.dataset_id);
@@ -355,8 +364,8 @@ impl ImportTask {
         }
     }
 
-    fn mark_failed(&self, err: &str) {
-        let conn = match boot::services(&self.app).and_then(|services| services.db.rw()) {
+    fn mark_failed(&self, db: &AppDb, err: &str) {
+        let conn = match db.rw() {
             Ok(conn) => conn,
             Err(e) => {
                 log::error!("import {}: {e} at mark_failed", self.dataset_id);
@@ -370,6 +379,25 @@ impl ImportTask {
             log::error!("import {}: mark_failed: {e}", self.dataset_id);
         }
     }
+}
+
+/// `import_error` for a dataset whose import died with its process. Shown
+/// after the UI's "Import failed: " prefix.
+const INTERRUPTED_IMPORT_MESSAGE: &str =
+    "The app closed before this import finished. Import the file again.";
+
+/// Crash recovery, run once at startup before any command can fire. An
+/// `importing` row in a fresh process is by definition orphaned — its worker
+/// died with the previous process, and imports don't resume. Flip to `failed`
+/// with a plain-language message; the rows already streamed in stay until the
+/// dataset is deleted. Returns how many datasets were swept.
+pub(crate) fn sweep_orphaned_imports(conn: &duckdb::Connection) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE datasets SET import_state = 'failed', import_error = ?
+         WHERE import_state = 'importing'",
+        params![INTERRUPTED_IMPORT_MESSAGE],
+    )
+    .map_err(|e| format!("sweep orphaned imports: {e}"))
 }
 
 struct BatchRow {
@@ -441,8 +469,247 @@ fn hash_file(path: &Path) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::extra_columns_json;
-    use crate::preflight::ColumnMap;
+    use std::{
+        io::{BufRead, BufReader, BufWriter, Write},
+        process::{Command, Stdio},
+    };
+
+    use super::{
+        BATCH_SIZE, INTERRUPTED_IMPORT_MESSAGE, ImportTask, extra_columns_json,
+        sweep_orphaned_imports,
+    };
+    use crate::{
+        db::AppDb,
+        preflight::{ColumnMap, TextEncoding},
+    };
+
+    fn import_state(
+        conn: &duckdb::Connection,
+        id: &str,
+    ) -> Result<(String, Option<String>), String> {
+        conn.query_row(
+            "SELECT import_state, import_error FROM datasets WHERE id = ?",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| format!("read dataset {id}: {e}"))
+    }
+
+    /// The startup sweep fails every `importing` dataset with the
+    /// plain-language message and leaves everything else alone: terminal
+    /// states, a `failed` row's own error, and the NULL state of seeded or
+    /// pre-0002 datasets (which `list_datasets` reads as `ready`).
+    #[test]
+    fn sweep_fails_importing_datasets_only() -> Result<(), String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        crate::db::migrate(&conn)?;
+        conn.execute_batch(
+            "INSERT INTO datasets
+                (id, title, source_kind, imported_at, row_count, import_state, import_error)
+             VALUES ('stuck',  't', 'file', now(), 5000, 'importing', NULL),
+                    ('ready',  't', 'file', now(), 10,   'ready',     NULL),
+                    ('failed', 't', 'file', now(), 0,    'failed',    'read row 3: bad'),
+                    ('legacy', 't', 'file', now(), 10,   NULL,        NULL)",
+        )
+        .map_err(|e| e.to_string())?;
+
+        assert_eq!(sweep_orphaned_imports(&conn)?, 1);
+        assert_eq!(
+            import_state(&conn, "stuck")?,
+            (
+                "failed".to_owned(),
+                Some(INTERRUPTED_IMPORT_MESSAGE.to_owned())
+            )
+        );
+        assert_eq!(import_state(&conn, "ready")?, ("ready".to_owned(), None));
+        assert_eq!(
+            import_state(&conn, "failed")?,
+            ("failed".to_owned(), Some("read row 3: bad".to_owned()))
+        );
+        let legacy: Option<String> = conn
+            .query_row(
+                "SELECT import_state FROM datasets WHERE id = 'legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert_eq!(legacy, None);
+        assert_eq!(sweep_orphaned_imports(&conn)?, 0);
+        Ok(())
+    }
+
+    const KILL_DB_ENV: &str = "CCM_KILL_IMPORT_DB";
+    const KILL_CSV_ENV: &str = "CCM_KILL_IMPORT_CSV";
+    const KILL_DATASET_ID: &str = "kill-mid-import";
+    /// Kill once the first batch has been flushed and ticked.
+    const KILL_AFTER_ROWS: usize = BATCH_SIZE;
+    /// Far more than one batch, so the child is still mid-import when the
+    /// kill lands on any realistic machine.
+    const KILL_ROWS: usize = 100 * BATCH_SIZE;
+
+    fn write_synthetic_csv(path: &std::path::Path, rows: usize) -> std::io::Result<()> {
+        let mut out = BufWriter::new(std::fs::File::create(path)?);
+        writeln!(out, "subject,catalog,title")?;
+        for i in 0..rows {
+            writeln!(out, "TEST,{i},Synthetic resilience course number {i}")?;
+        }
+        out.flush()
+    }
+
+    /// Kill the process mid-import, reopen, sweep: the dataset the dead
+    /// worker left `importing` ends up `failed` with the plain-language
+    /// message. The child is this same test binary running
+    /// [`kill_mid_import_child`], which drives the real [`ImportTask`] against
+    /// a scratch database. `DuckDB` is single-writer across processes, so the
+    /// child reports its own progress on stdout and the parent kills on a
+    /// threshold (same shape as `examples/check_resume.rs`).
+    #[test]
+    fn kill_mid_import_is_swept_to_failed() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("ccm-import-kill-{}", std::process::id()));
+        // A failed earlier run leaves its scratch dir behind; pids recycle.
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+
+        let csv_path = root.join("courses.csv");
+        write_synthetic_csv(&csv_path, KILL_ROWS).map_err(|e| format!("write csv: {e}"))?;
+
+        // Seed what `import_csv` inserts before it spawns the worker, plus a
+        // `ready` bystander the sweep must not touch.
+        let db_path = root.join("app.duckdb");
+        {
+            let db = AppDb::open_at(db_path.clone())?;
+            let conn = db.rw()?;
+            let source_file_id: i64 = conn
+                .query_row(
+                    "INSERT INTO source_files (path, display_name, imported_at, imported_hash)
+                     VALUES (?, 'courses', now(), 'kill-test') RETURNING id",
+                    [csv_path.to_string_lossy()],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("seed source_files: {e}"))?;
+            conn.execute(
+                "INSERT INTO datasets
+                    (id, title, source_kind, source_file_id, imported_at, row_count, import_state)
+                 VALUES (?, 'courses', 'file', ?, now(), 0, 'importing'),
+                        ('bystander', 'done', 'manual', NULL, now(), 0, 'ready')",
+                duckdb::params![KILL_DATASET_ID, source_file_id],
+            )
+            .map_err(|e| format!("seed datasets: {e}"))?;
+            // db drops here: the child must be the only process on the file.
+        }
+
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mut child = Command::new(exe)
+            .args([
+                "--exact",
+                "import::tests::kill_mid_import_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env(KILL_DB_ENV, &db_path)
+            .env(KILL_CSV_ENV, &csv_path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("spawn child: {e}"))?;
+        let stdout = child.stdout.take().ok_or("child stdout")?;
+
+        let mut killed = false;
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(|e| format!("read child stdout: {e}"))?;
+            let Some(rows) = line.strip_prefix("PROGRESS ") else {
+                continue;
+            };
+            if rows.parse::<usize>().unwrap_or(0) >= KILL_AFTER_ROWS {
+                child.kill().map_err(|e| format!("kill child: {e}"))?;
+                killed = true;
+                break;
+            }
+        }
+        child.wait().map_err(|e| format!("wait child: {e}"))?;
+        assert!(
+            killed,
+            "child exited before the kill threshold; it finished the import, failed, \
+             or never ran (was the child test renamed?)"
+        );
+
+        let db = AppDb::open_at(db_path)?;
+        let conn = db.rw()?;
+        assert_eq!(
+            import_state(&conn, KILL_DATASET_ID)?,
+            ("importing".to_owned(), None),
+            "the killed import should leave its dataset orphaned as importing"
+        );
+        let committed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
+                [KILL_DATASET_ID],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert!(
+            committed > 0 && committed < i64::try_from(KILL_ROWS).map_err(|e| e.to_string())?,
+            "expected a partial import, found {committed}/{KILL_ROWS} rows"
+        );
+
+        assert_eq!(sweep_orphaned_imports(&conn)?, 1);
+        assert_eq!(
+            import_state(&conn, KILL_DATASET_ID)?,
+            (
+                "failed".to_owned(),
+                Some(INTERRUPTED_IMPORT_MESSAGE.to_owned())
+            )
+        );
+        assert_eq!(
+            import_state(&conn, "bystander")?,
+            ("ready".to_owned(), None)
+        );
+
+        drop(conn);
+        drop(db);
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    /// Child half of [`kill_mid_import_is_swept_to_failed`]: run the real
+    /// import worker against the scratch database, printing `PROGRESS
+    /// <row_count>` lines for the parent's kill signal. Meant to die by
+    /// SIGKILL. Does nothing when run on its own.
+    #[test]
+    #[ignore = "child process of kill_mid_import_is_swept_to_failed"]
+    fn kill_mid_import_child() -> Result<(), String> {
+        let (Ok(db_path), Ok(csv_path)) = (std::env::var(KILL_DB_ENV), std::env::var(KILL_CSV_ENV))
+        else {
+            return Ok(());
+        };
+        let db = &AppDb::open_at(db_path.into())?;
+        let task = ImportTask {
+            path: csv_path,
+            dataset_id: KILL_DATASET_ID.to_owned(),
+            encoding: TextEncoding::Utf8,
+            mapping: ColumnMap {
+                subject: 0,
+                catalog: 1,
+                title: 2,
+            },
+            limit: None,
+        };
+        std::thread::scope(|scope| -> Result<(), String> {
+            let worker = scope.spawn(move || task.run(db));
+            while !worker.is_finished() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                let rows: i64 = db
+                    .ro()?
+                    .query_row(
+                        "SELECT row_count FROM datasets WHERE id = ?",
+                        [KILL_DATASET_ID],
+                        |r| r.get(0),
+                    )
+                    .map_err(|e| format!("child: read progress: {e}"))?;
+                println!("PROGRESS {rows}");
+            }
+            Ok(())
+        })
+    }
 
     /// Unmapped cells are keyed by column index; mapped cells are excluded;
     /// a file with only mapped columns produces `None` (NULL in the DB).

@@ -24,7 +24,8 @@ pub(crate) struct DatasetSummary {
     /// Datasets are otherwise immutable, so there's no fallback `COUNT(*)`.
     pub(crate) row_count: i64,
     /// `importing` while the background worker is still streaming rows in,
-    /// `ready` when complete, `failed` when the worker errored.
+    /// `ready` when complete, `failed` when the worker errored or the app
+    /// closed mid-import.
     pub(crate) import_state: String,
     pub(crate) import_error: Option<String>,
 }
