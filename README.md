@@ -46,7 +46,7 @@ If a GPU backend fails on your machine (old driver, provider fails to load), the
 
 The app writes a diagnostic log to `logs/app.log` in its data folder. It records startup steps, provider resolution, model load results, and errors; never course data. To attach it to a bug report, open **Settings → About** and click **Open logs folder**. The folder lives at:
 
-- Windows: `%APPDATA%\college-course-map\logs`
+- Windows: `%LOCALAPPDATA%\college-course-map\logs`
 - macOS: `~/Library/Application Support/college-course-map/logs`
 - Linux: `~/.local/share/college-course-map/logs`
 

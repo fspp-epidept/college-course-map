@@ -27,7 +27,6 @@ use std::{
 
 use duckdb::{Connection, params};
 
-const PRODUCT_DIR: &str = "college-course-map";
 const DB_FILE: &str = "app.duckdb";
 
 /// Ordered list of migration scripts. Add new entries — never edit or reorder
@@ -210,12 +209,9 @@ fn recovery_notice(set_aside: &Path) -> String {
     )
 }
 
-/// `<data>/college-course-map/app.duckdb` — same product-dir convention used by
-/// `config.rs`, but rooted at the platform data dir (not config) per `CLAUDE.md`.
+/// `<local data>/college-course-map/app.duckdb`.
 pub fn db_path() -> Result<PathBuf, String> {
-    dirs::data_dir()
-        .map(|dir| dir.join(PRODUCT_DIR).join(DB_FILE))
-        .ok_or_else(|| "no platform data directory available".to_owned())
+    Ok(crate::paths::data_dir()?.join(DB_FILE))
 }
 
 pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {

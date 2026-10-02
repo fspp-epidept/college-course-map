@@ -11,6 +11,7 @@ mod logging;
 pub mod manifest;
 mod metrics;
 mod models;
+mod paths;
 mod preflight;
 mod profile;
 // Public for the resume verification harness (examples/check_resume.rs,

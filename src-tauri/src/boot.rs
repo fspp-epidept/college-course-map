@@ -86,6 +86,11 @@ const PRE_LOGGER: &[Step] = &[
 /// Steps that run from `setup()`, in order.
 const STEPS: &[Step] = &[
     Step {
+        phase: Phase::MigratingData,
+        name: "migrate data",
+        run: migrate_data,
+    },
+    Step {
         phase: Phase::OpeningDatabase,
         name: "open database",
         run: open_database,
@@ -148,6 +153,17 @@ impl Boot {
     }
 }
 
+#[cfg(test)]
+impl Boot {
+    /// A `Boot` whose shutdown has already asked startup to stop.
+    pub(crate) fn cancelled() -> Self {
+        Self {
+            cancel: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
+}
+
 /// Marks the step runner finished when dropped, so [`shutdown`] stops waiting
 /// however the runner ends: published, failed, or panicked.
 struct Finished<'a>(&'a Boot);
@@ -176,21 +192,23 @@ pub(crate) struct Progress<'a> {
 
 impl<'a> Progress<'a> {
     /// Never cancelled, reports nowhere.
-    #[expect(
-        dead_code,
-        reason = "first callers are the harnesses of `AppDb::open_at` (#204)"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "first non-test callers are the harnesses of `AppDb::open_at` (#204)"
+        )
     )]
     pub(crate) fn none() -> Self {
         Self { boot: None }
     }
 
-    fn of(boot: &'a Boot) -> Self {
+    pub(crate) fn of(boot: &'a Boot) -> Self {
         Self { boot: Some(boot) }
     }
 
     /// Report progress within the current step. Nothing listens yet; the
     /// boot screen (#224) will.
-    #[expect(dead_code, reason = "first caller is the data-migration step (#205)")]
     #[expect(clippy::unused_self, reason = "#224 reports through the boot state")]
     pub(crate) fn report(&self, done: u64, total: u64) {
         log::debug!("startup: {done}/{total}");
@@ -427,6 +445,27 @@ fn lock_instance(path: &Path, wait: Duration) -> Result<File, String> {
             Err(TryLockError::Error(e)) => return Err(format!("lock {}: {e}", path.display())),
         }
     }
+}
+
+/// Move 0.5.x data out of the Windows Roaming profile (#205). Never fails
+/// startup: what can't be moved stays put, is retried next launch, and is
+/// reported through the notices.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every step row shares one signature"
+)]
+fn migrate_data(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    for outcome in crate::paths::migrate_legacy_data(&ctx.progress) {
+        match outcome {
+            Ok(msg) => log::info!("migrate: {msg}"),
+            Err(msg) => {
+                log::warn!("migrate: {msg}");
+                ctx.notices
+                    .push(format!("Moving app data to its new location: {msg}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Open `DuckDB` and apply migrations. A WAL set aside at open is

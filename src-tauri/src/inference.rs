@@ -198,7 +198,7 @@ fn register_coreml(
     builder: &mut ort::session::builder::SessionBuilder,
 ) -> Result<(), ep::RegisterError> {
     let mut coreml = ep::CoreML::default().with_model_format(ep::coreml::ModelFormat::MLProgram);
-    match coreml_cache_dir() {
+    match crate::paths::coreml_cache_dir() {
         Ok(dir) => coreml = coreml.with_model_cache_dir(dir.display()),
         Err(e) => log::warn!("coreml: compiled-model cache disabled: {e}"),
     }
@@ -543,19 +543,7 @@ impl InferenceRegistry {
     }
 }
 
-/// Same product dir convention as `db.rs::PRODUCT_DIR` and `config.rs` —
-/// kept duplicated rather than hoisted into a shared module while only two
-/// callers exist; promote when a third lands.
-const PRODUCT_DIR: &str = "college-course-map";
 const MODELS_SUBDIR: &str = "models";
-
-/// `<data>/college-course-map/cache/coreml` — compiled `CoreML` models
-/// (EPI-108). Derived state: safe to delete at any time.
-pub fn coreml_cache_dir() -> Result<PathBuf, String> {
-    dirs::data_dir()
-        .map(|dir| dir.join(PRODUCT_DIR).join("cache").join("coreml"))
-        .ok_or_else(|| "no platform data directory available".to_owned())
-}
 
 /// Resolve the on-disk model directory for **non-airgap** (dev/connected)
 /// runs. The airgap build never calls this — its models live in the bundle's
@@ -566,16 +554,14 @@ pub fn coreml_cache_dir() -> Result<PathBuf, String> {
 /// 1. `COURSE_CLASSIFIER_MODELS_DIR` env var if set — explicit override for
 ///    CI and one-off dev tweaks (e.g. pointing at a freshly converted
 ///    `scripts/models/output/` without copying).
-/// 2. `<data>/college-course-map/models/` — the standard location, portable
+/// 2. `<local data>/college-course-map/models/` — the standard location, portable
 ///    across machines via a copy of the data dir. This is what
 ///    `task models:install` populates.
 pub fn models_root() -> Result<PathBuf, String> {
     if let Ok(env) = std::env::var("COURSE_CLASSIFIER_MODELS_DIR") {
         return Ok(PathBuf::from(env));
     }
-    dirs::data_dir()
-        .map(|dir| dir.join(PRODUCT_DIR).join(MODELS_SUBDIR))
-        .ok_or_else(|| "no platform data directory available".to_owned())
+    Ok(crate::paths::data_dir()?.join(MODELS_SUBDIR))
 }
 
 /// Load all three digit-level models from `root`. Slow (each model is

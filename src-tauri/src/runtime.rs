@@ -6,7 +6,7 @@
 //! loaded pack; per-session EP registration happens in `inference.rs`.
 //!
 //! On-disk layout:
-//! - downloaded packs: `<data>/college-course-map/runtimes/<ort_version>/<id>/`
+//! - downloaded packs: `<local data>/college-course-map/runtimes/<ort_version>/<id>/`
 //! - bundled CPU pack: `<resource_dir>/runtimes/cpu/` (version implicit — a
 //!   bundle carries exactly one)
 //!
@@ -26,7 +26,6 @@ use specta::Type;
 /// Name of the hash marker file inside an installed pack dir.
 const MARKER: &str = ".sha256";
 const RUNTIMES_SUBDIR: &str = "runtimes";
-const PRODUCT_DIR: &str = "college-course-map";
 
 /// Execution providers the app knows how to register, in the shape the
 /// settings priority list stores. `Cpu` is a real list entry ("allowed as
@@ -207,9 +206,7 @@ pub fn runtimes_root() -> Result<PathBuf, String> {
     if let Ok(env) = std::env::var("COURSE_CLASSIFIER_RUNTIMES_DIR") {
         return Ok(PathBuf::from(env));
     }
-    dirs::data_dir()
-        .map(|dir| dir.join(PRODUCT_DIR).join(RUNTIMES_SUBDIR))
-        .ok_or_else(|| "no platform data directory available".to_owned())
+    Ok(crate::paths::data_dir()?.join(RUNTIMES_SUBDIR))
 }
 
 /// Directory a downloaded pack installs into.
