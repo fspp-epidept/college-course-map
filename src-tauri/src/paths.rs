@@ -17,9 +17,12 @@
 //! models with it. Each cache gets its own leaf function instead.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read as _, Write as _},
     path::{Path, PathBuf},
 };
+
+use crate::boot::Progress;
 
 const PRODUCT_DIR: &str = "college-course-map";
 
@@ -31,9 +34,14 @@ const CONFIG_ENTRIES: [&str; 2] = ["settings.json", "themes"];
 /// every platform: the cache now lives under [`coreml_cache_dir`].
 const LEGACY_CACHE_SUBDIR: &str = "cache";
 
-/// Legacy diagnostics: deleted rather than moved (decision 2026-10-02). Only
-/// on Windows, where they sit in Roaming; elsewhere this is the live logs dir.
-const LEGACY_LOGS_SUBDIR: &str = "logs";
+/// Deleted rather than moved, and only on Windows, where they sit in Roaming
+/// (elsewhere the legacy dir is the live data dir). Old logs aren't worth
+/// moving (decision 2026-10-02); a `session.lock` there is stale, because
+/// the live one sits beside the database in [`data_dir`].
+const LEGACY_DISCARD: [&str; 2] = ["logs", "session.lock"];
+
+/// Copy buffer, and so the cancel/progress granularity of a large file.
+const COPY_CHUNK: usize = 1 << 20;
 
 /// Suffix of an in-progress cross-volume copy, beside its target.
 const STAGING_SUFFIX: &str = ".migrating";
@@ -77,20 +85,26 @@ fn product_dir(base: Option<PathBuf>, kind: &str) -> Result<PathBuf, String> {
 /// `Err` = warning) for the caller to log. Never fails startup: whatever
 /// can't be moved stays where it was, is reported, and is retried on the
 /// next launch.
-pub(crate) fn migrate_legacy_data() -> Vec<Result<String, String>> {
+///
+/// A cross-volume copy reports bytes through `progress` and stops between
+/// chunks once it is cancelled, discarding its staged copy; the entries not
+/// yet moved are retried on the next launch.
+pub(crate) fn migrate_legacy_data(progress: &Progress<'_>) -> Vec<Result<String, String>> {
     let (Ok(legacy), Ok(data)) = (legacy_data_dir(), data_dir()) else {
         return Vec::new();
     };
-    migrate(&legacy, &data)
+    migrate(&legacy, &data, progress)
 }
 
-fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
+fn migrate(legacy: &Path, data: &Path, progress: &Progress<'_>) -> Vec<Result<String, String>> {
     let mut report = Vec::new();
     discard(&legacy.join(LEGACY_CACHE_SUBDIR), "old cache", &mut report);
     if legacy == data {
         return report;
     }
-    discard(&legacy.join(LEGACY_LOGS_SUBDIR), "old logs", &mut report);
+    for name in LEGACY_DISCARD {
+        discard(&legacy.join(name), "old", &mut report);
+    }
     // Leftovers of an interrupted run: a staged copy never renamed into
     // place is incomplete, and a set-aside source is already copied.
     sweep(data, STAGING_SUFFIX, &mut report);
@@ -115,6 +129,9 @@ fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
         .map(|name| format!("{}.", name.to_string_lossy()))
         .collect();
     for name in names {
+        if progress.cancelled() {
+            break;
+        }
         let from = legacy.join(&name);
         let to = data.join(&name);
         let held = blocked
@@ -127,7 +144,7 @@ fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
                 to.display()
             ))
         } else {
-            move_entry(&from, &to)
+            move_entry(&from, &to, progress)
                 .map(|how| format!("{how} {} to {}", from.display(), to.display()))
                 .map_err(|e| format!("{} not moved: {e}", from.display()))
         });
@@ -161,14 +178,14 @@ fn sweep(dir: &Path, suffix: &str, report: &mut Vec<Result<String, String>>) {
 /// (a redirected Roaming folder). Any other rename failure — a file still
 /// held open, a permission error — is returned as is: copying a locked
 /// database could produce a torn copy.
-fn move_entry(from: &Path, to: &Path) -> Result<&'static str, String> {
+fn move_entry(from: &Path, to: &Path, progress: &Progress<'_>) -> Result<&'static str, String> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     match fs::rename(from, to) {
         Ok(()) => Ok("moved"),
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
-            copy_across(from, to).map(|()| "copied")
+            copy_across(from, to, progress).map(|()| "copied")
         }
         Err(e) => Err(e.to_string()),
     }
@@ -178,15 +195,21 @@ fn move_entry(from: &Path, to: &Path) -> Result<&'static str, String> {
 /// next launch's [`sweep`]s resolve, so a kill or power loss at any point
 /// loses nothing:
 ///
-/// 1. Copy to `<to>.migrating`, flushing each file to disk. Killed here:
-///    the source is intact and the staged copy is swept.
+/// 1. Copy to `<to>.migrating`, flushing each file to disk. Killed or
+///    cancelled here: the source is intact and the staged copy is removed
+///    (now, or by the next launch's sweep).
 /// 2. Rename the staged copy to `to`. Atomic on one volume.
 /// 3. Rename the source to `<from>.migrated`. Atomic on one volume; only a
 ///    kill between 2 and 3 leaves both copies, reported as left in place.
 /// 4. Delete the set-aside source. Killed here: the remainder is swept.
-fn copy_across(from: &Path, to: &Path) -> Result<(), String> {
+fn copy_across(from: &Path, to: &Path, progress: &Progress<'_>) -> Result<(), String> {
     let staging = with_suffix(to, STAGING_SUFFIX);
-    if let Err(e) = copy(from, &staging) {
+    let mut copied = Copied {
+        done: 0,
+        total: size(from).map_err(|e| format!("measure: {e}"))?,
+        progress,
+    };
+    if let Err(e) = copy(from, &staging, &mut copied) {
         let _ = remove(&staging);
         return Err(format!("copy failed: {e}"));
     }
@@ -204,24 +227,51 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Bytes copied so far out of the entry's total, reported as they land.
+struct Copied<'p, 'b> {
+    done: u64,
+    total: u64,
+    progress: &'p Progress<'b>,
+}
+
+/// Total size of the files under `path`.
+fn size(path: &Path) -> io::Result<u64> {
+    if path.is_dir() {
+        fs::read_dir(path)?.try_fold(0, |sum, entry| Ok(sum + size(&entry?.path())?))
+    } else {
+        Ok(fs::metadata(path)?.len())
+    }
+}
+
 /// Recursive copy that flushes each file to disk before returning, so the
 /// source is never deleted while its copy is still only in the OS cache.
 /// `File::create` opens for writing, which Windows' `FlushFileBuffers`
-/// (behind `sync_all`) requires.
-fn copy(from: &Path, to: &Path) -> io::Result<()> {
+/// (behind `sync_all`) requires. Checks for cancel before every chunk.
+fn copy(from: &Path, to: &Path, copied: &mut Copied<'_, '_>) -> io::Result<()> {
     if from.is_dir() {
         fs::create_dir_all(to)?;
         for entry in fs::read_dir(from)? {
             let entry = entry?;
-            copy(&entry.path(), &to.join(entry.file_name()))?;
+            copy(&entry.path(), &to.join(entry.file_name()), copied)?;
         }
-        Ok(())
-    } else {
-        let mut src = fs::File::open(from)?;
-        let mut dst = fs::File::create(to)?;
-        io::copy(&mut src, &mut dst)?;
-        dst.sync_all()
+        return Ok(());
     }
+    let mut src = fs::File::open(from)?;
+    let mut dst = fs::File::create(to)?;
+    let mut buf = vec![0; COPY_CHUNK];
+    loop {
+        if copied.progress.cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        let n = src.read(&mut buf)?;
+        let Some(chunk) = buf.get(..n).filter(|chunk| !chunk.is_empty()) else {
+            break;
+        };
+        dst.write_all(chunk)?;
+        copied.done += n as u64;
+        copied.progress.report(copied.done, copied.total);
+    }
+    dst.sync_all()
 }
 
 fn remove(path: &Path) -> io::Result<()> {
@@ -236,7 +286,8 @@ fn remove(path: &Path) -> io::Result<()> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{copy, copy_across, migrate, move_entry};
+    use super::{Copied, copy, copy_across, migrate, move_entry};
+    use crate::boot::Progress;
 
     fn scratch(name: &str) -> Result<PathBuf, String> {
         let root = std::env::temp_dir().join(format!("ccm-paths-{name}-{}", std::process::id()));
@@ -268,7 +319,7 @@ mod tests {
         write(&legacy.join("logs/app.log"), "old")?;
         write(&data.join("logs/app.log"), "new")?;
 
-        let report = migrate(&legacy, &data);
+        let report = migrate(&legacy, &data, &Progress::none());
 
         assert!(legacy.join("settings.json").exists());
         assert!(legacy.join("themes/mine.json").exists());
@@ -289,7 +340,7 @@ mod tests {
         assert!(report.iter().all(Result::is_ok), "{report:?}");
 
         // Second launch: nothing left to do.
-        let again = migrate(&legacy, &data);
+        let again = migrate(&legacy, &data, &Progress::none());
         assert!(again.is_empty(), "{again:?}");
         let _ = fs::remove_dir_all(&root);
         Ok(())
@@ -304,7 +355,7 @@ mod tests {
         write(&root.join("logs/app.log"), "live")?;
         write(&root.join("cache/coreml/blob"), "compiled")?;
 
-        let report = migrate(&root, &root);
+        let report = migrate(&root, &root, &Progress::none());
 
         assert!(root.join("app.duckdb").exists());
         assert!(root.join("logs/app.log").exists());
@@ -318,7 +369,14 @@ mod tests {
     #[test]
     fn fresh_install_reports_nothing() -> Result<(), String> {
         let root = scratch("fresh")?;
-        assert!(migrate(&root.join("missing"), &root.join("local")).is_empty());
+        assert!(
+            migrate(
+                &root.join("missing"),
+                &root.join("local"),
+                &Progress::none()
+            )
+            .is_empty()
+        );
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
@@ -329,7 +387,14 @@ mod tests {
         let root = scratch("copy")?;
         write(&root.join("src/a/b.bin"), "b")?;
         write(&root.join("src/c.txt"), "c")?;
-        copy(&root.join("src"), &root.join("dst")).map_err(|e| e.to_string())?;
+        let progress = Progress::none();
+        let mut copied = Copied {
+            done: 0,
+            total: 2,
+            progress: &progress,
+        };
+        copy(&root.join("src"), &root.join("dst"), &mut copied).map_err(|e| e.to_string())?;
+        assert_eq!(copied.done, 2);
         assert_eq!(
             fs::read_to_string(root.join("dst/a/b.bin")).map_err(|e| e.to_string())?,
             "b"
@@ -351,7 +416,7 @@ mod tests {
         write(&legacy.join("models/two/model.onnx"), "onnx")?;
         write(&data.join("app.duckdb"), "new db")?;
 
-        let report = migrate(&legacy, &data);
+        let report = migrate(&legacy, &data, &Progress::none());
 
         assert!(legacy.join("app.duckdb.wal").exists());
         assert!(!data.join("app.duckdb.wal").exists());
@@ -370,7 +435,7 @@ mod tests {
     fn non_cross_device_rename_failure_does_not_copy() -> Result<(), String> {
         let root = scratch("nocopy")?;
         let to = root.join("local/app.duckdb");
-        assert!(move_entry(&root.join("roaming/app.duckdb"), &to).is_err());
+        assert!(move_entry(&root.join("roaming/app.duckdb"), &to, &Progress::none()).is_err());
         assert!(!to.exists());
         assert!(!root.join("local/app.duckdb.migrating").exists());
         let _ = fs::remove_dir_all(&root);
@@ -389,7 +454,7 @@ mod tests {
         write(&data.join("models.migrating/two/model.onnx"), "partial")?;
         write(&legacy.join("runtimes.migrated/pack/lib.so"), "copied")?;
 
-        let report = migrate(&legacy, &data);
+        let report = migrate(&legacy, &data, &Progress::none());
 
         assert!(!data.join("models.migrating").exists());
         assert_eq!(
@@ -411,7 +476,11 @@ mod tests {
         write(&root.join("roaming/models/two/model.onnx"), "onnx")?;
         fs::create_dir_all(root.join("local")).map_err(|e| e.to_string())?;
 
-        copy_across(&root.join("roaming/models"), &root.join("local/models"))?;
+        copy_across(
+            &root.join("roaming/models"),
+            &root.join("local/models"),
+            &Progress::none(),
+        )?;
 
         assert_eq!(
             fs::read_to_string(root.join("local/models/two/model.onnx"))
