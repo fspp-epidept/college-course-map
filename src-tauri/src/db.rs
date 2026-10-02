@@ -294,11 +294,9 @@ fn upgrade(
     }
     let library = library_version(&conn)?;
     let changing = schema < head || meta.duckdb_version.as_deref() != Some(library.as_str());
-    if changing {
-        progress.phase(Phase::UpgradingSchema);
-    }
     // A fresh database (schema 0) has nothing to lose.
     let (conn, backup) = if schema > 0 && changing {
+        progress.phase(Phase::BackingUp);
         // Close before copying: the file is then complete on its own (no
         // WAL) and no handle of ours holds it, whatever sharing mode the
         // platform gave `DuckDB`.
@@ -307,6 +305,9 @@ fn upgrade(
         conn.close()
             .map_err(|(_, e)| format!("close before backup: {e}"))?;
         let dest = suffixed(path, &format!(".pre-{app_version}.bak"));
+        if let Some(name) = dest.file_name() {
+            progress.detail(&format!("Saving a copy as {}", name.to_string_lossy()));
+        }
         back_up(path, &dest, progress)?;
         log::info!(
             "startup: database backed up to {} before upgrading (schema {schema} -> {head}, \
@@ -319,7 +320,10 @@ fn upgrade(
     } else {
         (conn, None)
     };
-    migrate(&conn)?;
+    if schema < head {
+        progress.phase(Phase::UpgradingSchema);
+    }
+    migrate(&conn, progress)?;
     stamp(&conn, &meta, app_version, &library)?;
     if let Some(keep) = backup {
         prune_backups(path, &keep);
@@ -497,7 +501,7 @@ fn stamp(conn: &Connection, meta: &Meta, app_version: &str, library: &str) -> Re
     Ok(())
 }
 
-pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
+pub(crate) fn migrate(conn: &Connection, progress: &Progress<'_>) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
             version    INTEGER PRIMARY KEY,
@@ -513,10 +517,16 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), String> {
 
     let current = schema_version(conn)?;
 
-    for &(version, sql) in MIGRATIONS {
-        if i64::from(version) <= current {
-            continue;
-        }
+    let pending: Vec<_> = MIGRATIONS
+        .iter()
+        .filter(|&&(version, _)| i64::from(version) > current)
+        .collect();
+    for (index, &&(version, sql)) in pending.iter().enumerate() {
+        progress.detail(&format!(
+            "Applying update {} of {}",
+            index + 1,
+            pending.len()
+        ));
         conn.execute_batch("BEGIN")
             .map_err(|e| format!("begin tx for migration {version}: {e}"))?;
         if let Err(e) = conn.execute_batch(sql) {
@@ -615,7 +625,7 @@ mod tests {
         AppDb, Meta, back_up, head_version, is_newer_storage, library_version, migrate,
         newer_data_message, schema_version, suffixed, wal_path,
     };
-    use crate::boot::{Boot, Progress};
+    use crate::boot::{Boot, Phase, Progress};
 
     /// The `DuckDB` release the pinned `duckdb` crate bundles. A bump moves
     /// the pin in Cargo.toml and this constant together, and
@@ -798,6 +808,46 @@ mod tests {
         let backup = Meta::read(&raw(&suffixed(&path, ".pre-0.7.0.bak"))?)?;
         assert_eq!(backup.app_version.as_deref(), Some("0.6.0"));
         assert_eq!(backup.duckdb_version.as_deref(), Some("v0.0.0"));
+        Ok(())
+    }
+
+    /// The boot screen names only work that happens: migrations enter
+    /// `UpgradingSchema`, a backup enters `BackingUp` and reports its bytes,
+    /// and an ordinary launch enters neither.
+    #[test]
+    fn phases_follow_the_work() -> Result<(), String> {
+        let fixture = fixtures()?.into_iter().next().ok_or("no fixtures")?;
+        let root = scratch("phases")?;
+        let path = root.join("app.duckdb");
+        unpack(&fixture, &path)?;
+        let pending = head_version() - schema_version(&raw(&path)?)?;
+
+        let boot = Boot::default();
+        drop(AppDb::open_at(path.clone(), "0.6.0", &Progress::of(&boot))?);
+        let state = boot.state()?;
+        assert_eq!(state.phase, Some(Phase::UpgradingSchema));
+        assert_eq!(
+            state.detail,
+            Some(format!("Applying update {pending} of {pending}"))
+        );
+
+        let boot = Boot::default();
+        drop(AppDb::open_at(path.clone(), "0.6.0", &Progress::of(&boot))?);
+        let state = boot.state()?;
+        assert_eq!((state.phase, state.detail), (None, None));
+
+        raw(&path)?
+            .execute_batch("UPDATE app_meta SET value = 'v0.0.0' WHERE key = 'duckdb_version'")
+            .map_err(|e| e.to_string())?;
+        let boot = Boot::default();
+        drop(AppDb::open_at(path, "0.7.0", &Progress::of(&boot))?);
+        let state = boot.state()?;
+        assert_eq!(state.phase, Some(Phase::BackingUp));
+        assert_eq!(
+            state.detail.as_deref(),
+            Some("Saving a copy as app.duckdb.pre-0.7.0.bak")
+        );
+        assert!(state.total > 0 && state.done == state.total, "{state:?}");
         Ok(())
     }
 
@@ -999,7 +1049,7 @@ mod tests {
     #[test]
     fn migrations_apply_and_seed_taxonomy() -> Result<(), String> {
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
-        migrate(&conn)?;
+        migrate(&conn, &Progress::none())?;
 
         let count = |level: i64| -> Result<i64, String> {
             conn.query_row(
@@ -1084,7 +1134,7 @@ mod tests {
             .map_err(|e| e.to_string())?;
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
-        migrate(&conn)?;
+        migrate(&conn, &Progress::none())?;
         assert_eq!(count(2)?, 48);
         Ok(())
     }

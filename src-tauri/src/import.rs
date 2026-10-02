@@ -503,7 +503,7 @@ mod tests {
     #[test]
     fn sweep_fails_importing_datasets_only() -> Result<(), String> {
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
-        crate::db::migrate(&conn)?;
+        crate::db::migrate(&conn, &Progress::none())?;
         conn.execute_batch(
             "INSERT INTO datasets
                 (id, title, source_kind, imported_at, row_count, import_state, import_error)
@@ -758,7 +758,7 @@ mod tests {
         use crate::profile::InputProfiler;
 
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
-        crate::db::migrate(&conn)?;
+        crate::db::migrate(&conn, &Progress::none())?;
         conn.execute_batch(
             "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
              VALUES ('d1', 't', 'file', now(), 0, 'importing')",

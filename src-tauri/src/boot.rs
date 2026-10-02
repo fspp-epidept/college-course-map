@@ -56,6 +56,9 @@ use crate::{
 pub enum Phase {
     MigratingData,
     OpeningDatabase,
+    /// The pre-upgrade copy of the database (#204). Set by `AppDb::open_at`,
+    /// not by a step.
+    BackingUp,
     UpgradingSchema,
     LoadingRuntime,
 }
@@ -312,6 +315,14 @@ impl Boot {
             cancel: AtomicBool::new(true),
             ..Self::default()
         }
+    }
+
+    /// The boot state as the boot screen would read it.
+    pub(crate) fn state(&self) -> Result<BootState, String> {
+        self.state
+            .lock()
+            .map(|tracked| tracked.state.clone())
+            .map_err(|_| "boot state poisoned".to_owned())
     }
 }
 

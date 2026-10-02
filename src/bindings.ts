@@ -685,7 +685,12 @@ export type ModelsStateChanged = Record<string, never>
  * phase names only work that is really happening: `UpgradingSchema` is
  * entered only while a schema migration runs.
  */
-export type Phase = "MigratingData" | "OpeningDatabase" | "UpgradingSchema" | "LoadingRuntime"
+export type Phase = "MigratingData" | "OpeningDatabase" | 
+/**
+ * The pre-upgrade copy of the database (#204). Set by `AppDb::open_at`,
+ * not by a step.
+ */
+"BackingUp" | "UpgradingSchema" | "LoadingRuntime"
 export type RaggedRow = { row: number; fields: number }
 /**
  * Row granularity of the export (EPI-78).

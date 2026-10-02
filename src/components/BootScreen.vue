@@ -17,6 +17,7 @@ const SLOW_MS = 10_000;
 const PHASE_TITLES: Record<Phase, string> = {
   MigratingData: "Preparing app data",
   OpeningDatabase: "Opening the database",
+  BackingUp: "Backing up your data before updating",
   UpgradingSchema: "Updating the database",
   LoadingRuntime: "Starting the classifier",
 };
