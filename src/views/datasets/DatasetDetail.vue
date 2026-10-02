@@ -512,7 +512,7 @@ watch(
           </ul>
           <!-- What the model will read (decision 2026-09-30): the stored
                profile's samples and its warnings, so a bad mapping is visible
-               at the moment of decision. Informational; Start run stays on. -->
+               at the moment of decision. Informational; Start Run stays on. -->
           <div class="flex flex-col gap-1 text-xs">
             <template v-if="inputProfile">
               <p class="text-(--ui-text-muted)">
@@ -551,7 +551,7 @@ watch(
               :disabled="classifyDisabled"
               @click="classify.mutate()"
             >
-              Start run
+              Start Run
             </UButton>
           </div>
         </div>
@@ -659,7 +659,7 @@ watch(
               class="px-0"
               @click="viewLevel = latestRun.digitLevel as 2 | 4 | 6"
             >
-              View {{ latestRun.digitLevel }}-digit results
+              View {{ latestRun.digitLevel }}-Digit Results
             </UButton>
           </div>
         </div>
@@ -751,7 +751,7 @@ watch(
                   Cancel
                 </UButton>
                 <UButton color="primary" icon="i-lucide-download" @click="exportCsv">
-                  Choose file…
+                  Choose File…
                 </UButton>
               </div>
             </template>
