@@ -42,7 +42,7 @@ export function useMenuActions(): Record<MenuAction, () => void> {
     import_csv: () => workspace.openImportDialog(),
     export_results: () => datasetAction("export"),
     start_classification: () => datasetAction("classify"),
-    // RunDetail / DatasetDetail's Pause button, aimed at the one running run
+    // DatasetDetail's Pause button, aimed at the one running run
     // (only one may be active app-wide).
     pause_run: () => {
       const active = runs.value?.find((run) => run.state === "running");

@@ -13,7 +13,7 @@ const SIDEBAR_WIDTH_DEFAULT_REM = 16;
 /**
  * Workspace state — the sidebar-driven master/detail model (EPI-58, replacing
  * the earlier VS-Code-style tabs): each activity shows one panel; Datasets and
- * Runs render the detail for the sidebar's current selection. Selection is
+ * CCM Reference render the detail for the sidebar's current selection. Selection is
  * remembered per activity, so switching to Settings and back restores what
  * you were looking at.
  */
@@ -26,7 +26,6 @@ export const useWorkspace = defineStore(
     // state. Ids are backend resource ids — stale ones are pruned by the
     // sidebars when the backing row disappears (e.g. after db:clear-data).
     const selectedDatasetId = ref<string | null>(null);
-    const selectedRunId = ref<string | null>(null);
     // CCM Reference selection: a taxonomy code, 2- or 6-digit. The
     // taxonomy is static, so no pruning — the detail shows "not found" if a
     // persisted code ever disappears.
@@ -68,10 +67,6 @@ export const useWorkspace = defineStore(
       selectedDatasetId.value = id;
     }
 
-    function selectRun(id: string | null): void {
-      selectedRunId.value = id;
-    }
-
     function selectCcmCode(code: string | null): void {
       selectedCcmCode.value = code;
     }
@@ -99,7 +94,6 @@ export const useWorkspace = defineStore(
     return {
       activeActivityId,
       selectedDatasetId,
-      selectedRunId,
       selectedCcmCode,
       sidebarOpen,
       sidebarWidthRem,
@@ -110,7 +104,6 @@ export const useWorkspace = defineStore(
       setActiveActivity,
       setActiveSettingsSection,
       selectDataset,
-      selectRun,
       selectCcmCode,
       toggleSidebar,
       setSidebarWidth,
@@ -122,15 +115,16 @@ export const useWorkspace = defineStore(
   {
     // Persist what should survive reload. sidebarOpen, commandPaletteOpen,
     // importDialogOpen and pendingDatasetAction are per-session (a demo opens
-    // with the sidebar showing and the palette closed). The storage key is versioned: "workspace" carried the tabbed
-    // era's shape (tabsByActivity etc.) and is deliberately orphaned rather
-    // than migrated (EPI-58).
+    // with the sidebar showing and the palette closed). The storage key is
+    // versioned, and earlier shapes are deliberately orphaned rather than
+    // migrated: "workspace" carried the tabbed era's (tabsByActivity etc.),
+    // and "workspace-v2" could name the Runs activity, which no longer
+    // exists (#247).
     persist: {
-      key: "workspace-v2",
+      key: "workspace-v3",
       pick: [
         "activeActivityId",
         "selectedDatasetId",
-        "selectedRunId",
         "selectedCcmCode",
         "sidebarWidthRem",
         "activeSettingsSection",
