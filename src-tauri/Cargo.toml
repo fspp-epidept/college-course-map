@@ -77,6 +77,8 @@ tauri-plugin-single-instance = "2"
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 flate2 = "1"
 tar = "0.4"
+# Clean shutdown on termination signals (signals.rs).
+signal-hook = "0.4"
 
 [lints.rust]
 unsafe_code = "deny"
