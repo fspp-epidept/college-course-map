@@ -352,8 +352,9 @@ fn remove_entry(path: &Path) {
     } else {
         std::fs::remove_file(path)
     };
-    if let Err(e) = removed {
-        log::warn!("could not remove {}: {e}", path.display());
+    match removed {
+        Ok(()) => log::info!("startup: removed {}", path.display()),
+        Err(e) => log::warn!("startup: could not remove {}: {e}", path.display()),
     }
 }
 
