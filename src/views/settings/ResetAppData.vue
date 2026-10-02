@@ -23,7 +23,7 @@ const reset = useMutation({
 
 <template>
   <div class="flex items-center gap-3">
-    <UButton size="xs" color="error" variant="outline" @click="confirmOpen = true">
+    <UButton size="xs" color="error" variant="outline" class="shrink-0" @click="confirmOpen = true">
       Reset app data…
     </UButton>
     <span class="text-xs text-(--ui-text-muted)">
