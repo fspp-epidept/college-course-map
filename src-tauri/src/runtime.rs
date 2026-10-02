@@ -9,6 +9,10 @@
 //! - downloaded packs: `<local data>/college-course-map/runtimes/<ort_version>/<id>/`
 //! - bundled CPU pack: `<resource_dir>/runtimes/cpu/` (version implicit — a
 //!   bundle carries exactly one)
+//! - compiled `CoreML` models: `<coreml cache>/<ort_version>/`
+//!
+//! Only the manifest's `<ort_version>` folders survive startup (#203):
+//! `startup` deletes every other version's packs and compiled models.
 //!
 //! A pack directory is valid when its dylib exists and its `.sha256` marker
 //! matches the manifest archive hash — extraction goes to a `.part` dir and
@@ -326,6 +330,118 @@ pub fn sweep_partial_downloads(root: &Path) -> usize {
         }
     }
     swept
+}
+
+/// Entries of `dir` not named `keep`. A missing folder has none.
+fn entries_except(dir: &Path, keep: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name() != keep)
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// Best-effort delete of a file or folder; a failure is retried by the same
+/// sweep on the next launch.
+fn remove_entry(path: &Path) {
+    let removed = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    if let Err(e) = removed {
+        log::warn!("could not remove {}: {e}", path.display());
+    }
+}
+
+/// Delete every other ONNX Runtime version's folder under the runtimes root
+/// (#203). An `ort` bump re-pins every pack, so a `<version>` folder that
+/// isn't the manifest's can never be loaded again. Runs at startup, before
+/// any download can be in flight. Returns whether a runtime pack was among
+/// what it removed, so startup can say that GPU support needs downloading
+/// again.
+#[must_use]
+pub fn sweep_old_versions(root: &Path, current: &str) -> bool {
+    let mut held_pack = false;
+    for version_dir in entries_except(root, current) {
+        held_pack |= std::fs::read_dir(&version_dir).is_ok_and(|packs| {
+            packs
+                .flatten()
+                .any(|pack| dylib_file(&pack.path()).exists())
+        });
+        remove_entry(&version_dir);
+    }
+    held_pack
+}
+
+/// Where ONNX Runtime keeps compiled `CoreML` models: one folder per ONNX
+/// Runtime version under the cache leaf (#203), so a model compiled by
+/// another version is never reused.
+pub(crate) fn coreml_cache_dir() -> Result<PathBuf, String> {
+    Ok(crate::paths::coreml_cache_dir()?.join(load_manifest()?.ort_version))
+}
+
+/// Delete everything in the `CoreML` cache leaf except the current version's
+/// folder: other versions' compiled models, and the unversioned ones from
+/// before the folders existed. They are rebuilt when next needed.
+pub fn sweep_coreml_cache(leaf: &Path, current: &str) {
+    for stale in entries_except(leaf, current) {
+        remove_entry(&stale);
+    }
+}
+
+/// Delete an installed pack folder. The marker goes first, so a removal cut
+/// short leaves a folder [`installed`] rejects, never a pack with files
+/// missing.
+fn remove_pack_dir(dir: &Path) -> Result<(), String> {
+    let gone = |result: std::io::Result<()>| match result {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("remove {}: {e}", dir.display()))
+        }
+        _ => Ok(()),
+    };
+    gone(std::fs::remove_file(dir.join(MARKER)))?;
+    gone(std::fs::remove_dir_all(dir))
+}
+
+/// The packs `remove_runtime` deletes for `pack_id` (#203): the runtime pack
+/// and its companion libs pack, unless another installed pack or the loaded
+/// one still needs those libs. The bundled CPU pack and the pack this
+/// process loaded are refused.
+fn removal_set<'a>(
+    packs: &[&'a RuntimePack],
+    active: &str,
+    pack_id: &str,
+    is_installed: &dyn Fn(&RuntimePack) -> bool,
+) -> Result<Vec<&'a RuntimePack>, String> {
+    if pack_id == "cpu" {
+        return Err("The CPU backend ships with the app and can't be removed.".to_owned());
+    }
+    if pack_id == active {
+        return Err(
+            "This backend is in use. Make another backend active and relaunch, then remove it."
+                .to_owned(),
+        );
+    }
+    let pack = packs
+        .iter()
+        .find(|p| p.id == pack_id && !p.eps.is_empty())
+        .ok_or_else(|| format!("no backend '{pack_id}' for this platform"))?;
+    let mut removed = vec![*pack];
+    if let Some(libs_id) = pack.libs.as_deref() {
+        let still_needed = packs.iter().any(|p| {
+            p.id != pack_id
+                && p.libs.as_deref() == Some(libs_id)
+                && (p.id == active || is_installed(p))
+        });
+        if !still_needed && let Some(libs) = packs.iter().find(|p| p.id == libs_id) {
+            removed.push(*libs);
+        }
+    }
+    Ok(removed)
 }
 
 /// Stream one archive to `dest`, hashing as it goes; delete and error on any
@@ -745,6 +861,13 @@ pub(crate) fn startup(
     if swept > 0 {
         log::info!("startup: swept {swept} partial pack download(s)");
     }
+    // An ONNX Runtime bump leaves the previous version's packs and compiled
+    // CoreML models behind; this build can use neither (#203).
+    let lost_pack =
+        runtimes_root().is_ok_and(|root| sweep_old_versions(&root, &manifest.ort_version));
+    if let Ok(leaf) = crate::paths::coreml_cache_dir() {
+        sweep_coreml_cache(&leaf, &manifest.ort_version);
+    }
     let (mut state, pack_dir) = resolve_startup_pack(
         &manifest,
         settings.preferred_pack.as_deref(),
@@ -775,6 +898,14 @@ pub(crate) fn startup(
             "The '{failed}' runtime pack was damaged and has been removed — running \
              on CPU. Re-download the pack to restore GPU support."
         ));
+    }
+    if lost_pack && state.pack_id == "cpu" {
+        state.notices.push(
+            "This release uses a newer ONNX Runtime, so the GPU backend downloaded for the \
+             previous one was removed. Download it again under Settings \u{2192} Compute to \
+             use your GPU."
+                .to_owned(),
+        );
     }
     // GPU support libraries: preload CUDA/cuDNN dylibs so EP registration at
     // model-load time resolves them without a system install. Precedence: the
@@ -1003,6 +1134,38 @@ fn install_pack_with_progress(
     })
 }
 
+/// Delete a downloaded backend (#203): its pack folder, and its support
+/// libraries when no other backend needs them. The bundled CPU pack and the
+/// backend in use are refused. A preference for the removed backend is
+/// cleared, so the next launch falls back to the provider priority.
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remove_runtime(app: tauri::AppHandle, pack_id: String) -> Result<(), String> {
+    use tauri_specta::Event as _;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = remove_runtime_blocking(&app, &pack_id);
+        let _ = RuntimeStateChanged {}.emit(&app);
+        result
+    })
+    .await
+    .map_err(|e| format!("remove task panicked: {e}"))?
+}
+
+fn remove_runtime_blocking(app: &tauri::AppHandle, pack_id: &str) -> Result<(), String> {
+    let active = &crate::boot::services(app)?.runtime.pack_id;
+    let manifest = load_manifest()?;
+    let packs = packs_for_target(&manifest);
+    let removed = removal_set(&packs, active, pack_id, &|pack| {
+        pack_dir(&manifest, pack).is_ok_and(|dir| installed(&dir, pack))
+    })?;
+    for pack in removed {
+        remove_pack_dir(&pack_dir(&manifest, pack)?)?;
+        log::info!("runtime: removed pack '{}'", pack.id);
+    }
+    crate::config::clear_preferred_pack(pack_id)
+}
+
 /// Restart the app (EPI-94): the one way to switch runtime packs, since ONNX
 /// Runtime loads exactly once per process.
 #[tauri::command]
@@ -1131,6 +1294,129 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    fn touch(path: &Path) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, b"x").map_err(|e| e.to_string())
+    }
+
+    /// Other versions' folders go and the current one stays; the return
+    /// value says whether a runtime pack (not just support libraries) was
+    /// lost (#203).
+    #[test]
+    fn sweep_old_versions_keeps_only_the_current_version() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("ccm-versions-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let current = super::dylib_file(&root.join("1.24.2").join("cuda"));
+        touch(&current)?;
+        assert!(!super::sweep_old_versions(&root, "1.24.2"), "nothing old");
+
+        touch(
+            &root
+                .join("1.23.0")
+                .join("cuda13-libs")
+                .join("lib")
+                .join("x"),
+        )?;
+        assert!(!super::sweep_old_versions(&root, "1.24.2"), "libs only");
+        assert!(!root.join("1.23.0").exists());
+
+        touch(&super::dylib_file(&root.join("1.22.0").join("cuda")))?;
+        assert!(super::sweep_old_versions(&root, "1.24.2"), "a GPU pack");
+        assert!(!root.join("1.22.0").exists());
+        assert!(current.exists(), "current version untouched");
+
+        assert!(!super::sweep_old_versions(&root.join("missing"), "1.24.2"));
+        std::fs::remove_dir_all(&root).map_err(|e| e.to_string())
+    }
+
+    /// The `CoreML` sweep removes other versions' folders and the
+    /// unversioned files from before the folders existed (#203).
+    #[test]
+    fn sweep_coreml_cache_keeps_only_the_current_version() -> Result<(), String> {
+        let leaf = std::env::temp_dir().join(format!("ccm-coreml-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&leaf);
+        let kept = leaf.join("1.24.2").join("model.mlmodelc");
+        touch(&kept)?;
+        touch(&leaf.join("1.23.0").join("model.mlmodelc"))?;
+        touch(&leaf.join("unversioned.mlmodelc"))?;
+
+        super::sweep_coreml_cache(&leaf, "1.24.2");
+
+        let mut left: Vec<_> = std::fs::read_dir(&leaf)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["1.24.2"]);
+        assert!(kept.exists());
+        std::fs::remove_dir_all(&leaf).map_err(|e| e.to_string())
+    }
+
+    fn pack(id: &str, eps: &[&str], libs: Option<&str>) -> super::RuntimePack {
+        super::RuntimePack {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            target: "test".to_owned(),
+            eps: eps.iter().map(|e| (*e).to_owned()).collect(),
+            layout: PackLayout::Onnxruntime,
+            libs: libs.map(str::to_owned),
+            archives: Vec::new(),
+        }
+    }
+
+    /// What `remove_runtime` deletes and refuses (#203): never the bundled
+    /// CPU pack, the pack in use, or a libs pack on its own; support
+    /// libraries go with their backend unless another installed or loaded
+    /// backend shares them.
+    #[test]
+    fn removal_set_follows_the_rules() -> Result<(), String> {
+        let all = [
+            pack("cpu", &["cpu"], None),
+            pack("cuda", &["cuda"], None),
+            pack("cuda13", &["cuda"], Some("libs")),
+            pack("trt13", &["tensorrt"], Some("libs")),
+            pack("libs", &[], None),
+        ];
+        let packs: Vec<&super::RuntimePack> = all.iter().collect();
+        let ids = |active: &str, id: &str, installed: &[&str]| {
+            super::removal_set(&packs, active, id, &|p| installed.contains(&p.id.as_str()))
+                .map(|set| set.iter().map(|p| p.id.clone()).collect::<Vec<_>>())
+        };
+
+        assert!(ids("cuda", "cpu", &[]).is_err(), "bundled pack");
+        assert!(ids("cuda", "cuda", &["cuda"]).is_err(), "pack in use");
+        assert!(ids("cpu", "libs", &["libs"]).is_err(), "not a backend");
+        assert!(ids("cpu", "nope", &[]).is_err(), "unknown id");
+
+        assert_eq!(ids("cpu", "cuda", &["cuda"])?, ["cuda"]);
+        assert_eq!(
+            ids("cpu", "cuda13", &["cuda13", "libs"])?,
+            ["cuda13", "libs"]
+        );
+        // Shared libs stay while the other backend is installed or loaded.
+        assert_eq!(
+            ids("cpu", "cuda13", &["cuda13", "trt13", "libs"])?,
+            ["cuda13"]
+        );
+        assert_eq!(ids("trt13", "cuda13", &["cuda13", "libs"])?, ["cuda13"]);
+        Ok(())
+    }
+
+    /// Removing a pack folder takes the marker and everything else, and a
+    /// folder that is already gone is not an error.
+    #[test]
+    fn remove_pack_dir_is_idempotent() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("ccm-remove-test-{}", std::process::id()));
+        touch(&dir.join(super::MARKER))?;
+        touch(&super::dylib_file(&dir))?;
+        super::remove_pack_dir(&dir)?;
+        assert!(!dir.exists());
+        super::remove_pack_dir(&dir)
     }
 
     /// The committed runtimes.toml must parse into the typed manifest: every

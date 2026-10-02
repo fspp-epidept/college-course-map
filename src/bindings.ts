@@ -281,6 +281,20 @@ async downloadRuntime(packId: string) : Promise<Result<null, string>> {
 async relaunchApp() : Promise<void> {
     await TAURI_INVOKE("relaunch_app");
 },
+/**
+ * Delete a downloaded backend (#203): its pack folder, and its support
+ * libraries when no other backend needs them. The bundled CPU pack and the
+ * backend in use are refused. A preference for the removed backend is
+ * cleared, so the next launch falls back to the provider priority.
+ */
+async removeRuntime(packId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_runtime", { packId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async runtimeStatus() : Promise<Result<RuntimeStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("runtime_status") };
@@ -787,7 +801,13 @@ export type ModelStatus = { digitLevel: number; displayName: string; hfRepo: str
  * Files on disk with the manifest's exact size. Full sha256 verification
  * happens during download, not on status polls.
  */
-filesPresent: number; totalBytes: number; loaded: boolean; loading: boolean; 
+filesPresent: number; 
+/**
+ * The files on disk were downloaded for an earlier release's revision
+ * of this model (#202). It can't be loaded until downloaded again,
+ * even when `files_present` says every file is there.
+ */
+updateRequired: boolean; totalBytes: number; loaded: boolean; loading: boolean; 
 /**
  * Whether a download is in flight app-wide (same value on every row).
  * This — not any component-local pending flag — gates the Download
@@ -856,7 +876,7 @@ export type RunDetail = { id: string; datasetId: string; datasetTitle: string; d
  * How many models the run covers (EPI-96). Row counters are in
  * row×model units — the UI divides by this to talk about dataset rows.
  */
-modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
+modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[]; superseded: boolean }
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
@@ -883,7 +903,11 @@ resumable: boolean;
  * (`model_superseded`, `model_not_loaded`). Empty when resumable, and
  * for states resume doesn't apply to.
  */
-resumeBlockers: string[] }
+resumeBlockers: string[]; 
+/**
+ * The run used a model version this build no longer ships (#202).
+ */
+superseded: boolean }
 /**
  * Per-pack download progress, mirroring `models::ModelDownloadProgress`.
  */

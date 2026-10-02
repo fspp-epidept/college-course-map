@@ -65,6 +65,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             reset::request_reset,
             runtime::download_runtime,
             runtime::relaunch_app,
+            runtime::remove_runtime,
             runtime::runtime_status,
             runs::delete_run,
             runs::get_latest_run,

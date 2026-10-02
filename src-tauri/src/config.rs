@@ -353,6 +353,17 @@ pub(crate) fn write_settings(settings: Settings) -> Result<(), String> {
     write_settings_to_disk(&settings)
 }
 
+/// Forget the preferred runtime pack if it is `pack_id` (that pack was just
+/// removed), so the next launch falls back to the provider priority.
+pub(crate) fn clear_preferred_pack(pack_id: &str) -> Result<(), String> {
+    let mut settings = read_settings()?;
+    if settings.preferred_pack.as_deref() == Some(pack_id) {
+        settings.preferred_pack = None;
+        write_settings_to_disk(&settings)?;
+    }
+    Ok(())
+}
+
 fn write_settings_to_disk(settings: &Settings) -> Result<(), String> {
     let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     fs::write(settings_path()?, json).map_err(|e| e.to_string())

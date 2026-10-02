@@ -140,9 +140,91 @@ pub fn files_present(root: &Path, entry: &ManifestModel) -> usize {
         .count()
 }
 
+/// Name of the file in a model's folder that records which manifest revision
+/// its files were verified against (#202). Like a runtime pack's `.sha256`,
+/// it is written only after every file's hash has been checked.
+const REVISION_MARKER: &str = ".revision";
+
+/// The revision this model's files on disk were last verified against, or
+/// `None` when they never were (not downloaded, or installed before the
+/// marker existed).
+#[must_use]
+pub fn installed_revision(root: &Path, entry: &ManifestModel) -> Option<String> {
+    std::fs::read_to_string(root.join(&entry.app_subdir).join(REVISION_MARKER))
+        .ok()
+        .map(|revision| revision.trim().to_owned())
+}
+
+/// Record that this model's files are the manifest revision. Call only once
+/// every file's sha256 has been checked against the manifest.
+pub fn mark_revision(root: &Path, entry: &ManifestModel) -> Result<(), String> {
+    let marker = root.join(&entry.app_subdir).join(REVISION_MARKER);
+    std::fs::write(&marker, &entry.revision).map_err(|e| format!("write {}: {e}", marker.display()))
+}
+
+/// Whether this model's files belong to another release's revision and need
+/// downloading again (#202), as opposed to never downloaded or damaged. The
+/// marker alone decides: sizes can't tell, because a retrained model is
+/// exactly as large as the one it replaces. Such a model is never loaded;
+/// its output would be cached as the new revision's.
+#[must_use]
+pub fn update_required(root: &Path, entry: &ManifestModel) -> bool {
+    installed_revision(root, entry).is_some_and(|revision| revision != entry.revision)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::load;
+    use super::{
+        ManifestFile, ManifestModel, installed_revision, load, mark_revision, update_required,
+    };
+
+    /// "Update required" (#202) is a marker naming another revision, whether
+    /// or not the files look present: a re-pinned model can be the same
+    /// size. No marker means never downloaded (or not yet stamped), which is
+    /// a different state.
+    #[test]
+    fn update_required_follows_the_marker() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("ccm-revision-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let entry = |revision: &str| ManifestModel {
+            digit_level: 2,
+            app_subdir: "two".to_owned(),
+            display_name: "Two".to_owned(),
+            hf_repo: "r".to_owned(),
+            revision: revision.to_owned(),
+            files: vec![ManifestFile {
+                name: "model.onnx".to_owned(),
+                sha256: String::new(),
+                size: 4,
+            }],
+        };
+        let dir = root.join("two");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+        // Never downloaded: missing, not an update.
+        assert_eq!(installed_revision(&root, &entry("old")), None);
+        assert!(!update_required(&root, &entry("old")));
+
+        std::fs::write(dir.join("model.onnx"), b"1234").map_err(|e| e.to_string())?;
+        mark_revision(&root, &entry("old"))?;
+        assert_eq!(
+            installed_revision(&root, &entry("old")).as_deref(),
+            Some("old")
+        );
+        assert!(!update_required(&root, &entry("old")));
+
+        // A new revision whose file is the same size as the old one: the
+        // files look present, and the marker still says they are stale.
+        assert_eq!(super::files_present(&root, &entry("new")), 1);
+        assert!(update_required(&root, &entry("new")));
+
+        // A file going missing under a current marker is damage, not an
+        // update.
+        std::fs::remove_file(dir.join("model.onnx")).map_err(|e| e.to_string())?;
+        assert!(update_required(&root, &entry("new")));
+        assert!(!update_required(&root, &entry("old")));
+        std::fs::remove_dir_all(&root).map_err(|e| e.to_string())
+    }
 
     /// The committed models.toml must parse into the typed manifest: three
     /// digit levels, three files each, full-SHA revisions, well-formed

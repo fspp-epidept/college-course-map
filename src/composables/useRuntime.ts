@@ -112,6 +112,25 @@ export function useRuntimeEvents() {
   return { progress };
 }
 
+/**
+ * Delete a downloaded compute backend (#203). Rust also clears a saved
+ * preference for it; the freed space shows in Settings → Storage.
+ */
+export function useRemoveRuntime() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (packId: string) => {
+      const result = await commands.removeRuntime(packId);
+      if (result.status === "error") throw new Error(result.error);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["runtime"] });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      queryClient.invalidateQueries({ queryKey: ["storage"] });
+    },
+  });
+}
+
 export function useDownloadRuntime() {
   const queryClient = useQueryClient();
   return useMutation({

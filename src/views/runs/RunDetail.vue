@@ -103,6 +103,13 @@ function fmtTime(iso: string | null | undefined): string {
         <span v-if="run.executionProvider" class="text-sm text-(--ui-text-dimmed)">
           · {{ run.executionProvider }}
         </span>
+        <span
+          v-if="run.superseded"
+          class="text-sm text-(--ui-text-dimmed)"
+          title="This run used a model version this release no longer ships."
+        >
+          · older model version
+        </span>
         <div class="ml-auto flex items-center gap-2">
           <UButton
             v-if="run.state === 'running'"

@@ -51,7 +51,9 @@ function open(run: RunSummary): void {
 }
 
 function progressLabel(run: RunSummary): string {
-  const level = run.digitLevel !== null ? `${run.digitLevel}-digit · ` : "all models · ";
+  // A run on a model version this release no longer ships says so (#202).
+  const version = run.superseded ? "older model version · " : "";
+  const level = `${run.digitLevel !== null ? `${run.digitLevel}-digit` : "all models"} · ${version}`;
   if (
     run.state === "running" &&
     run.rowsTotal !== null &&

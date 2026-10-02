@@ -134,6 +134,8 @@ pub(crate) struct RunSummary {
     /// (`model_superseded`, `model_not_loaded`). Empty when resumable, and
     /// for states resume doesn't apply to.
     pub resume_blockers: Vec<String>,
+    /// The run used a model version this build no longer ships (#202).
+    pub superseded: bool,
 }
 
 /// Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
@@ -164,6 +166,15 @@ pub(crate) struct RunDetail {
     pub resume_count: i64,
     pub resumable: bool,
     pub resume_blockers: Vec<String>,
+    pub superseded: bool,
+}
+
+/// Whether a run used a model version this build no longer ships (#202): a
+/// recorded model id that isn't the manifest's active row for its digit
+/// level, or no recorded model at all. Computed at read time, like
+/// resumability.
+fn is_superseded(model_ids: &[i64], catalog: &ModelCatalog) -> bool {
+    model_ids.is_empty() || model_ids.iter().any(|id| catalog.level_of(*id).is_none())
 }
 
 /// Read-time resumability check (EPI-69). A run is resumable iff it stopped
@@ -291,6 +302,7 @@ pub(crate) fn list_runs(
                     resume_count: row.get(12)?,
                     resumable: false,
                     resume_blockers: Vec::new(),
+                    superseded: false,
                 },
                 model_type,
                 model_ids_json,
@@ -312,6 +324,7 @@ pub(crate) fn list_runs(
             assess_resumability(&summary.state, &model_ids, catalog, &store);
         summary.resumable = resumable;
         summary.resume_blockers = blockers;
+        summary.superseded = is_superseded(&model_ids, catalog);
         Ok(summary)
     })
     .collect()
@@ -421,12 +434,14 @@ fn query_run_detail(
             resume_count: row.resume_count,
             resumable: false,
             resume_blockers: Vec::new(),
+            superseded: false,
         },
         model_ids,
     )))
 }
 
-/// Stamp read-time resumability onto a mapped detail row.
+/// Stamp the read-time facts (resumability, superseded) onto a mapped
+/// detail row.
 fn finish_run_detail(
     (mut detail, model_ids): (RunDetail, Vec<i64>),
     catalog: &ModelCatalog,
@@ -435,6 +450,7 @@ fn finish_run_detail(
     let (resumable, blockers) = assess_resumability(&detail.state, &model_ids, catalog, store);
     detail.resumable = resumable;
     detail.resume_blockers = blockers;
+    detail.superseded = is_superseded(&model_ids, catalog);
     detail
 }
 
@@ -1448,7 +1464,7 @@ fn next_miss_window(db: &AppDb, cursor: &str) -> Result<Vec<SelectedCourse>, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{RunRegistry, delete_run_row};
+    use super::{RunRegistry, delete_run_row, is_superseded};
     use crate::boot::Progress;
 
     /// A run and one cached result it computed, on a migrated database.
@@ -1501,6 +1517,31 @@ mod tests {
             .map_err(|e| e.to_string())?;
         assert!(delete_run_row(&conn, &registry, "run").is_err());
         assert_eq!(count(&conn, "runs")?, 1);
+        Ok(())
+    }
+
+    /// A run is superseded when any model it used is no longer the
+    /// manifest's row for its level, or when it recorded no model (#202).
+    #[test]
+    fn superseded_means_a_model_the_manifest_no_longer_resolves() -> Result<(), String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        crate::db::migrate(&conn, &Progress::none())?;
+        let catalog = crate::manifest::resolve_model_rows(&conn, crate::manifest::load()?)?;
+        let current: Vec<i64> = catalog
+            .levels()
+            .into_iter()
+            .filter_map(|level| catalog.model_id(level))
+            .collect();
+        assert_eq!(current.len(), 3);
+        assert!(!is_superseded(&current, &catalog));
+        // An id the manifest doesn't resolve to: an earlier revision's row.
+        let old = current.iter().max().ok_or("no model")? + 1;
+        assert!(is_superseded(&[old], &catalog));
+        assert!(is_superseded(
+            &[old, *current.first().ok_or("no model")?],
+            &catalog
+        ));
+        assert!(is_superseded(&[], &catalog));
         Ok(())
     }
 }
