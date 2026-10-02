@@ -67,6 +67,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
         7,
         include_str!("../migrations/0007_dataset_input_profile.sql"),
     ),
+    (
+        8,
+        include_str!("../migrations/0008_cache_without_run_fk.sql"),
+    ),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -979,6 +983,70 @@ mod tests {
                 .map_err(|e| e.to_string())?;
             assert_eq!(written, 1, "{label}");
         }
+        Ok(())
+    }
+
+    /// 0008 on a populated database (the v7 fixture: cached results whose
+    /// `computed_by_run` references a run): the run can now be deleted and
+    /// its results stay, the cache keeps its primary key and its foreign key
+    /// to `models`, a `models` row nothing references can still be deleted
+    /// (the `RENAME` hazard the migration avoids), and the secondary indexes
+    /// are gone.
+    #[test]
+    fn cache_rebuild_frees_runs_and_drops_secondary_indexes() -> Result<(), String> {
+        let fixture = fixtures()?
+            .into_iter()
+            .find(|path| path.to_string_lossy().contains("schema-v7_"))
+            .ok_or("no v7 fixture")?;
+        let root = scratch("cache-rebuild")?;
+        let path = root.join("app.duckdb");
+        unpack(&fixture, &path)?;
+        let db = AppDb::open_at(path, "test", &Progress::none())?;
+        let conn = db.rw()?;
+        let count = |sql: &str| -> Result<i64, String> {
+            conn.query_row(sql, [], |r| r.get(0))
+                .map_err(|e| format!("{sql}: {e}"))
+        };
+
+        let results = count("SELECT COUNT(*) FROM inference_results")?;
+        assert!(results > 0, "fixture has no cached results");
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM inference_results ir
+                 JOIN runs r ON r.id = ir.computed_by_run"
+            )?,
+            results,
+            "fixture results don't reference a run"
+        );
+        conn.execute_batch("DELETE FROM runs")
+            .map_err(|e| format!("delete runs: {e}"))?;
+        assert_eq!(count("SELECT COUNT(*) FROM inference_results")?, results);
+
+        let duplicate = conn.execute_batch(
+            "INSERT INTO inference_results (model_id, content_hash, classification, computed_at)
+             SELECT model_id, content_hash, 'x', now() FROM inference_results LIMIT 1",
+        );
+        assert!(duplicate.is_err(), "primary key not enforced");
+        let orphan = conn.execute_batch(
+            "INSERT INTO inference_results (model_id, content_hash, classification, computed_at)
+             VALUES (-1, 'h', 'x', now())",
+        );
+        assert!(orphan.is_err(), "models foreign key not enforced");
+        conn.execute_batch(
+            "INSERT INTO models (id, hf_repo, hf_revision, model_type, precision)
+             VALUES (-1, 'r', 'v', '2', 'f32');
+             DELETE FROM models WHERE id = -1;",
+        )
+        .map_err(|e| format!("delete an unreferenced models row: {e}"))?;
+
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM duckdb_indexes()
+                 WHERE table_name IN ('courses', 'inference_results')"
+            )?,
+            0,
+            "secondary indexes remain"
+        );
         Ok(())
     }
 

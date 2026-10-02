@@ -18,7 +18,7 @@ use std::{
 };
 
 use chrono::Utc;
-use duckdb::params;
+use duckdb::{OptionalExt as _, params};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager, State};
@@ -806,6 +806,49 @@ pub(crate) fn pause_run(run_id: String, registry: State<'_, RunRegistry>) -> boo
     registry.cancel(&run_id)
 }
 
+/// Delete a run's record (#198). Refused while the run is executing; any
+/// other state goes. The classifications it computed stay in the cache —
+/// they are keyed by `(model_id, content_hash)`, not by run — and the next
+/// run reuses them. Deleting a run that is already gone is not an error.
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn delete_run(
+    run_id: String,
+    boot: State<'_, Boot>,
+    registry: State<'_, RunRegistry>,
+) -> Result<(), String> {
+    let conn = boot.ready()?.db.rw()?;
+    delete_run_row(&conn, &registry, &run_id)
+}
+
+fn delete_run_row(
+    conn: &duckdb::Connection,
+    registry: &RunRegistry,
+    run_id: &str,
+) -> Result<(), String> {
+    // `running` in the row covers the moment between `resume_run` marking it
+    // and the worker registering; the registry covers everything after.
+    let state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM runs WHERE id = ?",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("run {run_id}: {e}"))?;
+    if state.as_deref() == Some("running") || registry.is_active(run_id) {
+        return Err("This run is still running. Pause it before deleting it.".to_owned());
+    }
+    conn.execute("DELETE FROM runs WHERE id = ?", params![run_id])
+        .map_err(|e| format!("delete run {run_id}: {e}"))?;
+    log::info!("run {run_id}: deleted");
+    Ok(())
+}
+
 /// Tauri-side wrapper for the background worker: resolves managed state,
 /// hands the pipeline its model + database handles, and cleans up the
 /// registry when the run reaches a terminal state. Owned values only so the
@@ -1384,4 +1427,63 @@ fn next_miss_window(db: &AppDb, cursor: &str) -> Result<Vec<SelectedCourse>, Str
     .map_err(|e| format!("query miss window: {e}"))?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| format!("collect miss window: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunRegistry, delete_run_row};
+    use crate::boot::Progress;
+
+    /// A run and one cached result it computed, on a migrated database.
+    fn seeded() -> Result<duckdb::Connection, String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        crate::db::migrate(&conn, &Progress::none())?;
+        conn.execute_batch(
+            "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
+             VALUES ('ds', 't', 'file', now(), 1, 'ready');
+             INSERT INTO models (id, hf_repo, hf_revision, model_type, precision)
+             VALUES (1, 'r', 'v', '6', 'f32');
+             INSERT INTO runs (id, dataset_id, state, model_ids, created_at)
+             VALUES ('run', 'ds', 'completed', '[1]', now());
+             INSERT INTO inference_results
+                (model_id, content_hash, classification, computed_at, computed_by_run)
+             VALUES (1, 'h', '11.0701', now(), 'run');",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn)
+    }
+
+    fn count(conn: &duckdb::Connection, table: &str) -> Result<i64, String> {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Deleting a run removes its row and nothing else: the result it
+    /// computed stays in the cache for the next run to reuse. Deleting it
+    /// again is a no-op.
+    #[test]
+    fn delete_run_keeps_cached_results() -> Result<(), String> {
+        let conn = seeded()?;
+        let registry = RunRegistry::default();
+        delete_run_row(&conn, &registry, "run")?;
+        assert_eq!(count(&conn, "runs")?, 0);
+        assert_eq!(count(&conn, "inference_results")?, 1);
+        delete_run_row(&conn, &registry, "run")
+    }
+
+    /// A run with a live worker, or one marked `running`, is refused.
+    #[test]
+    fn delete_run_refuses_a_running_run() -> Result<(), String> {
+        let conn = seeded()?;
+        let registry = RunRegistry::default();
+        registry.register("run");
+        assert!(delete_run_row(&conn, &registry, "run").is_err());
+        registry.remove("run");
+
+        conn.execute_batch("UPDATE runs SET state = 'running'")
+            .map_err(|e| e.to_string())?;
+        assert!(delete_run_row(&conn, &registry, "run").is_err());
+        assert_eq!(count(&conn, "runs")?, 1);
+        Ok(())
+    }
 }

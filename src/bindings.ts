@@ -269,6 +269,20 @@ async runtimeStatus() : Promise<Result<RuntimeStatus, string>> {
 }
 },
 /**
+ * Delete a run's record (#198). Refused while the run is executing; any
+ * other state goes. The classifications it computed stay in the cache —
+ * they are keyed by `(model_id, content_hash)`, not by run — and the next
+ * run reuses them. Deleting a run that is already gone is not an error.
+ */
+async deleteRun(runId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_run", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Most recent run for a dataset, or `None` if the dataset has never been
  * classified. The dataset tab's run surface card derives from this — backend
  * state, not component memory — so it survives tab close/reopen and app
@@ -637,9 +651,8 @@ modelId: number | null;
  * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
  * mean "from the start". The frontend hands back the row index of the
  * last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
- * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
- * `(dataset_id, row_index)` index and scans the whole partition;
- * the range predicate lets the index drive the scan.
+ * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` scans the whole
+ * partition; the range predicate lets the scan skip to the cursor.
  */
 cursor: number | null; limit: number }
 export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title: ColumnStats }
