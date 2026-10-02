@@ -304,8 +304,9 @@ mod tests {
     }
 
     /// The Windows case: config and data share the legacy dir. Data moves,
-    /// settings and themes stay, and the old cache and logs are dropped
-    /// rather than moved (the live logs dir is never touched).
+    /// settings and themes stay, and the old cache, logs and `session.lock`
+    /// are dropped rather than moved (the live logs dir and lock are never
+    /// touched).
     #[test]
     fn moves_data_and_leaves_config() -> Result<(), String> {
         let root = scratch("split")?;
@@ -318,6 +319,8 @@ mod tests {
         write(&legacy.join("cache/coreml/blob"), "compiled")?;
         write(&legacy.join("logs/app.log"), "old")?;
         write(&data.join("logs/app.log"), "new")?;
+        write(&legacy.join("session.lock"), "")?;
+        write(&data.join("session.lock"), "")?;
 
         let report = migrate(&legacy, &data, &Progress::none());
 
@@ -337,6 +340,8 @@ mod tests {
             "new"
         );
         assert!(!legacy.join("logs").exists());
+        assert!(!legacy.join("session.lock").exists());
+        assert!(data.join("session.lock").exists());
         assert!(report.iter().all(Result::is_ok), "{report:?}");
 
         // Second launch: nothing left to do.
