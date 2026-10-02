@@ -5,7 +5,7 @@ use serde::Serialize;
 use specta::Type;
 use tauri::{AppHandle, Manager, State};
 
-use crate::db::AppDb;
+use crate::boot::Boot;
 
 /// Bundled copy of the NCES report (NCES 2012-162rev), relative to the
 /// bundle's resource dir. Mapped in `tauri.conf.json` `bundle.resources`.
@@ -31,8 +31,8 @@ pub(crate) struct CcmEntry {
     clippy::needless_pass_by_value,
     reason = "Tauri injects State by value; cannot be taken by reference at the macro layer"
 )]
-pub(crate) fn list_ccm_taxonomy(db: State<'_, AppDb>) -> Result<Vec<CcmEntry>, String> {
-    let conn = db.ro()?;
+pub(crate) fn list_ccm_taxonomy(boot: State<'_, Boot>) -> Result<Vec<CcmEntry>, String> {
+    let conn = boot.ready()?.db.ro()?;
     let mut stmt = conn
         .prepare(
             "SELECT digit_level, code, title, title_short, description

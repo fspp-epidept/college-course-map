@@ -6,7 +6,7 @@ use serde::Serialize;
 use specta::Type;
 use tauri::State;
 
-use crate::db::AppDb;
+use crate::boot::Boot;
 
 #[derive(Type, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -29,8 +29,8 @@ pub(crate) struct AppMetrics {
     clippy::needless_pass_by_value,
     reason = "Tauri injects State by value; cannot be taken by reference at the macro layer"
 )]
-pub(crate) fn list_metrics(db: State<'_, AppDb>) -> Result<AppMetrics, String> {
-    let conn = db.ro()?;
+pub(crate) fn list_metrics(boot: State<'_, Boot>) -> Result<AppMetrics, String> {
+    let conn = boot.ready()?.db.ro()?;
 
     let datasets: i64 = conn
         .query_row("SELECT COUNT(*) FROM datasets", [], |row| row.get(0))

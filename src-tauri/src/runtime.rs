@@ -885,9 +885,10 @@ pub(crate) struct RuntimeStatus {
     reason = "Tauri command arguments are deserialized by value"
 )]
 pub(crate) fn runtime_status(
-    state: tauri::State<'_, RuntimeState>,
+    boot: tauri::State<'_, crate::boot::Boot>,
     store: tauri::State<'_, crate::inference::ModelStore>,
 ) -> Result<RuntimeStatus, String> {
+    let state = &boot.ready()?.runtime;
     let manifest = load_manifest()?;
     let packs = packs_for_target(&manifest)
         .into_iter()

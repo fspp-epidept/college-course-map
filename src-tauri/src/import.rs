@@ -20,11 +20,11 @@ use chrono::Utc;
 use duckdb::params;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
-    db::AppDb,
+    boot::{self, Boot},
     format::{CourseInput, content_hash},
     preflight::{
         ColumnMap, MAX_COLUMNS, TextEncoding, check_mapping, mapped_cells, open_csv,
@@ -73,8 +73,9 @@ pub(crate) struct ImportStarted {
 pub(crate) fn import_csv(
     req: ImportRequest,
     app: AppHandle,
-    db: State<'_, AppDb>,
+    boot: State<'_, Boot>,
 ) -> Result<ImportStarted, String> {
+    let db = &boot.ready()?.db;
     let path_str = req.path;
     let p = Path::new(&path_str);
     let size_bytes = stat_source(p)?;
@@ -266,8 +267,7 @@ impl ImportTask {
         if batch.is_empty() {
             return Ok(());
         }
-        let db = self.app.state::<AppDb>();
-        let conn = db.rw()?;
+        let conn = boot::services(&self.app)?.db.rw()?;
         let mut appender = conn
             .appender_with_columns(
                 "courses",
@@ -304,8 +304,7 @@ impl ImportTask {
     }
 
     fn tick_row_count(&self, imported: u64) -> Result<(), String> {
-        let db = self.app.state::<AppDb>();
-        let conn = db.rw()?;
+        let conn = boot::services(&self.app)?.db.rw()?;
         conn.execute(
             "UPDATE datasets SET row_count = ? WHERE id = ?",
             params![
@@ -326,12 +325,8 @@ impl ImportTask {
                 return;
             }
         };
-        let db = self.app.state::<AppDb>();
-        let Ok(conn) = db.rw() else {
-            log::error!(
-                "import {}: rw mutex poisoned at mark_ready",
-                self.dataset_id
-            );
+        let Ok(conn) = boot::services(&self.app).and_then(|services| services.db.rw()) else {
+            log::error!("import {}: no database at mark_ready", self.dataset_id);
             return;
         };
         // The JSON column takes the string directly (VARCHAR -> JSON cast).
@@ -358,12 +353,8 @@ impl ImportTask {
     }
 
     fn mark_failed(&self, err: &str) {
-        let db = self.app.state::<AppDb>();
-        let Ok(conn) = db.rw() else {
-            log::error!(
-                "import {}: rw mutex poisoned at mark_failed",
-                self.dataset_id
-            );
+        let Ok(conn) = boot::services(&self.app).and_then(|services| services.db.rw()) else {
+            log::error!("import {}: no database at mark_failed", self.dataset_id);
             return;
         };
         if let Err(e) = conn.execute(

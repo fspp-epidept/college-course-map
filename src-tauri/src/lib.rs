@@ -1,3 +1,4 @@
+mod boot;
 mod config;
 mod courses;
 mod datasets;
@@ -83,11 +84,10 @@ pub fn run() {
     logging::install_panic_hook();
     let specta = specta_builder();
 
-    // Single-instance must be registered first (plugin docs): a second launch
-    // exits in its setup, before it can touch the DuckDB file lock (#207),
-    // and the running instance surfaces its window instead. The log plugin
-    // comes next so every later step — DB open, runtime pack, model
-    // autoload — lands in the file (EPI-109).
+    // Plugin order is startup order; see `boot.rs`. Single-instance must be
+    // registered first (plugin docs): a second launch exits in its setup,
+    // before it can touch the DuckDB file lock (#207), and the running
+    // instance surfaces its window instead.
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager as _;
@@ -98,13 +98,12 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
+        .plugin(boot::plugin())
         .plugin(logging::plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init());
 
-    // macOS keeps native chrome: the base window config is frameless (for the custom
-    // Windows/Linux titlebar), so re-enable decorations at startup and attach the
-    // native global menu. See decision #102.
+    // macOS keeps native chrome and the native global menu. See decision #102.
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(menu::build)
@@ -113,102 +112,15 @@ pub fn run() {
     builder
         .invoke_handler(specta.invoke_handler())
         .setup(move |app| {
-            use tauri::Manager as _;
             specta.mount_events(app);
-            // Termination signals take the same exit path as closing the
-            // window, so the checkpoint below runs (#227).
-            #[cfg(unix)]
-            signals::install(app.handle())?;
-            // Open DuckDB + apply migrations before the first command can fire.
-            // Failing here is unrecoverable (no app without storage), so we
-            // surface the error and let Tauri short-circuit setup.
-            let db = db::AppDb::open().map_err(|e| format!("open database: {e}"))?;
-            // A WAL set aside at open (EPI-105) is reported through the
-            // runtime notices below — the one startup-conditions surface the
-            // Settings UI already renders.
-            let db_notice = db.recovery_notice().map(str::to_owned);
-            // Resolve the embedded model manifest against the models table so
-            // every digit-level → model-id lookup goes through pinned rows
-            // (stale rows from earlier families stay put for their cached
-            // results but are never selected).
-            let catalog = {
-                let conn = db.rw().map_err(|e| format!("manifest rows: {e}"))?;
-                // Crash recovery (EPI-38): a `running` row in a fresh process
-                // is an orphan from a previous one — flip it to `interrupted`
-                // (resumable) before any command can observe it.
-                let swept = runs::sweep_orphaned_runs(&conn)?;
-                if swept > 0 {
-                    log::info!("startup: swept {swept} orphaned running run(s) to interrupted");
-                }
-                let catalog = manifest::resolve_model_rows(&conn, manifest::load()?)?;
-                // Fold the startup writes (migrations, sweep, manifest rows)
-                // into the main file now (EPI-105): a crash later in this
-                // session then orphans only what was written after this
-                // point, and the next open has that much less WAL to replay.
-                if let Err(e) = conn.execute_batch("CHECKPOINT") {
-                    log::warn!("startup: checkpoint skipped: {e}");
-                }
-                catalog
-            };
-            app.manage(db);
-            app.manage(catalog);
-            // Load ONNX Runtime (EPI-73): with `load-dynamic` nothing is
-            // linked, so the dylib must be loaded before any session exists.
-            // Pack choice follows the settings EP priority (GPU pack when
-            // installed, bundled CPU pack otherwise) and is fixed for the
-            // process lifetime — switching packs requires a relaunch.
-            {
-                let settings =
-                    config::read_settings().map_err(|e| format!("read settings: {e}"))?;
-                let resource_dir = app
-                    .path()
-                    .resource_dir()
-                    .map_err(|e| format!("resolve bundle resource dir: {e}"))?;
-                let mut state = runtime::startup(&settings, &resource_dir)?;
-                log::info!(
-                    "startup: ONNX Runtime {} loaded from pack '{}'",
-                    state.ort_version,
-                    state.pack_id
-                );
-                state.notices.extend(db_notice);
-                app.manage(state);
-            }
-            // Models load lazily (EPI-3/EPI-56): the store starts empty and a
-            // background thread fills it when the manifest files are already
-            // on disk (always, for airgap; post-download for connected).
-            // Commands that need models error cleanly until then.
-            app.manage(inference::ModelStore::default());
-            // Download in-flight guard + progress snapshots (EPI-74) — managed
-            // before autoload so models_status can always resolve it.
-            app.manage(models::DownloadState::default());
-            models::autoload_if_present(app.handle());
-            // Tracks per-run cancellation flags so `pause_run` can signal an
-            // in-flight worker (EPI-37).
-            app.manage(runs::RunRegistry::default());
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.set_decorations(true)?;
-                }
-            }
+            boot::start(app.handle())?;
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            // Tauri leaves `run` via `process::exit`, so managed state is
-            // never dropped and DuckDB never gets its close-time checkpoint.
-            // Do it explicitly (EPI-105): a clean exit leaves no WAL for the
-            // next launch to replay. Best effort — an in-flight run's flush
-            // holds the writer briefly; a checkpoint refused here just leaves
-            // the WAL for the next open, as before.
             if let tauri::RunEvent::Exit = event {
-                use tauri::Manager as _;
-                if let Some(db) = app.try_state::<db::AppDb>()
-                    && let Err(e) = db.checkpoint()
-                {
-                    log::warn!("exit: checkpoint skipped: {e}");
-                }
+                boot::shutdown(app);
             }
         });
 }
