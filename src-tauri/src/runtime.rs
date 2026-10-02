@@ -6,7 +6,7 @@
 //! loaded pack; per-session EP registration happens in `inference.rs`.
 //!
 //! On-disk layout:
-//! - downloaded packs: `<data>/college-course-map/runtimes/<ort_version>/<id>/`
+//! - downloaded packs: `<local data>/college-course-map/runtimes/<ort_version>/<id>/`
 //! - bundled CPU pack: `<resource_dir>/runtimes/cpu/` (version implicit — a
 //!   bundle carries exactly one)
 //!

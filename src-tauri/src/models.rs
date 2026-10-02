@@ -404,7 +404,7 @@ fn download_all(app: &AppHandle) -> Result<(), String> {
     // A changed model file invalidates the compiled CoreML cache, which ONNX
     // Runtime keys by path and never invalidates itself (EPI-108).
     if changed
-        && let Ok(cache) = inference::coreml_cache_dir()
+        && let Ok(cache) = crate::paths::coreml_cache_dir()
         && cache.exists()
         && let Err(e) = std::fs::remove_dir_all(&cache)
     {

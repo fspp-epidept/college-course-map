@@ -198,7 +198,7 @@ fn register_coreml(
     builder: &mut ort::session::builder::SessionBuilder,
 ) -> Result<(), ep::RegisterError> {
     let mut coreml = ep::CoreML::default().with_model_format(ep::coreml::ModelFormat::MLProgram);
-    match coreml_cache_dir() {
+    match crate::paths::coreml_cache_dir() {
         Ok(dir) => coreml = coreml.with_model_cache_dir(dir.display()),
         Err(e) => log::warn!("coreml: compiled-model cache disabled: {e}"),
     }
@@ -544,12 +544,6 @@ impl InferenceRegistry {
 }
 
 const MODELS_SUBDIR: &str = "models";
-
-/// `<cache>/college-course-map/coreml` — compiled `CoreML` models
-/// (EPI-108). Derived state: safe to delete at any time.
-pub fn coreml_cache_dir() -> Result<PathBuf, String> {
-    Ok(crate::paths::cache_dir()?.join("coreml"))
-}
 
 /// Resolve the on-disk model directory for **non-airgap** (dev/connected)
 /// runs. The airgap build never calls this — its models live in the bundle's

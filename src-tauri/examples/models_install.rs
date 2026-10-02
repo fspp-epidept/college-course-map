@@ -1,9 +1,11 @@
 //! `cargo run --example models_install` (wrapped as `task models:install`).
 //!
 //! Copies the three converted-ONNX model directories from
-//! `scripts/models/output/` into the resolved `models_root()` (the platform
+//! `scripts/models/output/` into the resolved `models_root()` (the local
 //! data dir under `college-course-map/models/`, unless
-//! `COURSE_CLASSIFIER_MODELS_DIR` overrides). Skips any digit-level whose
+//! `COURSE_CLASSIFIER_MODELS_DIR` overrides). On Windows that is
+//! `%LOCALAPPDATA%`; a dev box with models from 0.5.x or earlier in
+//! `%APPDATA%` gets them moved by the app's first launch, not by this. Skips any digit-level whose
 //! destination already exists — re-run after `task models:clean` if you need
 //! to refresh.
 

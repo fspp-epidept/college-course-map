@@ -6,11 +6,15 @@
 //! - [`config_dir`]: settings and themes. Small; roams (`%APPDATA%`).
 //! - [`data_dir`]: database, models, runtime packs, logs. Large and
 //!   machine-specific (`%LOCALAPPDATA%`).
-//! - [`cache_dir`]: regenerable state, safe to delete at any time.
+//! - [`coreml_cache_dir`]: compiled `CoreML` models. Regenerable; safe to
+//!   delete at any time.
 //!
 //! On macOS and Linux the local and roaming data dirs are the same, so only
 //! Windows sees the config/data split. Callers join their own file or subdir
-//! names onto these roots.
+//! names onto the config and data roots. There is deliberately no cache
+//! *root*: on Windows `dirs::cache_dir()` is `%LOCALAPPDATA%`, so the cache
+//! product dir is the data dir, and deleting it would take the database and
+//! models with it. Each cache gets its own leaf function instead.
 
 use std::{
     fs, io,
@@ -36,9 +40,18 @@ pub(crate) fn data_dir() -> Result<PathBuf, String> {
     product_dir(dirs::data_local_dir(), "data")
 }
 
-/// `<cache>/college-course-map`.
-pub(crate) fn cache_dir() -> Result<PathBuf, String> {
-    product_dir(dirs::cache_dir(), "cache")
+/// `<cache>/college-course-map/coreml` — compiled `CoreML` models. Derived
+/// state: safe to delete at any time.
+pub(crate) fn coreml_cache_dir() -> Result<PathBuf, String> {
+    Ok(product_dir(dirs::cache_dir(), "cache")?.join("coreml"))
+}
+
+/// `<roaming data>/college-course-map` — where 0.5.x and earlier kept data.
+/// The same dir as [`data_dir`] on macOS and Linux; on Windows it is also
+/// the config dir, so anything cleaning it must keep `settings.json` and
+/// `themes/`.
+pub(crate) fn legacy_data_dir() -> Result<PathBuf, String> {
+    product_dir(dirs::data_dir(), "roaming data")
 }
 
 fn product_dir(base: Option<PathBuf>, kind: &str) -> Result<PathBuf, String> {
@@ -51,12 +64,17 @@ fn product_dir(base: Option<PathBuf>, kind: &str) -> Result<PathBuf, String> {
 /// cache. Must run before anything opens a data path — including the log
 /// plugin, which creates `logs/` — so it returns its outcomes (`Ok` = info,
 /// `Err` = warning) for the caller to log once the logger is up. Never
-/// fails startup: whatever can't be moved stays where it was and is reported.
+/// fails startup: whatever can't be moved stays where it was, is reported,
+/// and is retried on the next launch.
+///
+/// Running before the Tauri builder also means a single-instance plugin,
+/// which initializes inside the builder, can't serialize two launches
+/// through here; an instance lock has to be taken before this call.
 pub(crate) fn migrate_legacy_data() -> Vec<Result<String, String>> {
-    let (Some(legacy), Ok(data)) = (dirs::data_dir(), data_dir()) else {
+    let (Ok(legacy), Ok(data)) = (legacy_data_dir(), data_dir()) else {
         return Vec::new();
     };
-    migrate(&legacy.join(PRODUCT_DIR), &data)
+    migrate(&legacy, &data)
 }
 
 fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
@@ -64,12 +82,9 @@ fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
     let old_cache = legacy.join(LEGACY_CACHE_SUBDIR);
     if old_cache.exists() {
         report.push(match fs::remove_dir_all(&old_cache) {
-            Ok(()) => Ok(format!(
-                "migrate: removed old cache {}",
-                old_cache.display()
-            )),
+            Ok(()) => Ok(format!("removed old cache {}", old_cache.display())),
             Err(e) => Err(format!(
-                "migrate: old cache {} not removed: {e}",
+                "old cache {} not removed: {e}",
                 old_cache.display()
             )),
         });
@@ -81,38 +96,55 @@ fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
     let Ok(entries) = fs::read_dir(legacy) else {
         return report;
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if CONFIG_ENTRIES.iter().any(|c| name == *c) {
-            continue;
-        }
-        let from = entry.path();
+    let names: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.file_name())
+        .filter(|name| !CONFIG_ENTRIES.iter().any(|c| name == *c))
+        .collect();
+    // Entries whose target already exists stay put, and so do their
+    // companions (`app.duckdb` holds back `app.duckdb.wal`), so a WAL never
+    // lands beside a database it doesn't belong to. Decided before anything
+    // moves, so readdir order doesn't matter.
+    let blocked: Vec<String> = names
+        .iter()
+        .filter(|name| data.join(name).exists())
+        .map(|name| format!("{}.", name.to_string_lossy()))
+        .collect();
+    for name in names {
+        let from = legacy.join(&name);
         let to = data.join(&name);
-        report.push(if to.exists() {
+        let held = blocked
+            .iter()
+            .any(|prefix| name.to_string_lossy().starts_with(prefix.as_str()));
+        report.push(if to.exists() || held {
             Err(format!(
-                "migrate: {} left in place, {} already exists",
+                "{} left in place: {} or the file it belongs to already exists",
                 from.display(),
                 to.display()
             ))
         } else {
             move_entry(&from, &to)
-                .map(|how| format!("migrate: {how} {} to {}", from.display(), to.display()))
-                .map_err(|e| format!("migrate: {}: {e}", from.display()))
+                .map(|how| format!("{how} {} to {}", from.display(), to.display()))
+                .map_err(|e| format!("{} not moved: {e}", from.display()))
         });
     }
     report
 }
 
 /// Rename `from` to `to`, or copy then delete when they sit on different
-/// volumes (a redirected Roaming folder). The copy lands under a staging
-/// name first, so an interrupted copy is never mistaken for a finished one
-/// and the next launch retries it.
+/// volumes (a redirected Roaming folder). Any other rename failure — a file
+/// still held open, a permission error — is returned as is: copying a
+/// locked database could produce a torn copy that then blocks every retry.
+/// The copy lands under a staging name first, so an interrupted copy is
+/// never mistaken for a finished one and the next launch retries it.
 fn move_entry(from: &Path, to: &Path) -> Result<&'static str, String> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    if fs::rename(from, to).is_ok() {
-        return Ok("moved");
+    match fs::rename(from, to) {
+        Ok(()) => return Ok("moved"),
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
+        Err(e) => return Err(e.to_string()),
     }
     let mut staging = to.as_os_str().to_owned();
     staging.push(".migrating");
@@ -154,7 +186,7 @@ fn remove(path: &Path) -> io::Result<()> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{copy, migrate};
+    use super::{copy, migrate, move_entry};
 
     fn scratch(name: &str) -> Result<PathBuf, String> {
         let root = std::env::temp_dir().join(format!("ccm-paths-{name}-{}", std::process::id()));
@@ -254,6 +286,44 @@ mod tests {
             "b"
         );
         assert!(root.join("dst/c.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// A database that can't move holds back its WAL, so the WAL never
+    /// lands beside a different database; unrelated entries still move.
+    #[test]
+    fn blocked_entry_holds_back_companions() -> Result<(), String> {
+        let root = scratch("companions")?;
+        let legacy = root.join("roaming");
+        let data = root.join("local");
+        write(&legacy.join("app.duckdb"), "old db")?;
+        write(&legacy.join("app.duckdb.wal"), "old wal")?;
+        write(&legacy.join("models/two/model.onnx"), "onnx")?;
+        write(&data.join("app.duckdb"), "new db")?;
+
+        let report = migrate(&legacy, &data);
+
+        assert!(legacy.join("app.duckdb.wal").exists());
+        assert!(!data.join("app.duckdb.wal").exists());
+        assert!(data.join("models/two/model.onnx").exists());
+        assert_eq!(
+            report.iter().filter(|r| r.is_err()).count(),
+            2,
+            "{report:?}"
+        );
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// A rename failure that isn't cross-volume is reported, not copied.
+    #[test]
+    fn non_cross_device_rename_failure_does_not_copy() -> Result<(), String> {
+        let root = scratch("nocopy")?;
+        let to = root.join("local/app.duckdb");
+        assert!(move_entry(&root.join("roaming/app.duckdb"), &to).is_err());
+        assert!(!to.exists());
+        assert!(!root.join("local/app.duckdb.migrating").exists());
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
