@@ -43,11 +43,12 @@ export function useRunRate(
 }
 
 /**
- * Full runs list, server-sorted with active states first. The sidebar groups
- * the result by state for rendering. While any run is `running` the list
+ * Full runs list, server-sorted with active states first. The dataset page
+ * filters it for its run history and the Datasets sidebar reads each
+ * dataset's run status from it. While any run is `running` the list
  * refetches every second — this is the app's global run heartbeat: it keeps
- * inactive surfaces (other dataset tabs' Classify disable, the sidebar)
- * honest even though only the active tab mounts a fast per-run poll.
+ * inactive surfaces (other datasets' Classify disable, the sidebar) honest
+ * even though only the open dataset mounts a fast latest-run poll.
  */
 export function useRuns() {
   return useQuery({
@@ -68,7 +69,7 @@ export function useRuns() {
  * Most recent run for a dataset (or null if never classified). This is the
  * dataset tab's run surface card — backend state, not component memory, so
  * closing/reopening the tab or restarting the app rehydrates it. Polls at
- * 250 ms while that run is `running`, same cadence as `useRun`.
+ * 250 ms while that run is `running`.
  */
 export function useLatestRun(datasetId: MaybeRefOrGetter<string>) {
   return useQuery({
@@ -146,26 +147,6 @@ export function useRunLifecycleRefresh() {
 }
 
 /**
- * One run by id. While the run is `running`, refetches every 250 ms so the
- * progress meter ticks. Polling stops automatically once the run reaches a
- * terminal state.
- */
-export function useRun(id: MaybeRefOrGetter<string>) {
-  return useQuery({
-    queryKey: computed(() => ["runs", toValue(id)] as const),
-    queryFn: async (): Promise<RunDetail> => {
-      const result = await commands.getRun(toValue(id));
-      if (result.status === "error") throw new Error(result.error);
-      return result.data;
-    },
-    refetchInterval: (query) => {
-      const data = query.state.data as RunDetail | undefined;
-      return data?.state === "running" ? 250 : false;
-    },
-  });
-}
-
-/**
  * Resume an interrupted run (EPI-38). Same run id: `resume_count` bumps and
  * the pipeline re-walks the dataset, skipping everything already cached.
  */
@@ -202,9 +183,9 @@ export function resumeBlockerText(key: string): string {
 
 /**
  * Request a graceful pause of a running run. The worker stops at its next batch
- * boundary and finalizes as `interrupted`; the `useRun` poll picks up the new
- * state on its next tick. Invalidates the run + runs-list queries so any
- * non-polling view (the sidebar) also refreshes.
+ * boundary and finalizes as `interrupted`; the latest-run poll picks up the
+ * new state on its next tick. Invalidates the run queries so any non-polling
+ * view (the sidebar) also refreshes.
  */
 export function usePauseRun() {
   const queryClient = useQueryClient();
@@ -212,8 +193,7 @@ export function usePauseRun() {
     // pause_run can't fail (it just flips a flag), so the binding returns a
     // bare boolean rather than the usual Result envelope.
     mutationFn: (runId: string): Promise<boolean> => commands.pauseRun(runId),
-    onSuccess: (_signalled, runId) => {
-      queryClient.invalidateQueries({ queryKey: ["runs", runId] });
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
     },
   });
@@ -221,8 +201,7 @@ export function usePauseRun() {
 
 /**
  * Delete a run's record (#198). Its cached classifications stay and are
- * reused by the next run. The per-run query is removed, not refetched: a
- * refetch would fail with "not found" before the sidebar drops the selection.
+ * reused by the next run.
  */
 export function useDeleteRun() {
   const queryClient = useQueryClient();
@@ -231,8 +210,7 @@ export function useDeleteRun() {
       const result = await commands.deleteRun(runId);
       if (result.status === "error") throw new Error(result.error);
     },
-    onSuccess: (_data, runId) => {
-      queryClient.removeQueries({ queryKey: ["runs", runId], exact: true });
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["metrics"] });
     },

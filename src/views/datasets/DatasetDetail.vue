@@ -12,10 +12,13 @@ import {
   useLatestRun,
   usePauseRun,
   useResumeRun,
+  useRunRate,
   useRuns,
 } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
 import DeleteDatasetDialog from "./DeleteDatasetDialog.vue";
+import DeleteRunDialog from "./DeleteRunDialog.vue";
+import RunHistory from "./RunHistory.vue";
 // Master/detail (EPI-58): DatasetsPanel keys this component by dataset id, so
 // all local state (view level, cursors, dialogs) is per-dataset by
 // construction.
@@ -203,9 +206,17 @@ const deleteBlocker = computed<string | null>(() => {
   if (isRunning.value) return "This dataset is classifying. Pause the run first.";
   return null;
 });
-const runCount = computed(
-  () => allRuns.value?.filter((r) => r.datasetId === currentDatasetId.value).length ?? 0,
+
+// --- This dataset's runs (#247) ---
+// The latest run has the run card; the ones before it are listed under it.
+// A run is a record about a dataset, so this page is the one place runs show.
+const datasetRuns = computed(
+  () => allRuns.value?.filter((r) => r.datasetId === currentDatasetId.value) ?? [],
 );
+const runCount = computed(() => datasetRuns.value.length);
+const earlierRuns = computed(() => datasetRuns.value.filter((r) => r.id !== latestRun.value?.id));
+// The run the delete confirm is open for, if any.
+const deleteRunId = ref<string | null>(null);
 
 // --- Run card presentation ---
 
@@ -216,6 +227,15 @@ const progressPct = computed(() => {
   }
   return Math.round((r.rowsProcessed / r.rowsTotal) * 100);
 });
+
+const rate = useRunRate(latestRun);
+const rateLabel = computed(() =>
+  rate.value === null ? null : `≈ ${Math.round(rate.value).toLocaleString()} classifications/s`,
+);
+
+function fmtTime(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
 
 const runStateHeading = computed(() => {
   const r = latestRun.value;
@@ -668,6 +688,16 @@ watch(
               >
                 Resume
               </UButton>
+              <UButton
+                v-if="!isRunning"
+                icon="i-lucide-trash-2"
+                variant="ghost"
+                color="neutral"
+                size="xs"
+                aria-label="Delete run"
+                title="Delete Run…"
+                @click="deleteRunId = latestRun.id"
+              />
             </div>
           </div>
 
@@ -700,7 +730,33 @@ watch(
             <span class="text-(--ui-text) tabular-nums">
               {{ (latestRun.cacheHits ?? 0).toLocaleString() }}
             </span>
+            <template v-if="rateLabel">
+              <span>Throughput</span>
+              <span class="text-(--ui-text) tabular-nums">{{ rateLabel }}</span>
+            </template>
+            <template v-if="latestRun.executionProvider">
+              <span>Ran on</span>
+              <span class="text-(--ui-text)">{{ latestRun.executionProvider }}</span>
+            </template>
+            <template v-if="latestRun.startedAt">
+              <span>Started</span>
+              <span class="text-(--ui-text)">{{ fmtTime(latestRun.startedAt) }}</span>
+            </template>
+            <template v-if="latestRun.completedAt">
+              <span>Finished</span>
+              <span class="text-(--ui-text)">{{ fmtTime(latestRun.completedAt) }}</span>
+            </template>
+            <template v-if="latestRun.resumeCount > 0">
+              <span>Resumed</span>
+              <span class="text-(--ui-text) tabular-nums">
+                {{ latestRun.resumeCount }} {{ latestRun.resumeCount === 1 ? "time" : "times" }}
+              </span>
+            </template>
           </div>
+
+          <p v-if="latestRun.superseded" class="text-(--ui-text-dimmed) text-xs">
+            This run used an older model version than this release ships.
+          </p>
 
           <p
             v-if="latestRun.state === 'interrupted' && latestRun.resumable"
@@ -741,6 +797,13 @@ watch(
           </div>
         </div>
       </Transition>
+
+      <RunHistory
+        v-if="earlierRuns.length > 0"
+        :runs="earlierRuns"
+        @delete="deleteRunId = $event"
+      />
+      <DeleteRunDialog v-model:run-id="deleteRunId" />
     </section>
 
     <section v-if="!isImporting && !beingDeleted" class="flex flex-col gap-3 min-h-0">

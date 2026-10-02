@@ -1,7 +1,7 @@
 /**
  * Shared run-lifecycle vocabulary (EPI-97): one icon + semantic color +
- * label per state, used by the Runs sidebar rows, the run tab badge, and any
- * other surface that renders lifecycle. PRODUCT.md requires lifecycle to be
+ * label per state, used by the dataset page's run history and any other
+ * surface that renders lifecycle. PRODUCT.md requires lifecycle to be
  * carried by iconography + text, never color alone — the icon shape differs
  * per state, so the pairing holds in monochrome themes too.
  */

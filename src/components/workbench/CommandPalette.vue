@@ -1,18 +1,15 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useDatasets } from "../../composables/useDatasets";
-import { useRuns } from "../../composables/useRuns";
 import { activities, type ActivityId } from "../../config/activities";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
 
-// Every dataset and run is a jump target (EPI-58) — selection-driven
-// navigation replaced the old "open tabs" list, so the palette now reaches
-// anything, not just what was already open. Both queries share their cache
-// with the sidebars, and their polling is conditional on active work.
+// Every dataset is a jump target: the palette reaches any of them, not only
+// the one selected. Runs are reached through their dataset (#247). The query
+// shares its cache with the sidebar.
 const { data: datasets } = useDatasets();
-const { data: runs } = useRuns();
 
 // Bind UDashboardSearch's open state to the workspace store so other surfaces
 // (e.g. the centered search button in the titlebar) can toggle the same modal.
@@ -33,11 +30,6 @@ function jumpToActivity(id: ActivityId): void {
 function jumpToDataset(id: string): void {
   workspace.selectDataset(id);
   workspace.setActiveActivity("datasets");
-}
-
-function jumpToRun(id: string): void {
-  workspace.selectRun(id);
-  workspace.setActiveActivity("runs");
 }
 
 function jumpToSettingsSection(section: "general" | "theme" | "about"): void {
@@ -74,16 +66,6 @@ const groups = computed(() => [
     })),
   },
   {
-    id: "runs",
-    label: "Runs",
-    items: (runs.value ?? []).map((run) => ({
-      label: `${run.datasetTitle} · ${run.id.slice(0, 8)}`,
-      icon: "i-lucide-play",
-      suffix: run.state,
-      onSelect: () => jumpToRun(run.id),
-    })),
-  },
-  {
     id: "commands",
     label: "Commands",
     items: [
@@ -112,6 +94,6 @@ const groups = computed(() => [
     :groups="groups"
     :color-mode="false"
     :shortcut="shortcut"
-    placeholder="Jump to activity or open tab"
+    placeholder="Jump to an activity or dataset"
   />
 </template>
