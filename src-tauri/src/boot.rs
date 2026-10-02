@@ -7,7 +7,8 @@
 //!    touches shared state.
 //! 2. [`plugin`]: manages [`Boot`], then runs [`PRE_LOGGER`], the steps that
 //!    must precede the log plugin. They run on the main thread with no window
-//!    and nothing logged, so they stay fast.
+//!    and nothing logged, so they stay fast; the one wait is the instance
+//!    lock, while a previous process finishes exiting.
 //! 3. The log plugin, then opener and dialog.
 //! 4. `setup()` → [`start`]: the always-managed state, macOS decorations, then
 //!    [`STEPS`] in order. When every step has run, the services they built
@@ -25,24 +26,27 @@
 //! - No main-thread-blocking Tauri API (menu item mutations, window getters)
 //!   on the boot path; post main-thread work with `run_on_main_thread`.
 
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager as _};
 
 use crate::{
-    config, db::AppDb, inference, manifest, manifest::ModelCatalog, models, runs, runtime,
+    config,
+    db::{self, AppDb},
+    inference, manifest,
+    manifest::ModelCatalog,
+    models, runs, runtime,
 };
 
 /// The startup phases, in order. The names are the ones the boot screen
 /// (#224) reports.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Phase {
-    #[cfg_attr(
-        not(unix),
-        expect(dead_code, reason = "first row off Unix is the data migration (#205)")
-    )]
     MigratingData,
     OpeningDatabase,
     UpgradingSchema,
@@ -68,6 +72,14 @@ const PRE_LOGGER: &[Step] = &[
         phase: Phase::MigratingData,
         name: "install signal handlers",
         run: install_signals,
+    },
+    // One process at a time owns the data dir (#233). The single-instance
+    // gate only focuses a running window; this also covers a process that
+    // starts while the previous one is still exiting.
+    Step {
+        phase: Phase::MigratingData,
+        name: "acquire instance lock",
+        run: acquire_instance_lock,
     },
 ];
 
@@ -112,6 +124,9 @@ pub(crate) struct Services {
 #[derive(Default)]
 pub(crate) struct Boot {
     services: OnceLock<Services>,
+    /// `session.lock`, held for the life of the process. Never unlocked: the
+    /// OS releases it when the process ends, however it ends.
+    instance_lock: OnceLock<File>,
     /// Set by [`shutdown`]; the runner stops at the next row.
     cancel: AtomicBool,
     /// The phase startup is in, as last set through [`Progress::phase`].
@@ -365,6 +380,55 @@ fn install_signals(ctx: &mut Ctx<'_>) -> Result<(), String> {
     crate::signals::install(ctx.app)
 }
 
+/// How long [`lock_instance`] waits for another process to let go: longer
+/// than [`SHUTDOWN_WAIT`] and the exit hang of #231.
+const LOCK_WAIT: Duration = Duration::from_secs(15);
+const LOCK_RETRY: Duration = Duration::from_millis(100);
+const LOCK_BUSY: &str =
+    "The app is already running or still closing. Wait a moment and start it again.";
+
+/// Take `session.lock` beside the database and keep it on [`Boot`].
+fn acquire_instance_lock(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    let db_path = db::db_path()?;
+    let dir = db_path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", db_path.display()))?;
+    let file = lock_instance(&dir.join("session.lock"), LOCK_WAIT)?;
+    ctx.app
+        .state::<Boot>()
+        .instance_lock
+        .set(file)
+        .map_err(|_| "instance lock taken twice".to_owned())
+}
+
+/// Open `path` (created, with its directory, if missing) and take an
+/// exclusive lock on it, retrying while another process holds it for up to
+/// `wait`. The lock lasts as long as the returned `File` is open.
+fn lock_instance(path: &Path, wait: Duration) -> Result<File, String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
+    // Read+write, not append: Windows refuses to lock append-only handles.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(LOCK_RETRY);
+            }
+            Err(TryLockError::WouldBlock) => return Err(LOCK_BUSY.to_owned()),
+            Err(TryLockError::Error(e)) => return Err(format!("lock {}: {e}", path.display())),
+        }
+    }
+}
+
 /// Open `DuckDB` and apply migrations. A WAL set aside at open is
 /// reported through the notices.
 fn open_database(ctx: &mut Ctx<'_>) -> Result<(), String> {
@@ -427,4 +491,33 @@ fn load_runtime(ctx: &mut Ctx<'_>) -> Result<(), String> {
     );
     ctx.runtime = Some(state);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::{LOCK_BUSY, lock_instance};
+
+    /// A second handle can't take the lock while the first holds it, gives
+    /// up with the busy message after its bound, and gets it once the
+    /// first is closed.
+    #[test]
+    fn lock_instance_excludes_a_second_handle() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("ccm-lock-test-{}", std::process::id()));
+        let path = dir.join("session.lock");
+        let held = lock_instance(&path, Duration::ZERO)?;
+
+        let wait = Duration::from_millis(300);
+        let started = Instant::now();
+        let busy = lock_instance(&path, wait).err();
+        assert_eq!(busy.as_deref(), Some(LOCK_BUSY));
+        assert!(started.elapsed() >= wait);
+
+        drop(held);
+        let retaken = lock_instance(&path, Duration::ZERO);
+        assert!(retaken.is_ok());
+        drop(retaken);
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+    }
 }
