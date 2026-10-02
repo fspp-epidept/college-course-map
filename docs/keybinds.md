@@ -84,8 +84,8 @@ MenuActionTriggered { action }.emit(app)
 
 The frontend side is `src/composables/useNativeMenu.ts`:
 
-- `useMenuActions()` returns a `Record<MenuAction, () => void>`. Each handler calls the action the in-app UI already uses (workspace store actions, the shared `usePauseRun` mutation, the root-mounted import dialog). Classify and Export are component-local to `DatasetDetail`, so their handlers set `workspace.pendingDatasetAction`; `DatasetDetail` consumes it and runs exactly what its button would, or toasts the same blocker that disables the button.
-- `useNativeMenu()` listens for `MenuActionTriggered` and dispatches through that table. `App.vue` calls it once.
+- `useMenuActions()` returns a `Record<MenuAction, () => void>`. Each handler calls the action the in-app UI already uses (workspace store actions, the shared `usePauseRun` mutation, the import dialog mounted in `Workbench.vue`). Classify and Export are component-local to `DatasetDetail`, so their handlers set `workspace.pendingDatasetAction`; `DatasetDetail` consumes it and runs exactly what its button would, or toasts the same blocker that disables the button.
+- `useNativeMenu()` listens for `MenuActionTriggered` and dispatches through that table. `Workbench.vue` calls it once. The workbench mounts only once startup is ready (#224), so until then no menu action runs; the macOS items that need the database are also built disabled and enabled on ready, so they show greyed out.
 - The Windows/Linux custom titlebar menu (#104) should dispatch through `useMenuActions()` too.
 
 Adding an item can't skip a handler. Coverage is checked at both ends:
@@ -97,7 +97,7 @@ Toggle Devtools is the one custom item handled in Rust (a webview concern, debug
 
 ### Never bind a menu shortcut at two layers
 
-On macOS the menu accelerator owns the keypress (Layer 2), so the matching WebView bindings are registered only on Windows/Linux: `App.vue`'s `meta_b` `defineShortcuts`, and `CommandPalette`'s `UDashboardSearch` `shortcut` prop (empty on macOS, which never matches). If both layers saw the key, a toggle would fire twice and cancel itself out.
+On macOS the menu accelerator owns the keypress (Layer 2), so the matching WebView bindings are registered only on Windows/Linux: `Workbench.vue`'s `meta_b` `defineShortcuts`, and `CommandPalette`'s `UDashboardSearch` `shortcut` prop (empty on macOS, which never matches). If both layers saw the key, a toggle would fire twice and cancel itself out.
 
 This rests on an assumption not yet verified on a Mac: that a native accelerator such as `Cmd-K` reaches the menu even while the WebView has focus. If testing shows WKWebView swallows it instead, the fix is to drop the accelerator from that menu item, not to bind the key at both layers.
 

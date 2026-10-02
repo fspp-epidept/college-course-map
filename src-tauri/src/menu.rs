@@ -111,6 +111,19 @@ impl MenuAction {
         }
     }
 
+    /// Whether the action needs the database, so its item stays disabled
+    /// until startup is ready (#224).
+    const fn needs_boot(self) -> bool {
+        matches!(
+            self,
+            Self::ImportCsv
+                | Self::ExportResults
+                | Self::StartClassification
+                | Self::PauseRun
+                | Self::ToggleCommandPalette
+        )
+    }
+
     fn from_id(id: &str) -> Option<Self> {
         serde_json::from_value(serde_json::Value::String(id.to_owned())).ok()
     }
@@ -136,7 +149,8 @@ fn submenu<'a, R: Runtime>(
 ) -> tauri::Result<SubmenuBuilder<'a, R, AppHandle<R>>> {
     let mut builder = SubmenuBuilder::new(app, title);
     for &action in actions {
-        let item = MenuItemBuilder::with_id(action.id(), action.label());
+        let item =
+            MenuItemBuilder::with_id(action.id(), action.label()).enabled(!action.needs_boot());
         let item = match action.accelerator() {
             Some(accelerator) => item.accelerator(accelerator),
             None => item,
@@ -196,6 +210,39 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     MenuBuilder::new(app)
         .items(&[&app_menu, &file, &edit, &run, &view, &window])
         .build()
+}
+
+/// Enable the items [`MenuAction::needs_boot`] built disabled. Called from
+/// the boot thread: menu mutations block on the main thread, so the work is
+/// posted there and not waited on.
+#[cfg(target_os = "macos")]
+pub(crate) fn enable_boot_items<R: Runtime>(app: &AppHandle<R>) {
+    let handle = app.clone();
+    let posted = app.run_on_main_thread(move || {
+        let Some(menu) = handle.menu() else {
+            return;
+        };
+        let submenus = menu.items().unwrap_or_default();
+        for action in [APP_ACTIONS, FILE_ACTIONS, RUN_ACTIONS, VIEW_ACTIONS].concat() {
+            if !action.needs_boot() {
+                continue;
+            }
+            let item = submenus.iter().find_map(|submenu| {
+                submenu
+                    .as_submenu()
+                    .and_then(|submenu| submenu.get(action.id()))
+                    .and_then(|item| item.as_menuitem().cloned())
+            });
+            match item.map(|item| item.set_enabled(true)) {
+                Some(Ok(())) => {}
+                Some(Err(e)) => log::warn!("enable menu item {}: {e}", action.id()),
+                None => log::warn!("menu item {} not found", action.id()),
+            }
+        }
+    });
+    if let Err(e) = posted {
+        log::warn!("enable menu items: {e}");
+    }
 }
 
 /// Route a menu click to the frontend (or handle it natively where it belongs in Rust).

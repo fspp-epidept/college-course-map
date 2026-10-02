@@ -10,9 +10,12 @@
 //!    and nothing logged, so they stay fast; the one wait is the instance
 //!    lock, while a previous process finishes exiting.
 //! 3. The log plugin, then opener and dialog.
-//! 4. `setup()` → [`start`]: the always-managed state, macOS decorations, then
-//!    [`STEPS`] in order. When every step has run, the services they built
-//!    are published to [`Boot`] and model autoload starts.
+//! 4. `setup()` → [`start`]: the always-managed state and macOS decorations,
+//!    then [`STEPS`] in order on the `boot` thread, so the window paints
+//!    while they run. When every step has run, the services they built are
+//!    published to [`Boot`], the boot state turns `Ready`, and model autoload
+//!    starts. A step error turns it `Failed` and leaves the app running, so
+//!    the boot screen can show it (#224).
 //!
 //! Adding a startup step is adding a row to one of the two tables. Every exit
 //! goes through `RunEvent::Exit`, whose app-side body is [`shutdown`].
@@ -33,7 +36,10 @@ use std::sync::{Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::Serialize;
+use specta::Type;
 use tauri::{AppHandle, Manager as _};
+use tauri_specta::Event;
 
 use crate::{
     config,
@@ -43,20 +49,28 @@ use crate::{
     models, reset, runs, runtime,
 };
 
-/// The startup phases, in order. The names are the ones the boot screen
-/// (#224) reports.
-#[derive(Debug, Clone, Copy)]
+/// The startup phases, in order. The boot screen titles each one, so a
+/// phase names only work that is really happening: `UpgradingSchema` is
+/// entered only while a schema migration runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub(crate) enum Phase {
     MigratingData,
     OpeningDatabase,
+    #[expect(
+        dead_code,
+        reason = "#204 enters it from `AppDb::open` while a migration runs"
+    )]
     UpgradingSchema,
     LoadingRuntime,
 }
 
-/// One startup step: a row in [`PRE_LOGGER`] or [`STEPS`].
+/// One startup step: a row in [`PRE_LOGGER`] or [`STEPS`]. `name` is for
+/// the log; `label` is what the boot screen says while the step runs, so it
+/// must be true whether or not the step finds work to do.
 struct Step {
     phase: Phase,
     name: &'static str,
+    label: &'static str,
     run: fn(&mut Ctx<'_>) -> Result<(), String>,
 }
 
@@ -71,6 +85,7 @@ const PRE_LOGGER: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "install signal handlers",
+        label: "Starting up",
         run: install_signals,
     },
     // One process at a time owns the data dir (#233). The single-instance
@@ -79,6 +94,7 @@ const PRE_LOGGER: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "acquire instance lock",
+        label: "Starting up",
         run: acquire_instance_lock,
     },
     // A pending "Reset app data" (#206): renames only, so it is fast and
@@ -87,6 +103,7 @@ const PRE_LOGGER: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "apply pending reset",
+        label: "Starting up",
         run: apply_reset,
     },
 ];
@@ -97,44 +114,117 @@ const STEPS: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "sweep reset trash",
+        label: "Checking for data left over from a reset",
         run: sweep_reset_trash,
     },
     Step {
         phase: Phase::MigratingData,
         name: "migrate data",
+        label: "Checking for app data in the old location",
         run: migrate_data,
     },
     Step {
         phase: Phase::OpeningDatabase,
         name: "open database",
+        label: "Opening the database file",
         run: open_database,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "sweep runs",
+        label: "Checking for runs interrupted last time",
         run: sweep_runs,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "sweep imports",
+        label: "Checking for imports interrupted last time",
         run: sweep_imports,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "manifest rows",
+        label: "Registering the classification models",
         run: manifest_rows,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "checkpoint",
+        label: "Saving startup changes to disk",
         run: checkpoint,
     },
     Step {
         phase: Phase::LoadingRuntime,
         name: "load runtime",
+        label: "Loading the classification engine",
         run: load_runtime,
     },
 ];
+
+/// Where startup is. `Failed` keeps the app running with the boot screen
+/// showing `message`; the phase it failed in is [`BootState::phase`].
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub(crate) enum BootStatus {
+    #[default]
+    Starting,
+    Ready,
+    /// `notices` are the non-fatal conditions collected before the failure,
+    /// which often explain it. `log_dir` is for the copied error report.
+    #[serde(rename_all = "camelCase")]
+    Failed {
+        message: String,
+        notices: Vec<String>,
+        log_dir: Option<String>,
+    },
+}
+
+/// What the boot screen renders. `total == 0` means no total is known yet
+/// (indeterminate progress). `seq` grows with every change, so a client
+/// that subscribed and then fetched a snapshot keeps whichever is newer.
+#[derive(Debug, Clone, Default, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BootState {
+    pub seq: u64,
+    pub status: BootStatus,
+    pub phase: Option<Phase>,
+    /// What the current step is doing, in the user's words.
+    pub detail: Option<String>,
+    pub done: u64,
+    pub total: u64,
+}
+
+/// Emitted on every boot state change, progress throttled to
+/// [`REPORT_INTERVAL`].
+#[derive(Type, Serialize, Debug, Clone, Event)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BootStateChanged {
+    pub state: BootState,
+}
+
+/// The boot state now, for a client that mounts mid-startup or after it.
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn boot_state(boot: tauri::State<'_, Boot>) -> Result<BootState, String> {
+    boot.state
+        .lock()
+        .map(|tracked| tracked.state.clone())
+        .map_err(|_| "boot state lock poisoned".to_owned())
+}
+
+/// The least time between two progress events.
+const REPORT_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The boot state and when it was last emitted, for the throttle.
+#[derive(Default)]
+struct Tracked {
+    state: BootState,
+    emitted: Option<Instant>,
+}
 
 /// What commands need from startup, published once every step has run.
 pub(crate) struct Services {
@@ -153,8 +243,11 @@ pub(crate) struct Boot {
     instance_lock: OnceLock<File>,
     /// Set by [`shutdown`]; the runner stops at the next row.
     cancel: AtomicBool,
-    /// The phase startup is in, as last set through [`Progress::phase`].
-    phase: Mutex<Option<Phase>>,
+    /// Where startup is, for [`boot_state`] and [`BootStateChanged`].
+    state: Mutex<Tracked>,
+    /// Set by [`start`]. Until then (the [`PRE_LOGGER`] steps, with no
+    /// window yet) state changes are recorded but not emitted.
+    app: OnceLock<AppHandle>,
     /// Notices from [`PRE_LOGGER`], held until [`start`] can log them and
     /// hand them on with its own.
     pre_logger_notices: Mutex<Vec<String>>,
@@ -170,6 +263,49 @@ impl Boot {
             .get()
             .ok_or_else(|| "The app is still starting.".to_owned())
     }
+
+    /// Turn the boot state `Failed`.
+    fn fail(&self, message: String, notices: Vec<String>) {
+        let log_dir = crate::logging::logs_dir()
+            .ok()
+            .map(|dir| dir.display().to_string());
+        self.update(false, |state| {
+            state.status = BootStatus::Failed {
+                message,
+                notices,
+                log_dir,
+            };
+        });
+    }
+
+    /// Apply `change` to the boot state and emit it, unless `throttled` and
+    /// the last emit was under [`REPORT_INTERVAL`] ago. Emitting only posts
+    /// to the event loop, so this is safe on the boot thread.
+    fn update(&self, throttled: bool, change: impl FnOnce(&mut BootState)) {
+        let Ok(mut tracked) = self.state.lock() else {
+            return;
+        };
+        change(&mut tracked.state);
+        tracked.state.seq += 1;
+        let now = Instant::now();
+        if throttled
+            && tracked
+                .emitted
+                .is_some_and(|at| now.duration_since(at) < REPORT_INTERVAL)
+        {
+            return;
+        }
+        tracked.emitted = Some(now);
+        let event = BootStateChanged {
+            state: tracked.state.clone(),
+        };
+        drop(tracked);
+        if let Some(app) = self.app.get()
+            && let Err(e) = event.emit(app)
+        {
+            log::warn!("startup: emit boot state: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -184,11 +320,18 @@ impl Boot {
 }
 
 /// Marks the step runner finished when dropped, so [`shutdown`] stops waiting
-/// however the runner ends: published, failed, or panicked.
+/// however the runner ends: published, failed, or panicked. A panic also
+/// turns the boot state `Failed`, so the screen doesn't wait forever.
 struct Finished<'a>(&'a Boot);
 
 impl Drop for Finished<'_> {
     fn drop(&mut self) {
+        if thread::panicking() {
+            self.0.fail(
+                "Startup stopped unexpectedly. The log has the details.".to_owned(),
+                Vec::new(),
+            );
+        }
         if let Ok(mut finished) = self.0.finished.lock() {
             *finished = true;
         }
@@ -226,28 +369,53 @@ impl<'a> Progress<'a> {
         Self { boot: Some(boot) }
     }
 
-    /// Report progress within the current step. Nothing listens yet; the
-    /// boot screen (#224) will.
-    #[expect(clippy::unused_self, reason = "#224 reports through the boot state")]
+    /// Report progress within the current step. Callers report as often as
+    /// they like; the event is throttled here, except for the last report
+    /// (`done >= total`).
     pub(crate) fn report(&self, done: u64, total: u64) {
-        log::debug!("startup: {done}/{total}");
+        if let Some(boot) = self.boot {
+            boot.update(done < total, |state| {
+                state.done = done;
+                state.total = total;
+            });
+        }
     }
 
     /// Record the phase startup is in. The runner sets each step's phase; a
     /// step that spans two (`AppDb::open_at` moving on to a backup or
     /// migration) moves it on itself, so a failure reports the right one.
     pub(crate) fn phase(&self, phase: Phase) {
-        if let Some(boot) = self.boot
-            && let Ok(mut current) = boot.phase.lock()
-        {
-            *current = Some(phase);
+        if let Some(boot) = self.boot {
+            boot.update(false, |state| {
+                state.phase = Some(phase);
+                state.detail = None;
+                state.done = 0;
+                state.total = 0;
+            });
+        }
+    }
+
+    /// Say what the current step is doing, in the user's words. The runner
+    /// sets each step's label; a step says more when it finds real work
+    /// (moving data out of Roaming, creating a new database).
+    pub(crate) fn detail(&self, text: &str) {
+        if let Some(boot) = self.boot {
+            boot.update(false, |state| {
+                state.detail = Some(text.to_owned());
+                state.done = 0;
+                state.total = 0;
+            });
         }
     }
 
     /// The phase last recorded, if any.
     fn recorded(&self) -> Option<Phase> {
-        self.boot
-            .and_then(|boot| boot.phase.lock().ok().and_then(|phase| *phase))
+        self.boot.and_then(|boot| {
+            boot.state
+                .lock()
+                .ok()
+                .and_then(|tracked| tracked.state.phase)
+        })
     }
 
     /// Whether shutdown has asked startup to stop. Long steps check it
@@ -290,19 +458,37 @@ pub(crate) fn opened(db: Option<&AppDb>) -> Result<&AppDb, String> {
     db.ok_or_else(|| "database not open".to_owned())
 }
 
+/// A step's error, kept apart from the step's name: the log gets both, the
+/// boot screen only the message.
+struct StepError {
+    step: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for StepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.step, self.message)
+    }
+}
+
 /// Run `steps` in order, logging each one's duration (a no-op for
 /// [`PRE_LOGGER`], which runs before the logger). Stops at the first
 /// error, or before the next row once shutdown has set the cancel flag.
-fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), String> {
+/// The phase of an error is the one last recorded.
+fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), StepError> {
     for step in steps {
         if ctx.progress.cancelled() {
-            return Err(format!("{:?}: startup cancelled", step.phase));
+            return Err(StepError {
+                step: step.name,
+                message: "startup cancelled".to_owned(),
+            });
         }
         ctx.progress.phase(step.phase);
+        ctx.progress.detail(step.label);
         let started = Instant::now();
-        (step.run)(ctx).map_err(|e| {
-            let phase = ctx.progress.recorded().unwrap_or(step.phase);
-            format!("{phase:?}: {}: {e}", step.name)
+        (step.run)(ctx).map_err(|message| StepError {
+            step: step.name,
+            message,
         })?;
         log::info!("startup: {} ({:?})", step.name, started.elapsed());
     }
@@ -317,7 +503,7 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             app.manage(Boot::default());
             let boot = app.state::<Boot>();
             let mut ctx = Ctx::new(app, &boot);
-            run_steps(PRE_LOGGER, &mut ctx)?;
+            run_steps(PRE_LOGGER, &mut ctx).map_err(|e| e.to_string())?;
             if let Ok(mut notices) = boot.pre_logger_notices.lock() {
                 *notices = ctx.notices;
             }
@@ -326,10 +512,10 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
-/// The `setup()` half of startup: run [`STEPS`] and publish what they built.
+/// The `setup()` half of startup: manage the always-on state, then spawn
+/// [`run`] and return, so the window paints while the steps run.
 pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
     let boot = app.state::<Boot>();
-    let finished = Finished(&boot);
     // Models load lazily: the store starts empty and a
     // background thread fills it when the manifest files are already on
     // disk (always, for airgap; post-download for connected). Commands that
@@ -351,6 +537,23 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
             .map_err(|e| format!("window decorations: {e}"))?;
     }
 
+    boot.app
+        .set(app.clone())
+        .map_err(|_| "startup ran twice".to_owned())?;
+    let app = app.clone();
+    thread::Builder::new()
+        .name("boot".to_owned())
+        .spawn(move || run(&app))
+        .map_err(|e| format!("spawn boot thread: {e}"))?;
+    Ok(())
+}
+
+/// The `boot` thread: run [`STEPS`], then publish what they built and turn
+/// `Ready`, or turn `Failed`. A run stopped by shutdown is neither: it drops
+/// its [`Ctx`] (closing the database) and emits nothing.
+fn run(app: &AppHandle) {
+    let boot = app.state::<Boot>();
+    let finished = Finished(&boot);
     let mut ctx = Ctx::new(app, &boot);
     if let Ok(mut notices) = boot.pre_logger_notices.lock() {
         ctx.notices = std::mem::take(&mut notices);
@@ -358,11 +561,40 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
     for notice in &ctx.notices {
         log::warn!("startup: {notice}");
     }
-    let result = run_steps(STEPS, &mut ctx).and_then(|()| publish(&boot, ctx));
+    let result = run_steps(STEPS, &mut ctx);
+    if ctx.progress.cancelled() {
+        drop(ctx);
+        log::info!("startup: stopped for exit");
+        return;
+    }
+    let phase = ctx
+        .progress
+        .recorded()
+        .map_or_else(|| "no phase".to_owned(), |phase| format!("{phase:?}"));
+    if let Err(e) = result {
+        log::error!("startup failed in {phase}: {e}");
+        boot.fail(e.message, ctx.notices);
+        return;
+    }
+    if let Err(e) = publish(&boot, ctx) {
+        log::error!("startup failed in {phase}: {e}");
+        boot.fail(e, Vec::new());
+        return;
+    }
+    boot.update(false, |state| {
+        state.status = BootStatus::Ready;
+        state.detail = None;
+        state.done = 0;
+        state.total = 0;
+    });
     drop(finished);
-    result?;
-    models::autoload_if_present(app);
-    Ok(())
+    #[cfg(target_os = "macos")]
+    crate::menu::enable_boot_items(app);
+    // An exit requested as startup finished must not race a model load
+    // (#231).
+    if !boot.cancel.load(Ordering::Relaxed) {
+        models::autoload_if_present(app);
+    }
 }
 
 /// Hand the services the steps built to [`Boot`]. Notices collected by steps
@@ -523,6 +755,9 @@ fn sweep_reset_trash(ctx: &mut Ctx<'_>) -> Result<(), String> {
 /// Open `DuckDB` and apply migrations. A WAL set aside at open is
 /// reported through the notices.
 fn open_database(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    if !db::db_path()?.exists() {
+        ctx.progress.detail("Creating a new database");
+    }
     let db = AppDb::open()?;
     ctx.notices.extend(db.recovery_notice().map(str::to_owned));
     ctx.db = Some(db);

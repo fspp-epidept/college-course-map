@@ -86,7 +86,7 @@ export function useLatestRun(datasetId: MaybeRefOrGetter<string>) {
 }
 
 /**
- * Global run-lifecycle watcher. Mounted once (App.vue). Rides the `useRuns`
+ * Global run-lifecycle watcher. Mounted once (Workbench.vue). Rides the `useRuns`
  * heartbeat: when any run leaves `running`, invalidate every surface a
  * finished run can change — courses (new classification columns), coverage
  * chips, dataset metadata, dashboard metrics, and the run queries themselves.
@@ -102,15 +102,27 @@ export function useRunLifecycleRefresh() {
   // starting or finishing must refresh the run queries — otherwise an
   // interrupted run keeps saying "models are loading" after they've loaded.
   // This lives here, not in useModelsEvents, because that one only mounts
-  // with the Models panel; this composable is always mounted (App.vue).
+  // with the Models panel; this composable is always mounted (Workbench.vue).
   let unlistenModels: (() => void) | undefined;
+  let unmounted = false;
   onMounted(async () => {
-    unlistenModels = await events.modelsStateChanged.listen(() => {
+    const refresh = () => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["models"] });
-    });
+    };
+    unlistenModels = await events.modelsStateChanged.listen(refresh);
+    // Unmounted while the listener was registering (a dev reload).
+    if (unmounted) {
+      unlistenModels();
+      return;
+    }
+    // Model autoload starts as startup turns ready, before this listener
+    // exists; refresh once so a load event missed in between can't leave
+    // stale blockers.
+    refresh();
   });
   onUnmounted(() => {
+    unmounted = true;
     unlistenModels?.();
   });
 

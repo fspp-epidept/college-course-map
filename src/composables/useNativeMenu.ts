@@ -59,7 +59,8 @@ export function useMenuActions(): Record<MenuAction, () => void> {
 
 /**
  * Bridge macOS native menu clicks and accelerators (`menu.rs`) to
- * `useMenuActions`. Call once, in the root component.
+ * `useMenuActions`. Call once, in `Workbench.vue`, which mounts only once
+ * startup is ready (#224): until then no menu action runs.
  */
 export function useNativeMenu(): void {
   const actions = useMenuActions();
