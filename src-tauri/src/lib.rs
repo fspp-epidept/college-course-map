@@ -1,5 +1,6 @@
 // Public for `boot::Progress`, which `AppDb::open_at` takes and the examples
 // pass as `Progress::none()`.
+mod activity;
 pub mod boot;
 mod config;
 mod courses;
@@ -46,6 +47,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             courses::get_classification_coverage,
             courses::list_courses_with_results,
             courses::model_id_for_digit_level,
+            datasets::delete_dataset,
             datasets::get_input_profile,
             datasets::list_datasets,
             export::export_results,

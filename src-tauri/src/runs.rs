@@ -25,6 +25,7 @@ use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
+    activity::Activity,
     boot::{self, Boot, Services},
     db::AppDb,
     format::{CourseInput, format_input},
@@ -567,8 +568,12 @@ pub(crate) fn start_run(
     store: State<'_, ModelStore>,
     boot: State<'_, Boot>,
     runs: State<'_, RunRegistry>,
+    activity: State<'_, Activity>,
 ) -> Result<StartRunResponse, String> {
     let Services { db, catalog, .. } = boot.ready()?;
+    // Not during a delete, prune or compaction (activity.rs): checked here
+    // so the call fails at once, and again under the write lock below.
+    activity.ensure_idle()?;
     // Fail fast if models aren't ready — caller gets a synchronous error
     // rather than a "queued then mysteriously failed" run. The store starts
     // empty on a connected-build first run (EPI-56) until download + load.
@@ -596,6 +601,7 @@ pub(crate) fn start_run(
     }
 
     let conn = db.rw()?;
+    activity.ensure_idle()?;
 
     // Verify the dataset still exists before we try to FK-reference it from a
     // new runs row. Stale frontend state (e.g. a tab persisted across a
@@ -614,6 +620,7 @@ pub(crate) fn start_run(
             req.dataset_id
         ));
     }
+    crate::datasets::ensure_not_deleting(&conn, &req.dataset_id)?;
 
     // One run at a time, app-wide (EPI-68 decision, 2026-07-03; queued runs
     // are EPI-70). The check runs on the held RW connection, so it's atomic
@@ -711,9 +718,12 @@ pub(crate) fn resume_run(
     store: State<'_, ModelStore>,
     boot: State<'_, Boot>,
     runs: State<'_, RunRegistry>,
+    activity: State<'_, Activity>,
 ) -> Result<StartRunResponse, String> {
     let Services { db, catalog, .. } = boot.ready()?;
+    activity.ensure_idle()?;
     let conn = db.rw()?;
+    activity.ensure_idle()?;
 
     let (state, dataset_id, model_ids_json, rows_total): (String, String, String, Option<i64>) =
         conn.query_row(
@@ -729,6 +739,7 @@ pub(crate) fn resume_run(
         ));
     }
     ensure_no_active_run(&conn, &runs)?;
+    crate::datasets::ensure_not_deleting(&conn, &dataset_id)?;
 
     // Same checks assess_resumability advertises (EPI-69) — the command is
     // the enforcement point, the flags are the preview. Every recorded model
@@ -820,8 +831,11 @@ pub(crate) fn delete_run(
     run_id: String,
     boot: State<'_, Boot>,
     registry: State<'_, RunRegistry>,
+    activity: State<'_, Activity>,
 ) -> Result<(), String> {
+    activity.ensure_idle()?;
     let conn = boot.ready()?.db.rw()?;
+    activity.ensure_idle()?;
     delete_run_row(&conn, &registry, &run_id)
 }
 

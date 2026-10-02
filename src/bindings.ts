@@ -94,6 +94,27 @@ async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, s
 }
 },
 /**
+ * Delete a dataset with its courses and runs, and its `source_files` row
+ * when no other dataset uses it (#199). The original CSV on disk is never
+ * touched, and neither is the results cache: classifications are keyed by
+ * model and input, not by dataset, and are reused if the same courses are
+ * imported again.
+ * 
+ * Refused while the dataset is importing or has a run in progress, while
+ * another dataset was derived from it, or while other maintenance runs.
+ * Slow on a large dataset (seconds per million courses), so it runs on the
+ * blocking pool. Deleting a dataset that is already gone is not an error,
+ * and deleting one left `delete_incomplete` finishes the job.
+ */
+async deleteDataset(datasetId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_dataset", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The input profile the import worker stored on the dataset (profile.rs),
  * or `None` when the dataset is unknown or predates the profile. A stored
  * profile that fails to parse is an error, not `None`: the UI must not
@@ -516,7 +537,10 @@ rowCount: number;
 /**
  * `importing` while the background worker is still streaming rows in,
  * `ready` when complete, `failed` when the worker errored or the app
- * closed mid-import.
+ * closed mid-import. `deleting` while [`delete_dataset`] is at work on
+ * it, and `delete_incomplete` when a delete was cut off (the app closed)
+ * and is waiting to be finished. The last is computed at read time from
+ * the stored `deleting` plus the maintenance gate, never stored.
  */
 importState: string; importError: string | null }
 /**

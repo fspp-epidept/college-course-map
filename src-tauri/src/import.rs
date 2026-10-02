@@ -24,6 +24,7 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
+    activity::Activity,
     boot::{self, Boot},
     db::AppDb,
     format::{CourseInput, content_hash},
@@ -75,8 +76,12 @@ pub(crate) fn import_csv(
     req: ImportRequest,
     app: AppHandle,
     boot: State<'_, Boot>,
+    activity: State<'_, Activity>,
 ) -> Result<ImportStarted, String> {
     let db = &boot.ready()?.db;
+    // Not during a delete, prune or compaction (activity.rs): checked here
+    // so the call fails at once, and again under the write lock below.
+    activity.ensure_idle()?;
     let path_str = req.path;
     let p = Path::new(&path_str);
     let size_bytes = stat_source(p)?;
@@ -122,6 +127,7 @@ pub(crate) fn import_csv(
 
     let source_file_id: i64 = {
         let conn = db.rw()?;
+        activity.ensure_idle()?;
         let source_file_id: i64 = conn
             .query_row(
                 "INSERT INTO source_files

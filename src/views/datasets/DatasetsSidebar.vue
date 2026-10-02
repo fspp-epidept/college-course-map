@@ -66,10 +66,26 @@ watch(
           >
             failed
           </span>
+          <span
+            v-else-if="dataset.importState === 'deleting'"
+            class="text-(--ui-color-info-500) animate-pulse text-[10px] uppercase tracking-wide"
+          >
+            deleting
+          </span>
+          <span
+            v-else-if="dataset.importState === 'delete_incomplete'"
+            class="text-(--ui-color-warning-500) text-[10px] uppercase tracking-wide whitespace-nowrap"
+          >
+            delete incomplete
+          </span>
         </span>
         <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
           <template v-if="dataset.importState === 'importing'">
             {{ dataset.rowCount.toLocaleString() }} rows so far…
+          </template>
+          <template v-else-if="dataset.importState === 'deleting'">Deleting…</template>
+          <template v-else-if="dataset.importState === 'delete_incomplete'">
+            Select to finish deleting
           </template>
           <template v-else>
             {{ dataset.rowCount.toLocaleString() }}
