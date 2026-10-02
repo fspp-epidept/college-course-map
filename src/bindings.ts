@@ -368,6 +368,71 @@ async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>>
 }
 },
 /**
+ * Compact the database (#201): write a fresh copy holding only the live
+ * rows, then relaunch; the next start puts the copy in place of the old
+ * file before opening it (`db.rs`). Refused while an import or run is
+ * working or other maintenance runs. From the moment the copy starts until
+ * the app exits nothing may write, so the maintenance slot is never given
+ * back on success. Closing the app during the copy just abandons it.
+ */
+async compactDatabase() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compact_database") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open the data folder in the platform file manager. Rust-side opener call:
+ * no capability widening for the `WebView`.
+ */
+async openDataDir() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_data_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete the leftover files of one kind.
+ */
+async storageClear(target: ClearTarget) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("storage_clear", { target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove the cached classifications in `scope` and return how many went
+ * ([`StorageStatus::cache`] says beforehand how many that is). Refused
+ * while an import or run is working or other maintenance runs; the space
+ * comes back when the database is next compacted.
+ */
+async storagePrune(scope: PruneScope) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("storage_prune", { scope }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * What the app keeps on disk. Off the main thread: it walks the model and
+ * runtime folders and counts the cache.
+ */
+async storageStatus() : Promise<Result<StorageStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("storage_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The whole taxonomy (2,167 static rows), ordered by code. Search and
  * filtering happen in the frontend — a small fixed set, not a course table.
  */
@@ -455,11 +520,27 @@ export type BootStatus = { status: "starting" } | { status: "ready" } |
  */
 { status: "failed"; message: string; notices: string[]; logDir: string | null }
 /**
+ * Cached classifications, counted in rows.
+ */
+export type CacheUsage = { total: number; 
+/**
+ * Computed by a model revision this build no longer ships.
+ */
+superseded: number; 
+/**
+ * For an input that no dataset contains any more.
+ */
+unreferenced: number }
+/**
  * One `ccm_taxonomy` row. 2-digit rows carry `title_short`, 6-digit rows
  * carry `description`; there are no 4-digit rows.
  */
 export type CcmEntry = { digitLevel: number; code: string; title: string; titleShort: string | null; description: string | null }
 export type CheckCount = { code: FindingCode; count: number }
+/**
+ * Leftover files [`storage_clear`] deletes.
+ */
+export type ClearTarget = "set_aside_wals" | "database_backups" | "coreml_cache"
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.
@@ -522,6 +603,11 @@ ccmTitleLevel: number | null }
  * content hashes count once per course row), matching what a run would report.
  */
 export type CoverageRow = { modelId: number; digitLevel: number; classified: number; total: number }
+export type DatabaseUsage = { path: string; fileBytes: number; walBytes: number; 
+/**
+ * Exact: the free blocks inside the file, which a compaction returns.
+ */
+reclaimableBytes: number }
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -543,6 +629,7 @@ rowCount: number;
  * the stored `deleting` plus the maintenance gate, never stored.
  */
 importState: string; importError: string | null }
+export type DirUsage = { path: string; bytes: number }
 /**
  * Last-known download position for one digit level, kept server-side so a
  * freshly-mounted client renders the true state from `models_status` without
@@ -592,6 +679,7 @@ lenMin: number; lenMedian: number; lenMax: number;
  */
 topShapes: ValueCount[] }
 export type FieldShapes = { subject: FieldShape; catalog: FieldShape; title: FieldShape }
+export type FileUsage = { name: string; bytes: number; modifiedAt: string | null }
 export type Finding = { code: FindingCode; severity: Severity; field: Field; count: number; 
 /**
  * `count / importable`; 0.0 for dataset-level checks with no row count.
@@ -728,6 +816,20 @@ export type Phase = "MigratingData" | "OpeningDatabase" |
  * not by a step.
  */
 "BackingUp" | "UpgradingSchema" | "LoadingRuntime"
+/**
+ * Which cached classifications [`storage_prune`] removes.
+ */
+export type PruneScope = 
+/**
+ * Results of model revisions this build no longer ships. Nothing in the
+ * app can show or export them.
+ */
+"superseded_models" | 
+/**
+ * Results for inputs no dataset contains. They would be recomputed if
+ * the same courses were imported again.
+ */
+"unreferenced"
 export type RaggedRow = { row: number; fields: number }
 /**
  * Row granularity of the export (EPI-78).
@@ -825,6 +927,11 @@ platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[];
  * damaged-pack fallback, missing CUDA directory, failed preloads.
  */
 notices: string[] }
+export type RuntimeUsage = { ortVersion: string; 
+/**
+ * Whether this is the version the app loads packs from.
+ */
+current: boolean; path: string; bytes: number }
 export type Sample = { row: number; input: string }
 /**
  * A count of occurrences plus the first few examples.
@@ -891,6 +998,31 @@ datasetId: string }
  * its own row. The frontend polls `get_run(run_id)` from here.
  */
 export type StartRunResponse = { runId: string; rowsTotal: number }
+export type StorageStatus = { 
+/**
+ * The data folder everything below lives in (except the `CoreML` cache).
+ */
+dataDir: string; database: DatabaseUsage; cache: CacheUsage; models: DirUsage; 
+/**
+ * Downloaded runtime packs, one entry per ONNX Runtime version folder.
+ */
+runtimes: RuntimeUsage[]; 
+/**
+ * Compiled `CoreML` models; `None` off macOS, where none are made.
+ */
+coremlCache: DirUsage | null; logs: DirUsage; 
+/**
+ * WALs set aside after a failed replay, oldest first.
+ */
+setAsideWals: FileUsage[]; 
+/**
+ * Pre-upgrade database backups. Each is as large as the database was.
+ */
+databaseBackups: FileUsage[]; 
+/**
+ * Why prune and compact can't start right now, or `None` when they can.
+ */
+busy: string | null }
 /**
  * Text encoding of a source CSV. `Utf8` covers files with or without a BOM;
  * the legacy variants are the two single-byte codepages Excel writes for

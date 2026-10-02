@@ -77,6 +77,7 @@ export function useDeleteDataset() {
       queryClient.invalidateQueries({ queryKey: ["datasets"] });
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["metrics"] });
+      queryClient.invalidateQueries({ queryKey: ["storage"] });
     },
   });
 }

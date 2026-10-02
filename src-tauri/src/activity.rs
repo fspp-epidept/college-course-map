@@ -1,5 +1,6 @@
 //! The maintenance gate (#196): at most one exclusive data operation runs at
-//! a time, and while one runs, nothing else starts writing.
+//! a time — a dataset delete, a cache prune, or a database compaction — and
+//! while one runs, nothing else starts writing.
 //!
 //! Imports and runs are not tracked here. Their own state is the truth:
 //! `datasets.import_state = 'importing'` (startup fails any orphaned one, so
@@ -23,12 +24,16 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 pub(crate) enum Maintenance {
     /// Deleting the dataset with this id.
     DeletingDataset(String),
+    PruningCache,
+    Compacting,
 }
 
 impl Maintenance {
     fn describe(&self) -> &'static str {
         match self {
             Self::DeletingDataset(_) => "deleting a dataset",
+            Self::PruningCache => "removing cached classifications",
+            Self::Compacting => "compacting the database",
         }
     }
 }
@@ -84,6 +89,14 @@ pub(crate) struct MaintenanceGuard<'a> {
     activity: &'a Activity,
 }
 
+impl MaintenanceGuard<'_> {
+    /// Never release the slot: for compaction, where nothing may write
+    /// between the copy and the relaunch that swaps it in.
+    pub(crate) fn hold_until_exit(self) {
+        std::mem::forget(self);
+    }
+}
+
 impl Drop for MaintenanceGuard<'_> {
     fn drop(&mut self) {
         *self.activity.lock() = None;
@@ -105,18 +118,17 @@ mod tests {
         let guard = activity.begin(Maintenance::DeletingDataset("a".to_owned()))?;
         assert!(activity.is_deleting("a"));
         assert!(!activity.is_deleting("b"));
-        assert!(
-            activity
-                .begin(Maintenance::DeletingDataset("b".to_owned()))
-                .is_err()
-        );
+        assert!(activity.begin(Maintenance::Compacting).is_err());
         let busy = activity.ensure_idle().err().ok_or("idle while busy")?;
         assert!(busy.contains("deleting a dataset"), "{busy}");
 
         drop(guard);
         assert!(!activity.is_deleting("a"));
         activity.ensure_idle()?;
-        drop(activity.begin(Maintenance::DeletingDataset("b".to_owned()))?);
+        drop(activity.begin(Maintenance::PruningCache)?);
+
+        activity.begin(Maintenance::Compacting)?.hold_until_exit();
+        assert!(activity.ensure_idle().is_err(), "a held slot was released");
         Ok(())
     }
 }

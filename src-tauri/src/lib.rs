@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod seed;
 #[cfg(unix)]
 mod signals;
+mod storage;
 mod taxonomy;
 // The native menu is macOS-only (Windows/Linux use custom in-WebView chrome,
 // decision #102); the module itself builds everywhere for its typed event.
@@ -72,6 +73,11 @@ fn specta_builder() -> Builder<tauri::Wry> {
             runs::pause_run,
             runs::resume_run,
             runs::start_run,
+            storage::compact_database,
+            storage::open_data_dir,
+            storage::storage_clear,
+            storage::storage_prune,
+            storage::storage_status,
             taxonomy::list_ccm_taxonomy,
             taxonomy::open_ccm_reference,
         ])

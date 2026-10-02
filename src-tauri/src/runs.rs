@@ -521,7 +521,10 @@ pub(crate) struct StartRunResponse {
 /// counts if its worker is registered — a row without a flag is a crash
 /// leftover, which must not wedge the app ([`sweep_orphaned_runs`] flips
 /// those to `interrupted` at startup).
-fn ensure_no_active_run(conn: &duckdb::Connection, registry: &RunRegistry) -> Result<(), String> {
+pub(crate) fn ensure_no_active_run(
+    conn: &duckdb::Connection,
+    registry: &RunRegistry,
+) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
             "SELECT r.id, d.title FROM runs r
