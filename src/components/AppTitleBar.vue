@@ -1,9 +1,13 @@
 <script setup lang="ts">
+import { useBoot } from "../composables/useBoot";
 import { useWindowControls } from "../composables/useWindowControls";
 import { useWorkspace } from "../stores/workspace";
 
 const { isMaximized, minimize, toggleMaximize, close } = useWindowControls();
 const workspace = useWorkspace();
+// The palette lives in the workbench, which mounts once startup is ready
+// (#224); a click before then would open it unprompted on mount.
+const { workbenchReady } = useBoot();
 </script>
 
 <!--
@@ -26,6 +30,7 @@ const workspace = useWorkspace();
       type="button"
       class="titlebar__palette"
       aria-label="Open command palette"
+      :disabled="!workbenchReady"
       @click="workspace.toggleCommandPalette()"
     >
       <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
@@ -98,9 +103,13 @@ const workspace = useWorkspace();
   border: 1px solid var(--ui-border);
 }
 
-.titlebar__palette:hover {
+.titlebar__palette:hover:enabled {
   background: var(--ui-bg-accented);
   color: var(--ui-text);
+}
+
+.titlebar__palette:disabled {
+  opacity: 0.5;
 }
 
 .titlebar__palette-label {
