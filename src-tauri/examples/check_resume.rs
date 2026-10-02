@@ -27,6 +27,7 @@ use std::{
 use anyhow::{Context, bail};
 use chrono::Utc;
 use course_classifier_lib::{
+    boot::Progress,
     db::AppDb,
     format::{CourseInput, format_input},
     inference::{self, LoadedModel},
@@ -73,7 +74,8 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
         .parse()
         .context("child: model id not an i64")?;
 
-    let db = AppDb::open_at(db_path.into()).map_err(anyhow::Error::msg)?;
+    let db =
+        AppDb::open_at(db_path.into(), "dev", &Progress::none()).map_err(anyhow::Error::msg)?;
     let model = load_active_model()?;
     let pipeline = RunPipeline {
         dataset_id: DATASET_ID.to_owned(),
@@ -135,7 +137,8 @@ fn parent_main() -> anyhow::Result<()> {
     // --- Seed: dataset, courses, model rows, and a `running` run row ---
     let run_id = uuid::Uuid::new_v4().to_string();
     let model_id = {
-        let db = AppDb::open_at(db_path.clone()).map_err(anyhow::Error::msg)?;
+        let db = AppDb::open_at(db_path.clone(), "dev", &Progress::none())
+            .map_err(anyhow::Error::msg)?;
         let conn = db.rw().map_err(anyhow::Error::msg)?;
         let catalog =
             manifest::resolve_model_rows(&conn, manifest::load().map_err(anyhow::Error::msg)?)
@@ -233,7 +236,7 @@ fn parent_main() -> anyhow::Result<()> {
     }
 
     // --- Restart: reopen, verify orphan, sweep (the EPI-38 startup path) ---
-    let db = AppDb::open_at(db_path).map_err(anyhow::Error::msg)?;
+    let db = AppDb::open_at(db_path, "dev", &Progress::none()).map_err(anyhow::Error::msg)?;
     let conn = db.rw().map_err(anyhow::Error::msg)?;
 
     let state: String = conn

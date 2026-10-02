@@ -170,6 +170,11 @@ tasks:
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example clear_user_data
 
+  db:fixture:
+    desc: Write the upgrade-test fixture for the current schema + DuckDB version (run when adding a migration or re-pinning DuckDB)
+    cmds:
+      - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example db_fixture
+
   db:checkpoint:
     desc: Compact the DuckDB WAL into the main file (speeds up first read after a big import)
     cmds:

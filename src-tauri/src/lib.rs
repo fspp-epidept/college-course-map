@@ -1,4 +1,6 @@
-mod boot;
+// Public for `boot::Progress`, which `AppDb::open_at` takes and the examples
+// pass as `Progress::none()`.
+pub mod boot;
 mod config;
 mod courses;
 mod datasets;
