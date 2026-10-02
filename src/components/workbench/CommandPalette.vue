@@ -46,8 +46,13 @@ function jumpToSettingsSection(section: "general" | "theme" | "about"): void {
   if (!workspace.sidebarOpen) workspace.toggleSidebar();
 }
 
-// UDashboardSearch consumes the result of this computed and binds Cmd/Ctrl-K
-// itself (its `shortcut` prop defaults to "meta_k").
+// Cmd/Ctrl-K: on macOS the native View menu accelerator owns it (Layer 2,
+// docs/keybinds.md) and toggles the store via useNativeMenu, so the WebView
+// binding is turned off there — an empty shortcut never matches a key.
+// Windows/Linux keep UDashboardSearch's own "meta_k" binding.
+const shortcut = import.meta.env.TAURI_ENV_PLATFORM === "macos" ? "" : "meta_k";
+
+// UDashboardSearch consumes the result of this computed.
 const groups = computed(() => [
   {
     id: "activities",
@@ -106,6 +111,7 @@ const groups = computed(() => [
     v-model:open="open"
     :groups="groups"
     :color-mode="false"
+    :shortcut="shortcut"
     placeholder="Jump to activity or open tab"
   />
 </template>

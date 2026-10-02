@@ -14,6 +14,7 @@ import {
   useResumeRun,
   useRuns,
 } from "../../composables/useRuns";
+import { useWorkspace } from "../../stores/workspace";
 // Master/detail (EPI-58): DatasetsPanel keys this component by dataset id, so
 // all local state (view level, cursors, dialogs) is per-dataset by
 // construction.
@@ -173,14 +174,17 @@ const profileSummary = computed(() => {
   return `Input check: ${parts.join(", ")}`;
 });
 
-const classifyDisabled = computed(
-  () =>
-    classify.isPending.value ||
-    isRunning.value ||
-    activeElsewhere.value !== null ||
-    isImporting.value ||
-    importFailed.value,
-);
+// Why Classify can't start right now (null = it can). The button's disabled
+// state and the Run menu's toast both read this.
+const classifyBlocker = computed<string | null>(() => {
+  if (isImporting.value) return "The import is still running.";
+  if (importFailed.value) return "The import failed.";
+  if (isRunning.value) return "This dataset is already classifying.";
+  if (activeElsewhere.value) return `A run is active on ${activeElsewhere.value.datasetTitle}.`;
+  if (classify.isPending.value) return "A run is already starting.";
+  return null;
+});
+const classifyDisabled = computed(() => classifyBlocker.value !== null);
 
 // --- Run card presentation ---
 
@@ -300,6 +304,14 @@ const includeTopCandidates = ref(false);
 const includeAllLevels = ref(false);
 const uniqueRows = ref(false);
 
+// Why Export can't open right now (null = it can); see classifyBlocker.
+const exportBlocker = computed<string | null>(() => {
+  if (modelId.value == null) return "The models aren't loaded yet.";
+  if (isRunning.value) return "Wait for the run to finish.";
+  if (totalRows.value === 0) return "There are no courses to export.";
+  return null;
+});
+
 async function exportCsv(): Promise<void> {
   if (modelId.value == null) return;
   exportOpen.value = false;
@@ -333,6 +345,38 @@ async function exportCsv(): Promise<void> {
     exporting.value = false;
   }
 }
+
+// --- Menu requests (useNativeMenu) ---
+// File → Export Results and Run → Start Classification ask the selected
+// dataset for its Classify / Export button action. Wait until the queries
+// behind the blockers have settled, then do exactly what the button would.
+const workspace = useWorkspace();
+const toast = useToast();
+const blockersSettled = computed(
+  () =>
+    dataset.value !== undefined &&
+    latestRun.value !== undefined &&
+    (isImporting.value ||
+      coursesError.value ||
+      (modelId.value !== undefined && coursePage.value !== undefined)),
+);
+watch(
+  [() => workspace.pendingDatasetAction, blockersSettled],
+  ([action, settled]) => {
+    if (action === null || !settled) return;
+    workspace.pendingDatasetAction = null;
+    const blocker = action === "classify" ? classifyBlocker.value : exportBlocker.value;
+    if (blocker !== null) {
+      const title = action === "classify" ? "Can't start classification" : "Can't export yet";
+      toast.add({ title, description: blocker, color: "neutral" });
+    } else if (action === "classify") {
+      requestRun();
+    } else {
+      exportOpen.value = true;
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -666,7 +710,7 @@ async function exportCsv(): Promise<void> {
             icon="i-lucide-download"
             size="xs"
             :loading="exporting"
-            :disabled="modelId == null || isRunning || totalRows === 0"
+            :disabled="exportBlocker !== null"
             @click="exportOpen = true"
           >
             Export CSV

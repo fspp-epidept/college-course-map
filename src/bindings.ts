@@ -339,11 +339,13 @@ async openCcmReference() : Promise<Result<null, string>> {
 
 
 export const events = __makeEvents__<{
+menuActionTriggered: MenuActionTriggered,
 modelDownloadProgress: ModelDownloadProgress,
 modelsStateChanged: ModelsStateChanged,
 runtimeDownloadProgress: RuntimeDownloadProgress,
 runtimeStateChanged: RuntimeStateChanged
 }>({
+menuActionTriggered: "menu-action-triggered",
 modelDownloadProgress: "model-download-progress",
 modelsStateChanged: "models-state-changed",
 runtimeDownloadProgress: "runtime-download-progress",
@@ -590,6 +592,14 @@ modelId: number | null;
  */
 cursor: number | null; limit: number }
 export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title: ColumnStats }
+/**
+ * A frontend-handled menu command. The serde name is the native menu item id.
+ */
+export type MenuAction = "about" | "preferences" | "import_csv" | "export_results" | "start_classification" | "pause_run" | "toggle_sidebar" | "toggle_command_palette"
+/**
+ * Emitted when a native menu item (or its accelerator) fires.
+ */
+export type MenuActionTriggered = { action: MenuAction }
 /**
  * Per-file download progress. `received`/`total` are bytes; `bytes_per_sec`
  * is measured over the emission window (EPI-65). The frontend derives

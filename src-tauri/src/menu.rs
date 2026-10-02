@@ -1,41 +1,169 @@
-//! Native application menu (File / Edit / Run / View / Window / Help).
+//! Native application menu (App / File / Edit / Run / View / Window).
 //!
-//! Custom items carry stable ids and fire `menu:<id>` Tauri events for the
-//! frontend to handle via the `useNativeMenu` composable (see `docs/keybinds.md`).
-//! Predefined items (Quit, Copy, Minimize, …) perform their OS-native action and
-//! do not reach `handle_event`. Accelerators mirror the table in `docs/keybinds.md`.
+//! Every custom item is a [`MenuAction`]. A click emits one typed
+//! [`MenuActionTriggered`] event, and the frontend's `useNativeMenu` composable
+//! dispatches it through a `Record<MenuAction, handler>` (see `docs/keybinds.md`).
+//! Coverage is checked at both ends:
+//! - `every_action_is_placed_exactly_once` (below): every variant is in the menu.
+//! - vue-tsc (`task check`): every variant has exactly one frontend handler.
+//!
+//! Predefined items (Quit, Copy, Minimize, …) perform their OS-native action
+//! and never reach `handle_event`. Accelerators mirror `docs/keybinds.md`.
+//!
+//! The enum, event and layout compile on every platform so `src/bindings.ts`
+//! and the coverage test are platform-independent; only building the native
+//! menu is macOS-only.
 
+use serde::{Deserialize, Serialize};
+use specta::Type;
+use tauri_specta::Event;
+
+/// A frontend-handled menu command. The serde name is the native menu item id.
+#[derive(Type, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MenuAction {
+    About,
+    Preferences,
+    ImportCsv,
+    ExportResults,
+    StartClassification,
+    PauseRun,
+    ToggleSidebar,
+    ToggleCommandPalette,
+}
+
+/// Emitted when a native menu item (or its accelerator) fires.
+#[derive(Type, Serialize, Deserialize, Debug, Clone, Event)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MenuActionTriggered {
+    pub action: MenuAction,
+}
+
+/// The custom items of each submenu, in order. `build` appends the predefined
+/// items; the coverage test reads this table.
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "native menu is macOS-only")
+)]
+const APP_ACTIONS: &[MenuAction] = &[MenuAction::About, MenuAction::Preferences];
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "native menu is macOS-only")
+)]
+const FILE_ACTIONS: &[MenuAction] = &[MenuAction::ImportCsv, MenuAction::ExportResults];
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "native menu is macOS-only")
+)]
+const RUN_ACTIONS: &[MenuAction] = &[MenuAction::StartClassification, MenuAction::PauseRun];
+#[cfg_attr(
+    not(any(target_os = "macos", test)),
+    expect(dead_code, reason = "native menu is macOS-only")
+)]
+const VIEW_ACTIONS: &[MenuAction] = &[MenuAction::ToggleSidebar, MenuAction::ToggleCommandPalette];
+
+impl MenuAction {
+    /// The native menu item id. Must equal the serde name, which is what the
+    /// frontend receives; `every_action_is_placed_exactly_once` checks it.
+    #[cfg_attr(
+        not(any(target_os = "macos", test)),
+        expect(dead_code, reason = "native menu is macOS-only")
+    )]
+    const fn id(self) -> &'static str {
+        match self {
+            Self::About => "about",
+            Self::Preferences => "preferences",
+            Self::ImportCsv => "import_csv",
+            Self::ExportResults => "export_results",
+            Self::StartClassification => "start_classification",
+            Self::PauseRun => "pause_run",
+            Self::ToggleSidebar => "toggle_sidebar",
+            Self::ToggleCommandPalette => "toggle_command_palette",
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl MenuAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::About => "About Course Classifier",
+            Self::Preferences => "Settings…",
+            Self::ImportCsv => "Import CSV…",
+            Self::ExportResults => "Export Results…",
+            Self::StartClassification => "Start Classification",
+            Self::PauseRun => "Pause Run",
+            Self::ToggleSidebar => "Toggle Sidebar",
+            Self::ToggleCommandPalette => "Show Command Palette",
+        }
+    }
+
+    fn accelerator(self) -> Option<&'static str> {
+        match self {
+            Self::About => None,
+            Self::Preferences => Some("CmdOrCtrl+,"),
+            Self::ImportCsv => Some("CmdOrCtrl+O"),
+            Self::ExportResults => Some("CmdOrCtrl+E"),
+            Self::StartClassification => Some("CmdOrCtrl+R"),
+            Self::PauseRun => Some("CmdOrCtrl+."),
+            Self::ToggleSidebar => Some("CmdOrCtrl+B"),
+            Self::ToggleCommandPalette => Some("CmdOrCtrl+K"),
+        }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(id.to_owned())).ok()
+    }
+}
+
+#[cfg(target_os = "macos")]
 use tauri::{
-    AppHandle, Emitter, Manager, Runtime,
+    AppHandle, Manager, Runtime,
     menu::{Menu, MenuBuilder, MenuItemBuilder, SubmenuBuilder},
 };
 
-/// Build the full application menu.
+/// Toggle Devtools is handled in Rust (a webview concern, debug builds only),
+/// so it is a plain id rather than a [`MenuAction`].
+#[cfg(all(target_os = "macos", debug_assertions))]
+const TOGGLE_DEVTOOLS_ID: &str = "toggle_devtools";
+
+/// A submenu builder pre-filled with `actions`' items.
+#[cfg(target_os = "macos")]
+fn submenu<'a, R: Runtime>(
+    app: &'a AppHandle<R>,
+    title: &str,
+    actions: &[MenuAction],
+) -> tauri::Result<SubmenuBuilder<'a, R, AppHandle<R>>> {
+    let mut builder = SubmenuBuilder::new(app, title);
+    for &action in actions {
+        let item = MenuItemBuilder::with_id(action.id(), action.label());
+        let item = match action.accelerator() {
+            Some(accelerator) => item.accelerator(accelerator),
+            None => item,
+        };
+        builder = builder.item(&item.build(app)?);
+    }
+    Ok(builder)
+}
+
+/// Build the full application menu. On macOS the first submenu is the
+/// application menu (titled with the app name whatever its label), so it
+/// carries About, Settings and Quit by platform convention.
+#[cfg(target_os = "macos")]
 pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let import = MenuItemBuilder::new("Import CSV…")
-        .id("import_csv")
-        .accelerator("CmdOrCtrl+O")
-        .build(app)?;
-    let export = MenuItemBuilder::new("Export Results…")
-        .id("export_results")
-        .accelerator("CmdOrCtrl+E")
-        .build(app)?;
-    let open_recent = MenuItemBuilder::new("Open Recent…")
-        .id("open_recent")
-        .accelerator("CmdOrCtrl+Shift+O")
-        .build(app)?;
-    let file = SubmenuBuilder::new(app, "File")
-        .item(&import)
-        .item(&export)
-        .item(&open_recent)
+    let app_menu = submenu(app, "Course Classifier", APP_ACTIONS)?
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
         .separator()
         .quit()
         .build()?;
 
-    let preferences = MenuItemBuilder::new("Preferences…")
-        .id("preferences")
-        .accelerator("CmdOrCtrl+,")
-        .build(app)?;
+    let file = submenu(app, "File", FILE_ACTIONS)?.build()?;
+
     let edit = SubmenuBuilder::new(app, "Edit")
         .undo()
         .redo()
@@ -44,46 +172,20 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .copy()
         .paste()
         .select_all()
-        .separator()
-        .item(&preferences)
         .build()?;
 
-    let start = MenuItemBuilder::new("Start Classification")
-        .id("start_classification")
-        .accelerator("CmdOrCtrl+R")
-        .build(app)?;
-    let pause = MenuItemBuilder::new("Pause Run")
-        .id("pause_run")
-        .accelerator("CmdOrCtrl+.")
-        .build(app)?;
-    let run = SubmenuBuilder::new(app, "Run")
-        .item(&start)
-        .item(&pause)
-        .build()?;
+    let run = submenu(app, "Run", RUN_ACTIONS)?.build()?;
 
-    let toggle_sidebar = MenuItemBuilder::new("Toggle Sidebar")
-        .id("toggle_sidebar")
-        .accelerator("CmdOrCtrl+B")
-        .build(app)?;
-    let toggle_command_palette = MenuItemBuilder::new("Show Command Palette")
-        .id("toggle_command_palette")
-        .accelerator("CmdOrCtrl+K")
-        .build(app)?;
+    let view = submenu(app, "View", VIEW_ACTIONS)?;
+    // Devtools toggle is a development-only affordance; omit it from release builds.
+    #[cfg(debug_assertions)]
     let view = {
-        let builder = SubmenuBuilder::new(app, "View")
-            .item(&toggle_sidebar)
-            .item(&toggle_command_palette);
-        // Devtools toggle is a development-only affordance; omit it from release builds.
-        #[cfg(debug_assertions)]
-        let builder = {
-            let toggle_devtools = MenuItemBuilder::new("Toggle Devtools")
-                .id("toggle_devtools")
-                .accelerator("CmdOrCtrl+Shift+I")
-                .build(app)?;
-            builder.separator().item(&toggle_devtools)
-        };
-        builder.build()?
+        let toggle_devtools = MenuItemBuilder::with_id(TOGGLE_DEVTOOLS_ID, "Toggle Devtools")
+            .accelerator("CmdOrCtrl+Shift+I")
+            .build(app)?;
+        view.separator().item(&toggle_devtools)
     };
+    let view = view.build()?;
 
     let window = SubmenuBuilder::new(app, "Window")
         .minimize()
@@ -91,30 +193,65 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .close_window()
         .build()?;
 
-    let about = MenuItemBuilder::new("About Course Classifier")
-        .id("about")
-        .build(app)?;
-    let help = SubmenuBuilder::new(app, "Help").item(&about).build()?;
-
     MenuBuilder::new(app)
-        .items(&[&file, &edit, &run, &view, &window, &help])
+        .items(&[&app_menu, &file, &edit, &run, &view, &window])
         .build()
 }
 
 /// Route a menu click to the frontend (or handle it natively where it belongs in Rust).
+#[cfg(target_os = "macos")]
 pub(crate) fn handle_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::MenuEvent) {
     let id = event.id().0.as_str();
 
     // Devtools is a webview concern, not a frontend-state concern — handle it here.
     #[cfg(debug_assertions)]
-    if id == "toggle_devtools" {
+    if id == TOGGLE_DEVTOOLS_ID {
         if let Some(window) = app.get_webview_window("main") {
             window.open_devtools();
         }
         return;
     }
 
-    if let Err(err) = app.emit(&format!("menu:{id}"), ()) {
-        log::warn!("failed to emit menu event menu:{id}: {err}");
+    let Some(action) = MenuAction::from_id(id) else {
+        log::warn!("unhandled menu item id {id}");
+        return;
+    };
+    if let Err(err) = (MenuActionTriggered { action }).emit(app) {
+        log::warn!("failed to emit menu action {id}: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{APP_ACTIONS, FILE_ACTIONS, MenuAction, RUN_ACTIONS, VIEW_ACTIONS};
+    use specta::{Generics, Type, TypeCollection, datatype::DataType};
+
+    /// Every `MenuAction` variant (as specta reports it, i.e. exactly the
+    /// union in `bindings.ts`) is placed in the native menu exactly once, under
+    /// an item id equal to the name the frontend receives.
+    #[test]
+    fn every_action_is_placed_exactly_once() -> Result<(), serde_json::Error> {
+        let DataType::Enum(definition) =
+            MenuAction::inline(&mut TypeCollection::default(), Generics::Definition)
+        else {
+            return Err(serde::de::Error::custom("MenuAction is not an enum"));
+        };
+        let mut variants: Vec<String> = definition
+            .variants()
+            .iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+        variants.sort();
+
+        let mut placed = Vec::new();
+        for action in [APP_ACTIONS, FILE_ACTIONS, RUN_ACTIONS, VIEW_ACTIONS].concat() {
+            let name = serde_json::from_value::<String>(serde_json::to_value(action)?)?;
+            assert_eq!(action.id(), name);
+            placed.push(name);
+        }
+        placed.sort();
+
+        assert_eq!(placed, variants);
+        Ok(())
     }
 }
