@@ -27,8 +27,19 @@ const PRODUCT_DIR: &str = "college-course-map";
 /// data beside these in Roaming; everything else there is data.
 const CONFIG_ENTRIES: [&str; 2] = ["settings.json", "themes"];
 
-/// Old home of the `CoreML` compile cache, inside the data dir.
+/// Old home of the `CoreML` compile cache, inside the data dir. Deleted on
+/// every platform: the cache now lives under [`coreml_cache_dir`].
 const LEGACY_CACHE_SUBDIR: &str = "cache";
+
+/// Legacy diagnostics: deleted rather than moved (decision 2026-10-02). Only
+/// on Windows, where they sit in Roaming; elsewhere this is the live logs dir.
+const LEGACY_LOGS_SUBDIR: &str = "logs";
+
+/// Suffix of an in-progress cross-volume copy, beside its target.
+const STAGING_SUFFIX: &str = ".migrating";
+
+/// Suffix of a source whose copy finished, set aside for deletion.
+const MIGRATED_SUFFIX: &str = ".migrated";
 
 /// `<config>/college-course-map`.
 pub(crate) fn config_dir() -> Result<PathBuf, String> {
@@ -60,16 +71,12 @@ fn product_dir(base: Option<PathBuf>, kind: &str) -> Result<PathBuf, String> {
 }
 
 /// One-time move of data that 0.5.x and earlier kept in the roaming data dir
-/// (`%APPDATA%` on Windows) to [`data_dir`], and removal of the old `CoreML`
-/// cache. Must run before anything opens a data path — including the log
-/// plugin, which creates `logs/` — so it returns its outcomes (`Ok` = info,
-/// `Err` = warning) for the caller to log once the logger is up. Never
-/// fails startup: whatever can't be moved stays where it was, is reported,
-/// and is retried on the next launch.
-///
-/// Running before the Tauri builder also means a single-instance plugin,
-/// which initializes inside the builder, can't serialize two launches
-/// through here; an instance lock has to be taken before this call.
+/// (`%APPDATA%` on Windows) to [`data_dir`]. The old `CoreML` cache and, on
+/// Windows, the old logs are deleted instead. Must run before the database,
+/// models, or runtime packs are opened; it returns its outcomes (`Ok` = info,
+/// `Err` = warning) for the caller to log. Never fails startup: whatever
+/// can't be moved stays where it was, is reported, and is retried on the
+/// next launch.
 pub(crate) fn migrate_legacy_data() -> Vec<Result<String, String>> {
     let (Ok(legacy), Ok(data)) = (legacy_data_dir(), data_dir()) else {
         return Vec::new();
@@ -79,19 +86,15 @@ pub(crate) fn migrate_legacy_data() -> Vec<Result<String, String>> {
 
 fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
     let mut report = Vec::new();
-    let old_cache = legacy.join(LEGACY_CACHE_SUBDIR);
-    if old_cache.exists() {
-        report.push(match fs::remove_dir_all(&old_cache) {
-            Ok(()) => Ok(format!("removed old cache {}", old_cache.display())),
-            Err(e) => Err(format!(
-                "old cache {} not removed: {e}",
-                old_cache.display()
-            )),
-        });
-    }
+    discard(&legacy.join(LEGACY_CACHE_SUBDIR), "old cache", &mut report);
     if legacy == data {
         return report;
     }
+    discard(&legacy.join(LEGACY_LOGS_SUBDIR), "old logs", &mut report);
+    // Leftovers of an interrupted run: a staged copy never renamed into
+    // place is incomplete, and a set-aside source is already copied.
+    sweep(data, STAGING_SUFFIX, &mut report);
+    sweep(legacy, MIGRATED_SUFFIX, &mut report);
     // A fresh install has no legacy dir; nothing to report.
     let Ok(entries) = fs::read_dir(legacy) else {
         return report;
@@ -100,6 +103,7 @@ fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
         .flatten()
         .map(|entry| entry.file_name())
         .filter(|name| !CONFIG_ENTRIES.iter().any(|c| name == *c))
+        .filter(|name| !name.to_string_lossy().ends_with(MIGRATED_SUFFIX))
         .collect();
     // Entries whose target already exists stay put, and so do their
     // companions (`app.duckdb` holds back `app.duckdb.wal`), so a WAL never
@@ -131,36 +135,79 @@ fn migrate(legacy: &Path, data: &Path) -> Vec<Result<String, String>> {
     report
 }
 
-/// Rename `from` to `to`, or copy then delete when they sit on different
-/// volumes (a redirected Roaming folder). Any other rename failure — a file
-/// still held open, a permission error — is returned as is: copying a
-/// locked database could produce a torn copy that then blocks every retry.
-/// The copy lands under a staging name first, so an interrupted copy is
-/// never mistaken for a finished one and the next launch retries it.
+/// Delete `path` if it exists, reporting the outcome as `what`.
+fn discard(path: &Path, what: &str, report: &mut Vec<Result<String, String>>) {
+    if path.exists() {
+        report.push(match remove(path) {
+            Ok(()) => Ok(format!("removed {what} {}", path.display())),
+            Err(e) => Err(format!("{what} {} not removed: {e}", path.display())),
+        });
+    }
+}
+
+/// Delete every entry in `dir` whose name ends with `suffix`.
+fn sweep(dir: &Path, suffix: &str, report: &mut Vec<Result<String, String>>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().ends_with(suffix) {
+            discard(&entry.path(), "leftover", report);
+        }
+    }
+}
+
+/// Rename `from` to `to`, or copy across when they sit on different volumes
+/// (a redirected Roaming folder). Any other rename failure — a file still
+/// held open, a permission error — is returned as is: copying a locked
+/// database could produce a torn copy.
 fn move_entry(from: &Path, to: &Path) -> Result<&'static str, String> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     match fs::rename(from, to) {
-        Ok(()) => return Ok("moved"),
-        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {}
-        Err(e) => return Err(e.to_string()),
+        Ok(()) => Ok("moved"),
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+            copy_across(from, to).map(|()| "copied")
+        }
+        Err(e) => Err(e.to_string()),
     }
-    let mut staging = to.as_os_str().to_owned();
-    staging.push(".migrating");
-    let staging = PathBuf::from(staging);
-    if staging.exists() {
-        remove(&staging).map_err(|e| format!("clear stale {}: {e}", staging.display()))?;
-    }
+}
+
+/// The cross-volume move. Every step either finishes or leaves a state the
+/// next launch's [`sweep`]s resolve, so a kill or power loss at any point
+/// loses nothing:
+///
+/// 1. Copy to `<to>.migrating`, flushing each file to disk. Killed here:
+///    the source is intact and the staged copy is swept.
+/// 2. Rename the staged copy to `to`. Atomic on one volume.
+/// 3. Rename the source to `<from>.migrated`. Atomic on one volume; only a
+///    kill between 2 and 3 leaves both copies, reported as left in place.
+/// 4. Delete the set-aside source. Killed here: the remainder is swept.
+fn copy_across(from: &Path, to: &Path) -> Result<(), String> {
+    let staging = with_suffix(to, STAGING_SUFFIX);
     if let Err(e) = copy(from, &staging) {
         let _ = remove(&staging);
         return Err(format!("copy failed: {e}"));
     }
     fs::rename(&staging, to).map_err(|e| format!("rename {}: {e}", staging.display()))?;
-    remove(from).map_err(|e| format!("copied, but the old copy was not removed: {e}"))?;
-    Ok("copied")
+    let set_aside = with_suffix(from, MIGRATED_SUFFIX);
+    fs::rename(from, &set_aside)
+        .map_err(|e| format!("copied, but the old copy could not be set aside: {e}"))?;
+    remove(&set_aside)
+        .map_err(|e| format!("copied, but the old copy was not removed (retried next launch): {e}"))
 }
 
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Recursive copy that flushes each file to disk before returning, so the
+/// source is never deleted while its copy is still only in the OS cache.
+/// `File::create` opens for writing, which Windows' `FlushFileBuffers`
+/// (behind `sync_all`) requires.
 fn copy(from: &Path, to: &Path) -> io::Result<()> {
     if from.is_dir() {
         fs::create_dir_all(to)?;
@@ -170,7 +217,10 @@ fn copy(from: &Path, to: &Path) -> io::Result<()> {
         }
         Ok(())
     } else {
-        fs::copy(from, to).map(|_| ())
+        let mut src = fs::File::open(from)?;
+        let mut dst = fs::File::create(to)?;
+        io::copy(&mut src, &mut dst)?;
+        dst.sync_all()
     }
 }
 
@@ -186,7 +236,7 @@ fn remove(path: &Path) -> io::Result<()> {
 mod tests {
     use std::{fs, path::PathBuf};
 
-    use super::{copy, migrate, move_entry};
+    use super::{copy, copy_across, migrate, move_entry};
 
     fn scratch(name: &str) -> Result<PathBuf, String> {
         let root = std::env::temp_dir().join(format!("ccm-paths-{name}-{}", std::process::id()));
@@ -203,8 +253,8 @@ mod tests {
     }
 
     /// The Windows case: config and data share the legacy dir. Data moves,
-    /// settings and themes stay, an existing target is never overwritten,
-    /// and the old cache is dropped rather than moved.
+    /// settings and themes stay, and the old cache and logs are dropped
+    /// rather than moved (the live logs dir is never touched).
     #[test]
     fn moves_data_and_leaves_config() -> Result<(), String> {
         let root = scratch("split")?;
@@ -235,30 +285,29 @@ mod tests {
             fs::read_to_string(data.join("logs/app.log")).map_err(|e| e.to_string())?,
             "new"
         );
-        assert!(legacy.join("logs/app.log").exists());
-        assert_eq!(
-            report.iter().filter(|r| r.is_err()).count(),
-            1,
-            "{report:?}"
-        );
+        assert!(!legacy.join("logs").exists());
+        assert!(report.iter().all(Result::is_ok), "{report:?}");
 
-        // Second launch: nothing left to move but the conflicting logs dir.
+        // Second launch: nothing left to do.
         let again = migrate(&legacy, &data);
-        assert_eq!(again.len(), 1, "{again:?}");
+        assert!(again.is_empty(), "{again:?}");
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
 
-    /// macOS/Linux: same dir, so only the old cache goes.
+    /// macOS/Linux: same dir, so only the old cache goes; `logs/` there is
+    /// the live logs dir and stays.
     #[test]
     fn same_dir_only_drops_cache() -> Result<(), String> {
         let root = scratch("same")?;
         write(&root.join("app.duckdb"), "db")?;
+        write(&root.join("logs/app.log"), "live")?;
         write(&root.join("cache/coreml/blob"), "compiled")?;
 
         let report = migrate(&root, &root);
 
         assert!(root.join("app.duckdb").exists());
+        assert!(root.join("logs/app.log").exists());
         assert!(!root.join("cache").exists());
         assert_eq!(report.len(), 1, "{report:?}");
         let _ = fs::remove_dir_all(&root);
@@ -324,6 +373,54 @@ mod tests {
         assert!(move_entry(&root.join("roaming/app.duckdb"), &to).is_err());
         assert!(!to.exists());
         assert!(!root.join("local/app.duckdb.migrating").exists());
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Leftovers of an interrupted cross-volume move are swept first: an
+    /// unfinished staged copy is discarded and the entry moved again from
+    /// its intact source; a set-aside source is deleted, never moved.
+    #[test]
+    fn sweeps_interrupted_moves() -> Result<(), String> {
+        let root = scratch("sweep")?;
+        let legacy = root.join("roaming");
+        let data = root.join("local");
+        write(&legacy.join("models/two/model.onnx"), "onnx")?;
+        write(&data.join("models.migrating/two/model.onnx"), "partial")?;
+        write(&legacy.join("runtimes.migrated/pack/lib.so"), "copied")?;
+
+        let report = migrate(&legacy, &data);
+
+        assert!(!data.join("models.migrating").exists());
+        assert_eq!(
+            fs::read_to_string(data.join("models/two/model.onnx")).map_err(|e| e.to_string())?,
+            "onnx"
+        );
+        assert!(!legacy.join("runtimes.migrated").exists());
+        assert!(!data.join("runtimes.migrated").exists());
+        assert!(report.iter().all(Result::is_ok), "{report:?}");
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// The copy path ends with only the target: no staged copy, no source,
+    /// no set-aside source.
+    #[test]
+    fn copy_across_leaves_only_target() -> Result<(), String> {
+        let root = scratch("across")?;
+        write(&root.join("roaming/models/two/model.onnx"), "onnx")?;
+        fs::create_dir_all(root.join("local")).map_err(|e| e.to_string())?;
+
+        copy_across(&root.join("roaming/models"), &root.join("local/models"))?;
+
+        assert_eq!(
+            fs::read_to_string(root.join("local/models/two/model.onnx"))
+                .map_err(|e| e.to_string())?,
+            "onnx"
+        );
+        assert!(!root.join("local/models.migrating").exists());
+        assert!(!root.join("roaming/models").exists());
+        assert!(!root.join("roaming/models.migrated").exists());
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
