@@ -149,6 +149,7 @@ User's global rules (from `~/.claude/CLAUDE.md`) apply: simple over complex, no 
 
 - No emojis in code, READMEs, or commit messages unless asked. Functional indicators (✓, ✗, ⚠) acceptable in UI when needed.
 - No `Co-Authored-By: Claude …` trailer on commits in this repo (org policy; history was rewritten on 2026-05-14 to enforce). Plain commit messages, author identity only.
+- UI copy: button labels and menu / command palette items are Title Case, with articles, conjunctions and short prepositions lowercase ("Restart App", "Reset and Relaunch", "Open Report (PDF)"). Headings, body text, form and checkbox labels, toasts and aria-labels stay sentence case.
 - Scratch / handoff / draft files go in `tmp/` at the repo root (already in `.gitignore`). Don't commit them.
 
 Open decisions are tracked in the issue tracker (do not solve them preemptively); see `CLAUDE.local.md` for how to query them.
