@@ -88,12 +88,12 @@ const groups = computed(() => [
     label: "Commands",
     items: [
       {
-        label: "Switch theme…",
+        label: "Switch Theme…",
         icon: "i-lucide-palette",
         onSelect: () => jumpToSettingsSection("theme"),
       },
       {
-        label: "Toggle sidebar",
+        label: "Toggle Sidebar",
         icon: "i-lucide-panel-left",
         suffix: "Cmd/Ctrl-B",
         onSelect: () => workspace.toggleSidebar(),

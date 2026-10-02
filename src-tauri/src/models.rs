@@ -302,7 +302,7 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
             let _ = ModelsStateChanged {}.emit(app);
             format!(
                 "{e} — {removed} model file(s) failed manifest verification and \
-                 were removed; use Download models to re-fetch them"
+                 were removed; use Download Models to re-fetch them"
             )
         }
         Err(repair_err) => {

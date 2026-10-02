@@ -24,7 +24,7 @@ async function openReport(): Promise<void> {
     <header class="flex items-center justify-between gap-3 px-4 py-2 border-b border-(--ui-border)">
       <span class="text-sm text-(--ui-text-muted)">2010 College Course Map (NCES 2012-162rev)</span>
       <UButton size="xs" variant="outline" icon="i-lucide-file-text" @click="openReport">
-        Open report (PDF)
+        Open Report (PDF)
       </UButton>
     </header>
     <p v-if="openError" class="px-4 py-2 text-sm text-(--ui-color-error-500)">

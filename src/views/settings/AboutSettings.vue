@@ -35,7 +35,7 @@ async function openReport(): Promise<void> {
       <dd class="text-(--ui-text)">{{ version }}</dd>
       <dt class="text-(--ui-text-muted)">Logs</dt>
       <dd class="flex items-center gap-3">
-        <UButton size="xs" variant="outline" @click="openLogs">Open logs folder</UButton>
+        <UButton size="xs" variant="outline" @click="openLogs">Open Logs Folder</UButton>
         <span class="text-xs text-(--ui-text-muted)">
           Attach app.log to a bug report — it holds diagnostics only, no course data.
         </span>

@@ -616,7 +616,7 @@ impl RuntimeState {
 }
 
 /// Choose the pack this process will load. An explicitly preferred pack
-/// (EPI-94, Settings → Compute "Make active") wins when installed — an
+/// (EPI-94, Settings → Compute "Make Active") wins when installed — an
 /// explicit choice can never be shadowed by manifest order. Otherwise the
 /// user's EP priority list is scanned: the first EP with an *installed* pack
 /// claiming it wins (manifest order breaks ties). `Cpu` — preferred, in the

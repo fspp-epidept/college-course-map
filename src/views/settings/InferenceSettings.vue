@@ -236,7 +236,7 @@ function fmtSize(bytes: number): string {
             :disabled="saveRelaunch.isPending.value"
             @click="makeActive(backend.id)"
           >
-            Make active
+            Make Active
           </UButton>
           <UButton
             v-else

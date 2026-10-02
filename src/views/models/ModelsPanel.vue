@@ -104,7 +104,7 @@ function statusLabel(m: {
             :disabled="downloading"
             @click="download.mutate()"
           >
-            Download models
+            Download Models
           </UButton>
           <UButton
             v-if="downloading"
@@ -124,7 +124,7 @@ function statusLabel(m: {
           :loading="load.isPending.value || loading"
           @click="load.mutate()"
         >
-          Load models
+          Load Models
         </UButton>
         <span v-else class="text-sm text-(--ui-text-muted)">
           All models loaded — classification is ready.
