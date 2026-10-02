@@ -399,7 +399,11 @@ cacheHitRate: number | null }
  * (indeterminate progress). `seq` grows with every change, so a client
  * that subscribed and then fetched a snapshot keeps whichever is newer.
  */
-export type BootState = { seq: number; status: BootStatus; phase: Phase | null; done: number; total: number }
+export type BootState = { seq: number; status: BootStatus; phase: Phase | null; 
+/**
+ * What the current step is doing, in the user's words.
+ */
+detail: string | null; done: number; total: number }
 /**
  * Emitted on every boot state change, progress throttled to
  * [`REPORT_INTERVAL`].
@@ -409,7 +413,12 @@ export type BootStateChanged = { state: BootState }
  * Where startup is. `Failed` keeps the app running with the boot screen
  * showing `message`; the phase it failed in is [`BootState::phase`].
  */
-export type BootStatus = { status: "starting" } | { status: "ready" } | { status: "failed"; message: string }
+export type BootStatus = { status: "starting" } | { status: "ready" } | 
+/**
+ * `notices` are the non-fatal conditions collected before the failure,
+ * which often explain it. `log_dir` is for the copied error report.
+ */
+{ status: "failed"; message: string; notices: string[]; logDir: string | null }
 /**
  * One `ccm_taxonomy` row. 2-digit rows carry `title_short`, 6-digit rows
  * carry `description`; there are no 4-digit rows.
@@ -672,7 +681,9 @@ download: DownloadSnapshot | null }
  */
 export type ModelsStateChanged = Record<string, never>
 /**
- * The startup phases, in order. The boot screen names each one.
+ * The startup phases, in order. The boot screen titles each one, so a
+ * phase names only work that is really happening: `UpgradingSchema` is
+ * entered only while a schema migration runs.
  */
 export type Phase = "MigratingData" | "OpeningDatabase" | "UpgradingSchema" | "LoadingRuntime"
 export type RaggedRow = { row: number; fields: number }

@@ -104,18 +104,25 @@ export function useRunLifecycleRefresh() {
   // This lives here, not in useModelsEvents, because that one only mounts
   // with the Models panel; this composable is always mounted (Workbench.vue).
   let unlistenModels: (() => void) | undefined;
+  let unmounted = false;
   onMounted(async () => {
     const refresh = () => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["models"] });
     };
     unlistenModels = await events.modelsStateChanged.listen(refresh);
+    // Unmounted while the listener was registering (a dev reload).
+    if (unmounted) {
+      unlistenModels();
+      return;
+    }
     // Model autoload starts as startup turns ready, before this listener
     // exists; refresh once so a load event missed in between can't leave
     // stale blockers.
     refresh();
   });
   onUnmounted(() => {
+    unmounted = true;
     unlistenModels?.();
   });
 

@@ -24,7 +24,7 @@ const reset = useMutation({
 <template>
   <div class="flex items-center gap-3">
     <UButton size="xs" color="error" variant="outline" class="shrink-0" @click="confirmOpen = true">
-      Reset app data…
+      Reset App Data…
     </UButton>
     <span class="text-xs text-(--ui-text-muted)">
       Deletes all datasets, runs, cached results, downloaded models and runtime packs.
@@ -52,7 +52,7 @@ const reset = useMutation({
       <div class="flex justify-end gap-2 w-full">
         <UButton variant="ghost" color="neutral" @click="confirmOpen = false">Cancel</UButton>
         <UButton color="error" :loading="reset.isPending.value" @click="reset.mutate()">
-          Reset and relaunch
+          Reset and Relaunch
         </UButton>
       </div>
     </template>

@@ -49,19 +49,28 @@ use crate::{
     models, reset, runs, runtime,
 };
 
-/// The startup phases, in order. The boot screen names each one.
+/// The startup phases, in order. The boot screen titles each one, so a
+/// phase names only work that is really happening: `UpgradingSchema` is
+/// entered only while a schema migration runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Type)]
 pub(crate) enum Phase {
     MigratingData,
     OpeningDatabase,
+    #[expect(
+        dead_code,
+        reason = "#204 enters it from `AppDb::open` while a migration runs"
+    )]
     UpgradingSchema,
     LoadingRuntime,
 }
 
-/// One startup step: a row in [`PRE_LOGGER`] or [`STEPS`].
+/// One startup step: a row in [`PRE_LOGGER`] or [`STEPS`]. `name` is for
+/// the log; `label` is what the boot screen says while the step runs, so it
+/// must be true whether or not the step finds work to do.
 struct Step {
     phase: Phase,
     name: &'static str,
+    label: &'static str,
     run: fn(&mut Ctx<'_>) -> Result<(), String>,
 }
 
@@ -76,6 +85,7 @@ const PRE_LOGGER: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "install signal handlers",
+        label: "Starting up",
         run: install_signals,
     },
     // One process at a time owns the data dir (#233). The single-instance
@@ -84,6 +94,7 @@ const PRE_LOGGER: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "acquire instance lock",
+        label: "Starting up",
         run: acquire_instance_lock,
     },
     // A pending "Reset app data" (#206): renames only, so it is fast and
@@ -92,6 +103,7 @@ const PRE_LOGGER: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "apply pending reset",
+        label: "Starting up",
         run: apply_reset,
     },
 ];
@@ -102,41 +114,49 @@ const STEPS: &[Step] = &[
     Step {
         phase: Phase::MigratingData,
         name: "sweep reset trash",
+        label: "Checking for data left over from a reset",
         run: sweep_reset_trash,
     },
     Step {
         phase: Phase::MigratingData,
         name: "migrate data",
+        label: "Checking for app data in the old location",
         run: migrate_data,
     },
     Step {
         phase: Phase::OpeningDatabase,
         name: "open database",
+        label: "Opening the database file",
         run: open_database,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "sweep runs",
+        label: "Checking for runs interrupted last time",
         run: sweep_runs,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "sweep imports",
+        label: "Checking for imports interrupted last time",
         run: sweep_imports,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "manifest rows",
+        label: "Registering the classification models",
         run: manifest_rows,
     },
     Step {
-        phase: Phase::UpgradingSchema,
+        phase: Phase::OpeningDatabase,
         name: "checkpoint",
+        label: "Saving startup changes to disk",
         run: checkpoint,
     },
     Step {
         phase: Phase::LoadingRuntime,
         name: "load runtime",
+        label: "Loading the classification engine",
         run: load_runtime,
     },
 ];
@@ -149,8 +169,13 @@ pub(crate) enum BootStatus {
     #[default]
     Starting,
     Ready,
+    /// `notices` are the non-fatal conditions collected before the failure,
+    /// which often explain it. `log_dir` is for the copied error report.
+    #[serde(rename_all = "camelCase")]
     Failed {
         message: String,
+        notices: Vec<String>,
+        log_dir: Option<String>,
     },
 }
 
@@ -163,6 +188,8 @@ pub(crate) struct BootState {
     pub seq: u64,
     pub status: BootStatus,
     pub phase: Option<Phase>,
+    /// What the current step is doing, in the user's words.
+    pub detail: Option<String>,
     pub done: u64,
     pub total: u64,
 }
@@ -237,6 +264,20 @@ impl Boot {
             .ok_or_else(|| "The app is still starting.".to_owned())
     }
 
+    /// Turn the boot state `Failed`.
+    fn fail(&self, message: String, notices: Vec<String>) {
+        let log_dir = crate::logging::logs_dir()
+            .ok()
+            .map(|dir| dir.display().to_string());
+        self.update(false, |state| {
+            state.status = BootStatus::Failed {
+                message,
+                notices,
+                log_dir,
+            };
+        });
+    }
+
     /// Apply `change` to the boot state and emit it, unless `throttled` and
     /// the last emit was under [`REPORT_INTERVAL`] ago. Emitting only posts
     /// to the event loop, so this is safe on the boot thread.
@@ -279,11 +320,18 @@ impl Boot {
 }
 
 /// Marks the step runner finished when dropped, so [`shutdown`] stops waiting
-/// however the runner ends: published, failed, or panicked.
+/// however the runner ends: published, failed, or panicked. A panic also
+/// turns the boot state `Failed`, so the screen doesn't wait forever.
 struct Finished<'a>(&'a Boot);
 
 impl Drop for Finished<'_> {
     fn drop(&mut self) {
+        if thread::panicking() {
+            self.0.fail(
+                "Startup stopped unexpectedly. The log has the details.".to_owned(),
+                Vec::new(),
+            );
+        }
         if let Ok(mut finished) = self.0.finished.lock() {
             *finished = true;
         }
@@ -340,6 +388,20 @@ impl<'a> Progress<'a> {
         if let Some(boot) = self.boot {
             boot.update(false, |state| {
                 state.phase = Some(phase);
+                state.detail = None;
+                state.done = 0;
+                state.total = 0;
+            });
+        }
+    }
+
+    /// Say what the current step is doing, in the user's words. The runner
+    /// sets each step's label; a step says more when it finds real work
+    /// (moving data out of Roaming, creating a new database).
+    pub(crate) fn detail(&self, text: &str) {
+        if let Some(boot) = self.boot {
+            boot.update(false, |state| {
+                state.detail = Some(text.to_owned());
                 state.done = 0;
                 state.total = 0;
             });
@@ -396,18 +458,38 @@ pub(crate) fn opened(db: Option<&AppDb>) -> Result<&AppDb, String> {
     db.ok_or_else(|| "database not open".to_owned())
 }
 
+/// A step's error, kept apart from the step's name: the log gets both, the
+/// boot screen only the message.
+struct StepError {
+    step: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for StepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.step, self.message)
+    }
+}
+
 /// Run `steps` in order, logging each one's duration (a no-op for
 /// [`PRE_LOGGER`], which runs before the logger). Stops at the first
 /// error, or before the next row once shutdown has set the cancel flag.
-/// The error names the step; the phase is the one last recorded.
-fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), String> {
+/// The phase of an error is the one last recorded.
+fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), StepError> {
     for step in steps {
         if ctx.progress.cancelled() {
-            return Err("startup cancelled".to_owned());
+            return Err(StepError {
+                step: step.name,
+                message: "startup cancelled".to_owned(),
+            });
         }
         ctx.progress.phase(step.phase);
+        ctx.progress.detail(step.label);
         let started = Instant::now();
-        (step.run)(ctx).map_err(|e| format!("{}: {e}", step.name))?;
+        (step.run)(ctx).map_err(|message| StepError {
+            step: step.name,
+            message,
+        })?;
         log::info!("startup: {} ({:?})", step.name, started.elapsed());
     }
     Ok(())
@@ -421,7 +503,7 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             app.manage(Boot::default());
             let boot = app.state::<Boot>();
             let mut ctx = Ctx::new(app, &boot);
-            run_steps(PRE_LOGGER, &mut ctx)?;
+            run_steps(PRE_LOGGER, &mut ctx).map_err(|e| e.to_string())?;
             if let Ok(mut notices) = boot.pre_logger_notices.lock() {
                 *notices = ctx.notices;
             }
@@ -485,23 +567,34 @@ fn run(app: &AppHandle) {
         log::info!("startup: stopped for exit");
         return;
     }
-    let phase = ctx.progress.recorded();
-    if let Err(e) = result.and_then(|()| publish(&boot, ctx)) {
-        log::error!("startup failed in {phase:?}: {e}");
-        boot.update(false, |state| {
-            state.status = BootStatus::Failed { message: e };
-        });
+    let phase = ctx
+        .progress
+        .recorded()
+        .map_or_else(|| "no phase".to_owned(), |phase| format!("{phase:?}"));
+    if let Err(e) = result {
+        log::error!("startup failed in {phase}: {e}");
+        boot.fail(e.message, ctx.notices);
+        return;
+    }
+    if let Err(e) = publish(&boot, ctx) {
+        log::error!("startup failed in {phase}: {e}");
+        boot.fail(e, Vec::new());
         return;
     }
     boot.update(false, |state| {
         state.status = BootStatus::Ready;
+        state.detail = None;
         state.done = 0;
         state.total = 0;
     });
     drop(finished);
     #[cfg(target_os = "macos")]
     crate::menu::enable_boot_items(app);
-    models::autoload_if_present(app);
+    // An exit requested as startup finished must not race a model load
+    // (#231).
+    if !boot.cancel.load(Ordering::Relaxed) {
+        models::autoload_if_present(app);
+    }
 }
 
 /// Hand the services the steps built to [`Boot`]. Notices collected by steps
@@ -662,6 +755,9 @@ fn sweep_reset_trash(ctx: &mut Ctx<'_>) -> Result<(), String> {
 /// Open `DuckDB` and apply migrations. A WAL set aside at open is
 /// reported through the notices.
 fn open_database(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    if !db::db_path()?.exists() {
+        ctx.progress.detail("Creating a new database");
+    }
     let db = AppDb::open()?;
     ctx.notices.extend(db.recovery_notice().map(str::to_owned));
     ctx.db = Some(db);

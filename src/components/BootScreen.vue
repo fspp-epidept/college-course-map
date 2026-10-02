@@ -1,49 +1,35 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import packageJson from "../../package.json";
 import type { Phase } from "../bindings";
 import { commands } from "../bindings";
 import { useBoot } from "../composables/useBoot";
 import ResetAppData from "../views/settings/ResetAppData.vue";
 
 // The boot screen (#224): stands in for the workbench while startup runs,
-// and holds the recovery actions when it fails.
+// and holds the recovery actions when it fails. One title per phase, one
+// line saying what the current step is doing, one progress bar.
 
 /** How long one phase runs before the screen says it is taking a while. */
 const SLOW_MS = 10_000;
 
-const PHASES: { phase: Phase; label: string }[] = [
-  { phase: "MigratingData", label: "Moving app data to its new location" },
-  { phase: "OpeningDatabase", label: "Opening the database" },
-  { phase: "UpgradingSchema", label: "Updating the database" },
-  { phase: "LoadingRuntime", label: "Starting the classifier" },
-];
+// Record, not a list: vue-tsc fails until a new Rust phase has its title.
+const PHASE_TITLES: Record<Phase, string> = {
+  MigratingData: "Preparing app data",
+  OpeningDatabase: "Opening the database",
+  UpgradingSchema: "Updating the database",
+  LoadingRuntime: "Starting the classifier",
+};
 
 const { state } = useBoot();
 const toast = useToast();
 
-const status = computed(() => state.value?.status.status ?? "starting");
-const failure = computed(() =>
-  state.value?.status.status === "failed" ? state.value.status.message : null,
+const failed = computed(() =>
+  state.value?.status.status === "failed" ? state.value.status : null,
 );
-const current = computed(() => PHASES.findIndex((p) => p.phase === state.value?.phase));
-
-type RowState = "done" | "active" | "failed" | "pending";
-
-const rows = computed(() =>
-  PHASES.map(({ phase, label }, index): { phase: Phase; label: string; state: RowState } => {
-    let row: RowState = "pending";
-    if (status.value === "ready" || index < current.value) row = "done";
-    else if (index === current.value) row = failure.value === null ? "active" : "failed";
-    return { phase, label, state: row };
-  }),
+const title = computed(() =>
+  state.value?.phase ? PHASE_TITLES[state.value.phase] : "Starting up",
 );
-
-const ICONS: Record<RowState, string> = {
-  done: "i-lucide-circle-check",
-  active: "i-lucide-loader-circle",
-  failed: "i-lucide-circle-x",
-  pending: "i-lucide-circle",
-};
 
 // Indeterminate (null) until the step reports a total.
 const progressValue = computed(() =>
@@ -56,11 +42,12 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1e3).toFixed(0)} KB`;
 }
 
-const progressText = computed(() =>
-  state.value && state.value.total > 0
-    ? `${formatBytes(state.value.done)} of ${formatBytes(state.value.total)}`
-    : null,
-);
+const progressText = computed(() => {
+  if (!state.value || state.value.total === 0) return null;
+  const { done, total } = state.value;
+  const percent = Math.min(100, Math.floor((done / total) * 100));
+  return `${percent}% · ${formatBytes(done)} of ${formatBytes(total)}`;
+});
 
 // "Taking longer than usual" after SLOW_MS in one phase.
 const slow = ref(false);
@@ -76,7 +63,9 @@ watch(
 );
 onBeforeUnmount(() => clearTimeout(slowTimer));
 
-const failedLabel = computed(() => PHASES[current.value]?.label ?? "Starting up");
+async function restart(): Promise<void> {
+  await commands.relaunchApp();
+}
 
 async function openLogs(): Promise<void> {
   const result = await commands.openLogsDir();
@@ -90,8 +79,16 @@ async function openLogs(): Promise<void> {
 }
 
 async function copyError(): Promise<void> {
+  if (!failed.value) return;
+  const report = [
+    `Course Classifier ${packageJson.version} (${import.meta.env.TAURI_ENV_PLATFORM})`,
+    `Failed while: ${title.value}`,
+    `Error: ${failed.value.message}`,
+    ...failed.value.notices.map((notice) => `Notice: ${notice}`),
+    ...(failed.value.logDir ? [`Logs: ${failed.value.logDir}`] : []),
+  ].join("\n");
   try {
-    await navigator.clipboard.writeText(`${failedLabel.value}: ${failure.value ?? ""}`);
+    await navigator.clipboard.writeText(report);
     toast.add({ title: "Error copied", color: "neutral" });
   } catch {
     toast.add({ title: "Couldn't copy the error", color: "error" });
@@ -101,66 +98,55 @@ async function copyError(): Promise<void> {
 
 <template>
   <div class="flex flex-1 min-h-0 items-center justify-center overflow-y-auto p-8">
-    <div class="w-full max-w-md rounded-lg border border-default bg-elevated p-6 shadow-sm">
-      <h1 class="text-base font-semibold text-highlighted">
-        {{ failure === null ? "Getting ready" : "Course Classifier couldn't start" }}
-      </h1>
-      <p class="mt-1 text-sm text-muted">
-        {{
-          failure === null
-            ? "This usually takes a moment."
-            : "Something went wrong during startup. The logs folder has the details."
-        }}
-      </p>
-
-      <ol class="mt-6 flex flex-col gap-4">
-        <li v-for="row in rows" :key="row.phase" class="flex gap-3">
+    <div class="w-full max-w-lg rounded-lg border border-default bg-elevated p-6 shadow-sm">
+      <div v-if="!failed" role="status" aria-live="polite" class="flex flex-col gap-3">
+        <div class="flex items-center gap-3">
           <UIcon
-            :name="ICONS[row.state]"
-            class="size-5 shrink-0"
-            :class="{
-              'text-success': row.state === 'done',
-              'text-primary animate-spin': row.state === 'active',
-              'text-error': row.state === 'failed',
-              'text-dimmed': row.state === 'pending',
-            }"
+            name="i-lucide-loader-circle"
+            class="size-5 shrink-0 text-primary motion-safe:animate-spin"
+            aria-hidden="true"
           />
-          <div class="flex min-w-0 flex-1 flex-col gap-2">
-            <span
-              class="text-sm leading-5"
-              :class="{
-                'text-muted': row.state === 'done',
-                'font-medium text-highlighted': row.state === 'active' || row.state === 'failed',
-                'text-dimmed': row.state === 'pending',
-              }"
-            >
-              {{ row.label }}
-            </span>
-            <template v-if="row.state === 'active'">
-              <UProgress :model-value="progressValue" :max="state?.total || 100" size="sm" />
-              <span v-if="progressText" class="text-xs tabular-nums text-muted">
-                {{ progressText }}
-              </span>
-            </template>
+          <h1 class="text-base font-semibold text-highlighted">{{ title }}</h1>
+        </div>
+        <p v-if="state?.detail" class="text-sm text-muted">{{ state.detail }}</p>
+        <UProgress
+          :model-value="progressValue"
+          :max="state?.total || 100"
+          size="sm"
+          :aria-label="title"
+        />
+        <p v-if="progressText" class="text-xs tabular-nums text-muted">{{ progressText }}</p>
+        <p v-if="slow" class="mt-2 text-sm text-muted">
+          This is taking longer than usual. Large databases can take a few minutes.
+        </p>
+      </div>
+
+      <template v-else>
+        <div role="alert" class="flex flex-col gap-3">
+          <div class="flex items-center gap-3">
+            <UIcon name="i-lucide-circle-x" class="size-5 shrink-0 text-error" aria-hidden="true" />
+            <h1 class="text-base font-semibold text-highlighted">
+              Course Classifier couldn't start
+            </h1>
           </div>
-        </li>
-      </ol>
-
-      <p v-if="failure === null && slow" class="mt-6 text-sm text-muted">
-        This is taking longer than usual. Large databases can take a few minutes.
-      </p>
-
-      <template v-if="failure !== null">
-        <pre
-          class="mt-6 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono text-xs text-toned"
-          >{{ failure }}</pre
-        >
+          <p class="text-sm text-muted">
+            Something went wrong while {{ title.toLowerCase() }}.
+          </p>
+          <pre
+            class="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-3 font-mono text-xs text-toned"
+            >{{ failed.message }}</pre
+          >
+          <ul v-if="failed.notices.length" class="flex flex-col gap-1 text-sm text-muted">
+            <li v-for="notice in failed.notices" :key="notice">{{ notice }}</li>
+          </ul>
+        </div>
         <div class="mt-4 flex flex-wrap gap-2">
+          <UButton icon="i-lucide-rotate-ccw" @click="restart">Restart App</UButton>
           <UButton icon="i-lucide-folder-open" color="neutral" variant="outline" @click="openLogs">
-            Open logs folder
+            Open Logs Folder
           </UButton>
           <UButton icon="i-lucide-copy" color="neutral" variant="ghost" @click="copyError">
-            Copy error
+            Copy Error
           </UButton>
         </div>
         <USeparator class="my-5" />

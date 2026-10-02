@@ -144,6 +144,7 @@ fn migrate(legacy: &Path, data: &Path, progress: &Progress<'_>) -> Vec<Result<St
                 to.display()
             ))
         } else {
+            progress.detail("Moving app data out of the Windows Roaming profile");
             move_entry(&from, &to, progress)
                 .map(|how| format!("{how} {} to {}", from.display(), to.display()))
                 .map_err(|e| format!("{} not moved: {e}", from.display()))

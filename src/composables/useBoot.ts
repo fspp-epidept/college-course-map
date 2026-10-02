@@ -37,6 +37,7 @@ export function provideBoot(): Boot {
   const minimumShown = ref(false);
   const timers: ReturnType<typeof setTimeout>[] = [];
   let unlisten: (() => void) | undefined;
+  let unmounted = false;
 
   function accept(next: BootState): void {
     if (state.value === null || next.seq > state.value.seq) state.value = next;
@@ -46,6 +47,11 @@ export function provideBoot(): Boot {
 
   onMounted(async () => {
     unlisten = await events.bootStateChanged.listen(({ payload }) => accept(payload.state));
+    // Unmounted while the listener was registering (a dev reload).
+    if (unmounted) {
+      unlisten();
+      return;
+    }
     const snapshot = await commands.bootState();
     if (snapshot.status === "ok") accept(snapshot.data);
   });
@@ -65,6 +71,7 @@ export function provideBoot(): Boot {
   });
 
   onBeforeUnmount(() => {
+    unmounted = true;
     unlisten?.();
     for (const timer of timers) clearTimeout(timer);
   });
