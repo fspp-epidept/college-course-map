@@ -110,6 +110,8 @@ pub(crate) struct Boot {
     services: OnceLock<Services>,
     /// Set by [`shutdown`]; the runner stops at the next row.
     cancel: AtomicBool,
+    /// The phase startup is in, as last set through [`Progress::phase`].
+    phase: Mutex<Option<Phase>>,
     /// Whether the step runner is done, for [`shutdown`] to wait on.
     finished: Mutex<bool>,
     finished_cv: Condvar,
@@ -121,6 +123,10 @@ impl Boot {
         self.services
             .get()
             .ok_or_else(|| "The app is still starting.".to_owned())
+    }
+
+    fn phase(&self) -> Option<Phase> {
+        self.phase.lock().ok().and_then(|phase| *phase)
     }
 
     fn mark_finished(&self) {
@@ -141,7 +147,7 @@ pub(crate) fn services(app: &AppHandle) -> Result<&Services, String> {
 /// path (`AppDb::open_at`, a data-dir copy loop) and its tests can take one.
 /// [`Progress::none`] is the form for callers outside startup.
 pub(crate) struct Progress<'a> {
-    cancel: Option<&'a AtomicBool>,
+    boot: Option<&'a Boot>,
 }
 
 impl<'a> Progress<'a> {
@@ -151,13 +157,11 @@ impl<'a> Progress<'a> {
         reason = "first callers are the harnesses of `AppDb::open_at` (#204)"
     )]
     pub(crate) fn none() -> Self {
-        Self { cancel: None }
+        Self { boot: None }
     }
 
     fn of(boot: &'a Boot) -> Self {
-        Self {
-            cancel: Some(&boot.cancel),
-        }
+        Self { boot: Some(boot) }
     }
 
     /// Report progress within the current step. Nothing listens yet; the
@@ -168,11 +172,22 @@ impl<'a> Progress<'a> {
         log::debug!("startup: {done}/{total}");
     }
 
+    /// Record the phase startup is in. The runner sets each step's phase; a
+    /// step that spans two (`AppDb::open_at` moving on to a backup or
+    /// migration) moves it on itself, so a failure reports the right one.
+    pub(crate) fn phase(&self, phase: Phase) {
+        if let Some(boot) = self.boot
+            && let Ok(mut current) = boot.phase.lock()
+        {
+            *current = Some(phase);
+        }
+    }
+
     /// Whether shutdown has asked startup to stop. Long steps check it
     /// between files or chunks.
     pub(crate) fn cancelled(&self) -> bool {
-        self.cancel
-            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        self.boot
+            .is_some_and(|boot| boot.cancel.load(Ordering::Relaxed))
     }
 }
 
@@ -217,8 +232,12 @@ fn run_steps(steps: &[Step], ctx: &mut Ctx<'_>) -> Result<(), String> {
         if ctx.progress.cancelled() {
             return Err(format!("{:?}: startup cancelled", step.phase));
         }
+        ctx.progress.phase(step.phase);
         let started = Instant::now();
-        (step.run)(ctx).map_err(|e| format!("{:?}: {}: {e}", step.phase, step.name))?;
+        (step.run)(ctx).map_err(|e| {
+            let phase = ctx.boot.phase().unwrap_or(step.phase);
+            format!("{phase:?}: {}: {e}", step.name)
+        })?;
         log::info!("startup: {} ({:?})", step.name, started.elapsed());
     }
     Ok(())
