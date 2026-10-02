@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.6.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.5.0...course-classifier-v0.6.0) (2026-10-02)
+
+
+### Features
+
+* add CCM Reference viewer and bundled 2010 CCM report ([#190](https://github.com/fspp-epidept/college-course-map/issues/190)) ([4dcf6b7](https://github.com/fspp-epidept/college-course-map/commit/4dcf6b77c72492746d04454a2bf52791f21d274a))
+* back up the database before upgrades and refuse newer data ([#245](https://github.com/fspp-epidept/college-course-map/issues/245)) ([73eb573](https://github.com/fspp-epidept/college-course-map/commit/73eb5730e05e8e19b75e5071ccfca30a100e9062))
+* CSV import pre-flight with encoding detection ([#182](https://github.com/fspp-epidept/college-course-map/issues/182)) ([1b5d202](https://github.com/fspp-epidept/college-course-map/commit/1b5d2022f26cc2a1dbcfd59a35d98d698a1e1330))
+* hold an instance lock on the data dir at startup ([#234](https://github.com/fspp-epidept/college-course-map/issues/234)) ([24e833d](https://github.com/fspp-epidept/college-course-map/commit/24e833d5104f90f8a98a1c7ef33ae3554dcf0450)), closes [#233](https://github.com/fspp-epidept/college-course-map/issues/233)
+* keep the input profile on imported datasets ([#221](https://github.com/fspp-epidept/college-course-map/issues/221)) ([8ee9a38](https://github.com/fspp-epidept/college-course-map/commit/8ee9a38c58e657c5521a2b436ffbe97a6f1f5654))
+* open the window first and show a boot screen ([#241](https://github.com/fspp-epidept/college-course-map/issues/241)) ([8e6e1cb](https://github.com/fspp-epidept/college-course-map/commit/8e6e1cb856839adecccf0a4eca27e636454111d7))
+* profile subject, catalog, and title before import ([#220](https://github.com/fspp-epidept/college-course-map/issues/220)) ([094bc12](https://github.com/fspp-epidept/college-course-map/commit/094bc129f7fe955bbd04a656d5664457e0390166))
+* reset app data in-app and on Windows uninstall ([#236](https://github.com/fspp-epidept/college-course-map/issues/236)) ([3ab93ac](https://github.com/fspp-epidept/college-course-map/commit/3ab93ac1b22922633dd86474cf673ab4b7cdb90b))
+* show model inputs and warnings before classifying ([#219](https://github.com/fspp-epidept/college-course-map/issues/219)) ([98ee45f](https://github.com/fspp-epidept/college-course-map/commit/98ee45f5d7d035b84c30a9b4447b8a82d3589177))
+* sign and notarize macOS release builds ([#191](https://github.com/fspp-epidept/college-course-map/issues/191)) ([74a53ca](https://github.com/fspp-epidept/college-course-map/commit/74a53ca8a34eeceaa48579f30404884881493b4f))
+
+
+### Bug Fixes
+
+* drop fabricated 4-digit CCM titles from export and results ([#181](https://github.com/fspp-epidept/college-course-map/issues/181)) ([2471f4e](https://github.com/fspp-epidept/college-course-map/commit/2471f4eee565d6967733251114e7339ceb5fb5b7))
+* focus the running app on a second launch ([#223](https://github.com/fspp-epidept/college-course-map/issues/223)) ([20d4d40](https://github.com/fspp-epidept/college-course-map/commit/20d4d40d8708d5c99eaddbef5f154b3d8b881d73))
+* keep large app data out of the Windows Roaming profile ([#235](https://github.com/fspp-epidept/college-course-map/issues/235)) ([b82aece](https://github.com/fspp-epidept/college-course-map/commit/b82aecea6a0630e18dd04f2a9c1c2d31efbdde58))
+* mark imports interrupted by a quit or crash as failed ([#240](https://github.com/fspp-epidept/college-course-map/issues/240)) ([b1eff9a](https://github.com/fspp-epidept/college-course-map/commit/b1eff9a06b434ea3632dbf9e5c83671b3dad70c4))
+* route every macOS native menu item to its in-app action ([#222](https://github.com/fspp-epidept/college-course-map/issues/222)) ([4dbb90d](https://github.com/fspp-epidept/college-course-map/commit/4dbb90d62bd44bc253fe78280d432cfa9875717f))
+* shut down cleanly on termination signals ([#228](https://github.com/fspp-epidept/college-course-map/issues/228)) ([914c2ae](https://github.com/fspp-epidept/college-course-map/commit/914c2ae3cbfe304c569eea5280fa6abd525c53c6))
+
 ## [0.5.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.4.0...course-classifier-v0.5.0) (2026-08-26)
 
 
