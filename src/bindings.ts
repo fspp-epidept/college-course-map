@@ -218,6 +218,18 @@ async validateImport(path: string, encoding: TextEncoding) : Promise<Result<Vali
 }
 },
 /**
+ * Write the reset marker. The caller relaunches; the next process does the
+ * deleting.
+ */
+async requestReset(keepSettings: boolean) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("request_reset", { keepSettings }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Download + verify + install a runtime pack into the data dir. The new pack
  * is picked up at the next app launch (init-once); the UI says so. Connected
  * builds only — airgap has no network by definition.

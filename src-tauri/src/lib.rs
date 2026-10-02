@@ -14,6 +14,7 @@ mod models;
 mod paths;
 mod preflight;
 mod profile;
+mod reset;
 // Public for the resume verification harness (examples/check_resume.rs,
 // EPI-39), which drives the real RunPipeline against a scratch database.
 pub mod runs;
@@ -55,6 +56,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             models::reload_models,
             preflight::inspect_csv,
             preflight::validate_import,
+            reset::request_reset,
             runtime::download_runtime,
             runtime::relaunch_app,
             runtime::runtime_status,

@@ -28,7 +28,7 @@ const PRODUCT_DIR: &str = "college-course-map";
 
 /// What `config.rs` keeps in the config dir. Before the split, Windows kept
 /// data beside these in Roaming; everything else there is data.
-const CONFIG_ENTRIES: [&str; 2] = ["settings.json", "themes"];
+pub(crate) const CONFIG_ENTRIES: [&str; 2] = ["settings.json", "themes"];
 
 /// Old home of the `CoreML` compile cache, inside the data dir. Deleted on
 /// every platform: the cache now lives under [`coreml_cache_dir`].

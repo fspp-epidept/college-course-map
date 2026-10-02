@@ -40,7 +40,7 @@ use crate::{
     db::{self, AppDb},
     inference, manifest,
     manifest::ModelCatalog,
-    models, runs, runtime,
+    models, reset, runs, runtime,
 };
 
 /// The startup phases, in order. The names are the ones the boot screen
@@ -81,10 +81,24 @@ const PRE_LOGGER: &[Step] = &[
         name: "acquire instance lock",
         run: acquire_instance_lock,
     },
+    // A pending "Reset app data" (#206): renames only, so it is fast and
+    // safe to kill. After the lock, so the previous process is gone; before
+    // the log plugin, which would reopen `logs/` in the data dir.
+    Step {
+        phase: Phase::MigratingData,
+        name: "apply pending reset",
+        run: apply_reset,
+    },
 ];
 
 /// Steps that run from `setup()`, in order.
 const STEPS: &[Step] = &[
+    // Before the migration, which would otherwise move a Roaming trash dir.
+    Step {
+        phase: Phase::MigratingData,
+        name: "sweep reset trash",
+        run: sweep_reset_trash,
+    },
     Step {
         phase: Phase::MigratingData,
         name: "migrate data",
@@ -405,13 +419,16 @@ const LOCK_RETRY: Duration = Duration::from_millis(100);
 const LOCK_BUSY: &str =
     "The app is already running or still closing. Wait a moment and start it again.";
 
+/// The instance lock's file name, beside the database.
+pub(crate) const INSTANCE_LOCK: &str = "session.lock";
+
 /// Take `session.lock` beside the database and keep it on [`Boot`].
 fn acquire_instance_lock(ctx: &mut Ctx<'_>) -> Result<(), String> {
     let db_path = db::db_path()?;
     let dir = db_path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", db_path.display()))?;
-    let file = lock_instance(&dir.join("session.lock"), LOCK_WAIT)?;
+    let file = lock_instance(&dir.join(INSTANCE_LOCK), LOCK_WAIT)?;
     ctx.app
         .state::<Boot>()
         .instance_lock
@@ -464,6 +481,36 @@ fn migrate_data(ctx: &mut Ctx<'_>) -> Result<(), String> {
                     .push(format!("Moving app data to its new location: {msg}"));
             }
         }
+    }
+    Ok(())
+}
+
+/// Apply a pending reset (#206). Not fatal: a failure is a notice, and the
+/// marker is consumed either way.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every step row shares one signature"
+)]
+fn apply_reset(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    // Pre-logger: a notice is logged once the logger is up. Success shows
+    // in the log as the trash sweep that follows.
+    if let Err(e) = reset::apply_pending() {
+        ctx.notices
+            .push(format!("Resetting app data did not finish: {e}"));
+    }
+    Ok(())
+}
+
+/// Delete what a reset moved aside (#206). Not fatal: retried next launch.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "every step row shares one signature"
+)]
+fn sweep_reset_trash(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    if let Err(e) = reset::sweep_trash() {
+        log::warn!("reset: {e}");
+        ctx.notices
+            .push(format!("Deleting reset app data did not finish: {e}"));
     }
     Ok(())
 }
