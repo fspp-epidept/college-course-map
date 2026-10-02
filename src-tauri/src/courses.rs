@@ -22,9 +22,8 @@ pub(crate) struct ListCoursesRequest {
     /// Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
     /// mean "from the start". The frontend hands back the row index of the
     /// last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
-    /// `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
-    /// `(dataset_id, row_index)` index and scans the whole partition;
-    /// the range predicate lets the index drive the scan.
+    /// `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` scans the whole
+    /// partition; the range predicate lets the scan skip to the cursor.
     pub cursor: Option<i64>,
     pub limit: u32,
 }
@@ -100,9 +99,9 @@ pub(crate) fn list_courses_with_results(
     };
 
     // Step 1: page the courses table on its own via key-set cursor. The
-    // (dataset_id, row_index) index drives the WHERE + ORDER BY directly,
-    // so the scan reads exactly LIMIT rows starting at the cursor — no
-    // 2M-row TopN like OFFSET would force, even for the first page.
+    // range predicate keeps the scan to the rows at the cursor — no 2M-row
+    // TopN like OFFSET would force, even for the first page. No index is
+    // involved (0008 dropped it): a page measured ~2 ms on 2.9M rows.
     let cursor = req.cursor.unwrap_or(0);
     let mut stmt = conn
         .prepare(

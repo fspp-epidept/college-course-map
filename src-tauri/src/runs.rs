@@ -18,13 +18,14 @@ use std::{
 };
 
 use chrono::Utc;
-use duckdb::params;
+use duckdb::{OptionalExt as _, params};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Manager, State};
 use uuid::Uuid;
 
 use crate::{
+    activity::Activity,
     boot::{self, Boot, Services},
     db::AppDb,
     format::{CourseInput, format_input},
@@ -133,6 +134,8 @@ pub(crate) struct RunSummary {
     /// (`model_superseded`, `model_not_loaded`). Empty when resumable, and
     /// for states resume doesn't apply to.
     pub resume_blockers: Vec<String>,
+    /// The run used a model version this build no longer ships (#202).
+    pub superseded: bool,
 }
 
 /// Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
@@ -163,6 +166,15 @@ pub(crate) struct RunDetail {
     pub resume_count: i64,
     pub resumable: bool,
     pub resume_blockers: Vec<String>,
+    pub superseded: bool,
+}
+
+/// Whether a run used a model version this build no longer ships (#202): a
+/// recorded model id that isn't the manifest's active row for its digit
+/// level, or no recorded model at all. Computed at read time, like
+/// resumability.
+fn is_superseded(model_ids: &[i64], catalog: &ModelCatalog) -> bool {
+    model_ids.is_empty() || model_ids.iter().any(|id| catalog.level_of(*id).is_none())
 }
 
 /// Read-time resumability check (EPI-69). A run is resumable iff it stopped
@@ -290,6 +302,7 @@ pub(crate) fn list_runs(
                     resume_count: row.get(12)?,
                     resumable: false,
                     resume_blockers: Vec::new(),
+                    superseded: false,
                 },
                 model_type,
                 model_ids_json,
@@ -311,6 +324,7 @@ pub(crate) fn list_runs(
             assess_resumability(&summary.state, &model_ids, catalog, &store);
         summary.resumable = resumable;
         summary.resume_blockers = blockers;
+        summary.superseded = is_superseded(&model_ids, catalog);
         Ok(summary)
     })
     .collect()
@@ -420,12 +434,14 @@ fn query_run_detail(
             resume_count: row.resume_count,
             resumable: false,
             resume_blockers: Vec::new(),
+            superseded: false,
         },
         model_ids,
     )))
 }
 
-/// Stamp read-time resumability onto a mapped detail row.
+/// Stamp the read-time facts (resumability, superseded) onto a mapped
+/// detail row.
 fn finish_run_detail(
     (mut detail, model_ids): (RunDetail, Vec<i64>),
     catalog: &ModelCatalog,
@@ -434,6 +450,7 @@ fn finish_run_detail(
     let (resumable, blockers) = assess_resumability(&detail.state, &model_ids, catalog, store);
     detail.resumable = resumable;
     detail.resume_blockers = blockers;
+    detail.superseded = is_superseded(&model_ids, catalog);
     detail
 }
 
@@ -520,7 +537,10 @@ pub(crate) struct StartRunResponse {
 /// counts if its worker is registered — a row without a flag is a crash
 /// leftover, which must not wedge the app ([`sweep_orphaned_runs`] flips
 /// those to `interrupted` at startup).
-fn ensure_no_active_run(conn: &duckdb::Connection, registry: &RunRegistry) -> Result<(), String> {
+pub(crate) fn ensure_no_active_run(
+    conn: &duckdb::Connection,
+    registry: &RunRegistry,
+) -> Result<(), String> {
     let mut stmt = conn
         .prepare(
             "SELECT r.id, d.title FROM runs r
@@ -567,8 +587,12 @@ pub(crate) fn start_run(
     store: State<'_, ModelStore>,
     boot: State<'_, Boot>,
     runs: State<'_, RunRegistry>,
+    activity: State<'_, Activity>,
 ) -> Result<StartRunResponse, String> {
     let Services { db, catalog, .. } = boot.ready()?;
+    // Not during a delete, prune or compaction (activity.rs): checked here
+    // so the call fails at once, and again under the write lock below.
+    activity.ensure_idle()?;
     // Fail fast if models aren't ready — caller gets a synchronous error
     // rather than a "queued then mysteriously failed" run. The store starts
     // empty on a connected-build first run (EPI-56) until download + load.
@@ -596,6 +620,7 @@ pub(crate) fn start_run(
     }
 
     let conn = db.rw()?;
+    activity.ensure_idle()?;
 
     // Verify the dataset still exists before we try to FK-reference it from a
     // new runs row. Stale frontend state (e.g. a tab persisted across a
@@ -614,6 +639,7 @@ pub(crate) fn start_run(
             req.dataset_id
         ));
     }
+    crate::datasets::ensure_not_deleting(&conn, &req.dataset_id)?;
 
     // One run at a time, app-wide (EPI-68 decision, 2026-07-03; queued runs
     // are EPI-70). The check runs on the held RW connection, so it's atomic
@@ -711,9 +737,12 @@ pub(crate) fn resume_run(
     store: State<'_, ModelStore>,
     boot: State<'_, Boot>,
     runs: State<'_, RunRegistry>,
+    activity: State<'_, Activity>,
 ) -> Result<StartRunResponse, String> {
     let Services { db, catalog, .. } = boot.ready()?;
+    activity.ensure_idle()?;
     let conn = db.rw()?;
+    activity.ensure_idle()?;
 
     let (state, dataset_id, model_ids_json, rows_total): (String, String, String, Option<i64>) =
         conn.query_row(
@@ -729,6 +758,7 @@ pub(crate) fn resume_run(
         ));
     }
     ensure_no_active_run(&conn, &runs)?;
+    crate::datasets::ensure_not_deleting(&conn, &dataset_id)?;
 
     // Same checks assess_resumability advertises (EPI-69) — the command is
     // the enforcement point, the flags are the preview. Every recorded model
@@ -804,6 +834,52 @@ pub(crate) fn resume_run(
 )]
 pub(crate) fn pause_run(run_id: String, registry: State<'_, RunRegistry>) -> bool {
     registry.cancel(&run_id)
+}
+
+/// Delete a run's record (#198). Refused while the run is executing; any
+/// other state goes. The classifications it computed stay in the cache —
+/// they are keyed by `(model_id, content_hash)`, not by run — and the next
+/// run reuses them. Deleting a run that is already gone is not an error.
+#[tauri::command]
+#[specta::specta]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub(crate) fn delete_run(
+    run_id: String,
+    boot: State<'_, Boot>,
+    registry: State<'_, RunRegistry>,
+    activity: State<'_, Activity>,
+) -> Result<(), String> {
+    activity.ensure_idle()?;
+    let conn = boot.ready()?.db.rw()?;
+    activity.ensure_idle()?;
+    delete_run_row(&conn, &registry, &run_id)
+}
+
+fn delete_run_row(
+    conn: &duckdb::Connection,
+    registry: &RunRegistry,
+    run_id: &str,
+) -> Result<(), String> {
+    // `running` in the row covers the moment between `resume_run` marking it
+    // and the worker registering; the registry covers everything after.
+    let state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM runs WHERE id = ?",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("run {run_id}: {e}"))?;
+    if state.as_deref() == Some("running") || registry.is_active(run_id) {
+        return Err("This run is still running. Pause it before deleting it.".to_owned());
+    }
+    conn.execute("DELETE FROM runs WHERE id = ?", params![run_id])
+        .map_err(|e| format!("delete run {run_id}: {e}"))?;
+    log::info!("run {run_id}: deleted");
+    Ok(())
 }
 
 /// Tauri-side wrapper for the background worker: resolves managed state,
@@ -1384,4 +1460,88 @@ fn next_miss_window(db: &AppDb, cursor: &str) -> Result<Vec<SelectedCourse>, Str
     .map_err(|e| format!("query miss window: {e}"))?
     .collect::<Result<Vec<_>, _>>()
     .map_err(|e| format!("collect miss window: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunRegistry, delete_run_row, is_superseded};
+    use crate::boot::Progress;
+
+    /// A run and one cached result it computed, on a migrated database.
+    fn seeded() -> Result<duckdb::Connection, String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        crate::db::migrate(&conn, &Progress::none())?;
+        conn.execute_batch(
+            "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
+             VALUES ('ds', 't', 'file', now(), 1, 'ready');
+             INSERT INTO models (id, hf_repo, hf_revision, model_type, precision)
+             VALUES (1, 'r', 'v', '6', 'f32');
+             INSERT INTO runs (id, dataset_id, state, model_ids, created_at)
+             VALUES ('run', 'ds', 'completed', '[1]', now());
+             INSERT INTO inference_results
+                (model_id, content_hash, classification, computed_at, computed_by_run)
+             VALUES (1, 'h', '11.0701', now(), 'run');",
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(conn)
+    }
+
+    fn count(conn: &duckdb::Connection, table: &str) -> Result<i64, String> {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Deleting a run removes its row and nothing else: the result it
+    /// computed stays in the cache for the next run to reuse. Deleting it
+    /// again is a no-op.
+    #[test]
+    fn delete_run_keeps_cached_results() -> Result<(), String> {
+        let conn = seeded()?;
+        let registry = RunRegistry::default();
+        delete_run_row(&conn, &registry, "run")?;
+        assert_eq!(count(&conn, "runs")?, 0);
+        assert_eq!(count(&conn, "inference_results")?, 1);
+        delete_run_row(&conn, &registry, "run")
+    }
+
+    /// A run with a live worker, or one marked `running`, is refused.
+    #[test]
+    fn delete_run_refuses_a_running_run() -> Result<(), String> {
+        let conn = seeded()?;
+        let registry = RunRegistry::default();
+        registry.register("run");
+        assert!(delete_run_row(&conn, &registry, "run").is_err());
+        registry.remove("run");
+
+        conn.execute_batch("UPDATE runs SET state = 'running'")
+            .map_err(|e| e.to_string())?;
+        assert!(delete_run_row(&conn, &registry, "run").is_err());
+        assert_eq!(count(&conn, "runs")?, 1);
+        Ok(())
+    }
+
+    /// A run is superseded when any model it used is no longer the
+    /// manifest's row for its level, or when it recorded no model (#202).
+    #[test]
+    fn superseded_means_a_model_the_manifest_no_longer_resolves() -> Result<(), String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        crate::db::migrate(&conn, &Progress::none())?;
+        let catalog = crate::manifest::resolve_model_rows(&conn, crate::manifest::load()?)?;
+        let current: Vec<i64> = catalog
+            .levels()
+            .into_iter()
+            .filter_map(|level| catalog.model_id(level))
+            .collect();
+        assert_eq!(current.len(), 3);
+        assert!(!is_superseded(&current, &catalog));
+        // An id the manifest doesn't resolve to: an earlier revision's row.
+        let old = current.iter().max().ok_or("no model")? + 1;
+        assert!(is_superseded(&[old], &catalog));
+        assert!(is_superseded(
+            &[old, *current.first().ok_or("no model")?],
+            &catalog
+        ));
+        assert!(is_superseded(&[], &catalog));
+        Ok(())
+    }
 }

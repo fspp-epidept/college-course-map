@@ -537,6 +537,9 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
     // Tracks per-run cancellation flags so `pause_run` can signal an
     // in-flight worker.
     app.manage(runs::RunRegistry::default());
+    // The maintenance gate: one exclusive delete, prune or compaction at a
+    // time, and no new writes while it runs.
+    app.manage(crate::activity::Activity::default());
     // macOS keeps native chrome: the base window config is frameless (for
     // the custom Windows/Linux titlebar), so re-enable decorations. See
     // decision #102.

@@ -2,10 +2,11 @@ import type { Component } from "vue";
 import AboutSettings from "../views/settings/AboutSettings.vue";
 import GeneralSettings from "../views/settings/GeneralSettings.vue";
 import InferenceSettings from "../views/settings/InferenceSettings.vue";
+import StorageSettings from "../views/settings/StorageSettings.vue";
 import ThemeSettings from "../views/settings/ThemeSettings.vue";
 
 /** Stable id for each Settings sub-section. Persisted in the workspace store. */
-export type SettingsSectionId = "general" | "inference" | "theme" | "about";
+export type SettingsSectionId = "general" | "inference" | "theme" | "storage" | "about";
 
 export interface SettingsSectionDef {
   id: SettingsSectionId;
@@ -36,6 +37,12 @@ export const settingsSections: SettingsSectionDef[] = [
     label: "Appearance",
     icon: "i-lucide-palette",
     component: ThemeSettings,
+  },
+  {
+    id: "storage",
+    label: "Storage",
+    icon: "i-lucide-hard-drive",
+    component: StorageSettings,
   },
   {
     id: "about",

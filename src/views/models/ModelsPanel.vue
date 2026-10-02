@@ -20,12 +20,18 @@ const backendDownloading = useDownloading();
 const downloading = computed(() => backendDownloading.value || download.isPending.value);
 const load = useLoadModels();
 
-const allPresent = computed(
-  () => models.value?.every((m) => m.filesPresent === m.filesTotal) ?? false,
-);
-const anyMissing = computed(
-  () => models.value?.some((m) => m.filesPresent < m.filesTotal) ?? false,
-);
+// A model downloaded for an earlier release (#202) needs downloading again
+// even when its files look complete: a re-pinned model can be the same size.
+function needsDownload(m: {
+  filesPresent: number;
+  filesTotal: number;
+  updateRequired: boolean;
+}): boolean {
+  return m.filesPresent < m.filesTotal || m.updateRequired;
+}
+
+const allPresent = computed(() => models.value?.every((m) => !needsDownload(m)) ?? false);
+const anyMissing = computed(() => models.value?.some(needsDownload) ?? false);
 const loaded = computed(() => models.value?.[0]?.loaded ?? false);
 const loading = computed(() => models.value?.[0]?.loading ?? false);
 
@@ -66,13 +72,15 @@ function statusLabel(m: {
   digitLevel: number;
   filesPresent: number;
   filesTotal: number;
+  updateRequired: boolean;
   download: { file: string; received: number; total: number } | null;
 }): string {
   if (loaded.value) return "loaded";
   const p = pct(m);
-  if (downloading.value && p !== null && m.filesPresent < m.filesTotal) {
+  if (downloading.value && p !== null && needsDownload(m)) {
     return `downloading ${p}%`;
   }
+  if (m.updateRequired) return "update required";
   if (m.filesPresent === m.filesTotal) return "on disk";
   if (m.filesPresent === 0) return "missing";
   return `${m.filesPresent}/${m.filesTotal} files`;
@@ -150,12 +158,16 @@ function statusLabel(m: {
               {{ statusLabel(m) }}
             </span>
           </div>
-          <template v-if="downloading && pct(m) !== null && m.filesPresent < m.filesTotal">
+          <template v-if="downloading && pct(m) !== null && needsDownload(m)">
             <UProgress :model-value="pct(m) ?? 0" :max="100" size="sm" />
             <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
               {{ downloadDetail(m) }}
             </span>
           </template>
+          <p v-if="m.updateRequired && !downloading" class="text-xs text-(--ui-text-muted)">
+            A newer version of this model ships with this release. Download it to keep
+            classifying.
+          </p>
           <div class="text-xs text-(--ui-text-dimmed) flex flex-wrap gap-x-4">
             <span>{{ m.hfRepo }}</span>
             <span class="font-mono">{{ m.revision.slice(0, 12) }}</span>

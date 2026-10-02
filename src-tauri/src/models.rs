@@ -18,12 +18,12 @@ use tauri_specta::Event;
 use crate::{
     boot::{self, Boot},
     inference::{self, ModelStore},
-    manifest::files_present,
+    manifest::{files_present, update_required},
 };
 
 // Download-path-only imports; the airgap flavor compiles the downloader out.
 #[cfg(not(feature = "airgap"))]
-use crate::manifest::ManifestModel;
+use crate::manifest::{Manifest, ManifestModel, installed_revision, mark_revision};
 #[cfg(not(feature = "airgap"))]
 use sha2::{Digest as _, Sha256};
 #[cfg(not(feature = "airgap"))]
@@ -131,6 +131,10 @@ impl DownloadState {
 
 #[derive(Type, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent status flags the Models panel reads one by one, not a state machine"
+)]
 pub(crate) struct ModelStatus {
     pub digit_level: u8,
     pub display_name: String,
@@ -140,6 +144,10 @@ pub(crate) struct ModelStatus {
     /// Files on disk with the manifest's exact size. Full sha256 verification
     /// happens during download, not on status polls.
     pub files_present: u32,
+    /// The files on disk were downloaded for an earlier release's revision
+    /// of this model (#202). It can't be loaded until downloaded again,
+    /// even when `files_present` says every file is there.
+    pub update_required: bool,
     pub total_bytes: f64,
     pub loaded: bool,
     pub loading: bool,
@@ -198,6 +206,7 @@ pub(crate) fn models_status(
             revision: entry.revision.clone(),
             files_total: u32::try_from(entry.files.len()).unwrap_or(u32::MAX),
             files_present: u32::try_from(files_present(&root, entry)).unwrap_or(u32::MAX),
+            update_required: update_required(&root, entry),
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "file sizes are far below f64's 2^53 exact-integer range"
@@ -264,6 +273,22 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
     let _ = ModelsStateChanged {}.emit(app);
     let result = (|| {
         let root = active_models_root(app)?;
+        let services = boot::services(app)?;
+        // Never load another revision's files (#202): their output would be
+        // cached under this revision's model id.
+        if let Some(stale) = services
+            .catalog
+            .manifest
+            .model
+            .iter()
+            .find(|entry| update_required(&root, entry))
+        {
+            return Err(format!(
+                "{} on this computer is an earlier version. Download the current one \
+                 from the Models panel.",
+                stale.display_name
+            ));
+        }
         // The EP priority list and CPU thread cap are read at load time, so a
         // settings change takes effect by re-triggering a model load — no
         // restart. (Switching runtime *packs* is the part that needs a
@@ -272,7 +297,7 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
         // Only providers the loaded pack carries are ever attempted
         // (EPI-104): a settings entry the pack lacks is dropped here, not
         // discovered by a failed registration.
-        let runtime = &boot::services(app)?.runtime;
+        let runtime = &services.runtime;
         let eps = runtime.registrable(&settings.execution_providers);
         for skipped in settings
             .execution_providers
@@ -313,20 +338,38 @@ pub(crate) fn load_now(app: &AppHandle) -> Result<(), String> {
     result
 }
 
+/// Stamp the manifest revision on model folders that have every file but no
+/// marker (#202): installs from before the marker existed, and
+/// `task models:install`. Sizes are all there is to go on short of hashing
+/// 1.8 GB at startup; from here on the marker says which revision the files
+/// are. Best-effort: an unwritable folder is tried again next launch.
+#[cfg(not(feature = "airgap"))]
+fn backfill_revisions(root: &std::path::Path, manifest: &Manifest) {
+    for entry in &manifest.model {
+        if installed_revision(root, entry).is_none()
+            && files_present(root, entry) == entry.files.len()
+            && let Err(e) = mark_revision(root, entry)
+        {
+            log::warn!("models: revision marker not written: {e}");
+        }
+    }
+}
+
 /// Startup hook: load in the background when every manifest file is already
-/// on disk (always true for airgap; true post-first-run for connected). Keeps
-/// the window responsive during the ~15 s load instead of blocking setup.
+/// on disk (always true for airgap; true post-first-run for connected) and
+/// none belongs to another revision. Keeps the window responsive during the
+/// ~15 s load instead of blocking setup.
 pub(crate) fn autoload_if_present(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         let all_present = (|| -> Result<bool, String> {
             let root = active_models_root(&app)?;
             let catalog = &boot::services(&app)?.catalog;
-            Ok(catalog
-                .manifest
-                .model
-                .iter()
-                .all(|entry| files_present(&root, entry) == entry.files.len()))
+            #[cfg(not(feature = "airgap"))]
+            backfill_revisions(&root, &catalog.manifest);
+            Ok(catalog.manifest.model.iter().all(|entry| {
+                files_present(&root, entry) == entry.files.len() && !update_required(&root, entry)
+            }))
         })();
         match all_present {
             Ok(true) => {
@@ -400,6 +443,8 @@ fn download_all(app: &AppHandle) -> Result<(), String> {
             changed = true;
             let _ = ModelsStateChanged {}.emit(app);
         }
+        // Every file of this model has just passed its sha256 check.
+        mark_revision(&root, entry)?;
     }
     // A changed model file invalidates the compiled CoreML cache, which ONNX
     // Runtime keys by path and never invalidates itself (EPI-108).
@@ -660,6 +705,57 @@ mod tests {
         assert!(!state.cancelled());
         assert!(state.snapshot(6).is_none());
         state.end();
+    }
+
+    /// A folder with every file and no marker gets the manifest revision;
+    /// an incomplete folder gets none, and a marker naming another revision
+    /// is never overwritten (#202).
+    #[test]
+    fn backfill_stamps_only_complete_unmarked_folders() -> Result<(), String> {
+        use crate::manifest::{
+            Manifest, ManifestFile, ManifestModel, installed_revision, mark_revision,
+        };
+
+        let root = std::env::temp_dir().join(format!("ccm-backfill-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let model = |digit_level: u8, subdir: &str, revision: &str| ManifestModel {
+            digit_level,
+            app_subdir: subdir.to_owned(),
+            display_name: subdir.to_owned(),
+            hf_repo: "r".to_owned(),
+            revision: revision.to_owned(),
+            files: vec![ManifestFile {
+                name: "model.onnx".to_owned(),
+                sha256: String::new(),
+                size: 1,
+            }],
+        };
+        let manifest = Manifest {
+            model: vec![
+                model(2, "complete", "new"),
+                model(4, "incomplete", "new"),
+                model(6, "stale", "new"),
+            ],
+        };
+        for subdir in ["complete", "incomplete", "stale"] {
+            std::fs::create_dir_all(root.join(subdir)).map_err(|e| e.to_string())?;
+        }
+        for subdir in ["complete", "stale"] {
+            std::fs::write(root.join(subdir).join("model.onnx"), b"x")
+                .map_err(|e| e.to_string())?;
+        }
+        mark_revision(&root, &model(6, "stale", "old"))?;
+
+        super::backfill_revisions(&root, &manifest);
+
+        let marker = |index: usize| -> Result<Option<String>, String> {
+            let entry = manifest.model.get(index).ok_or("no entry")?;
+            Ok(installed_revision(&root, entry))
+        };
+        assert_eq!(marker(0)?.as_deref(), Some("new"));
+        assert_eq!(marker(1)?, None);
+        assert_eq!(marker(2)?.as_deref(), Some("old"));
+        std::fs::remove_dir_all(&root).map_err(|e| e.to_string())
     }
 
     /// EPI-75: the sweep removes per-attempt temps (and legacy `.part`

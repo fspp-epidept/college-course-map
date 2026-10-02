@@ -25,6 +25,13 @@
 //! `<db>.pre-<app version>.bak` first. The `app_meta` table records which
 //! app and `DuckDB` version last opened the file. Like `schema_version` it
 //! is the runner's own bookkeeping, created here and not by a migration.
+//!
+//! Reclaiming disk space (#201): `DuckDB` never shrinks its file (`VACUUM`
+//! reclaims nothing), so the only way is to write the live rows into a fresh
+//! database and put it in place of the old one. [`copy_database`] makes the
+//! copy, [`stage_compaction`] leaves it beside the database under a marker
+//! name, and [`apply_pending_compaction`] swaps it in at the next open,
+//! before anything has the database open.
 
 use std::{
     fs,
@@ -38,6 +45,35 @@ use duckdb::{Connection, params};
 use crate::boot::{Phase, Progress};
 
 const DB_FILE: &str = "app.duckdb";
+
+/// Suffix of a compaction copy still being written. Never applied; swept at
+/// the next open.
+const COMPACT_STAGING: &str = ".compact.part";
+/// Suffix of a finished, verified compaction copy waiting to be swapped in
+/// at the next open. The name is the marker.
+const COMPACT_READY: &str = ".compact";
+/// Name the copy is attached under while it is written.
+const COPY_ALIAS: &str = "compact_copy";
+
+/// Every table of the app database, parents before the tables that reference
+/// them. [`copy_database`] copies in this order, because `DuckDB`'s own
+/// `COPY FROM DATABASE` ignores foreign keys and fails on this schema. A new
+/// table must be added here: the copy refuses a database with a table it
+/// doesn't list, and `copy_order_lists_every_table` fails first.
+const COPY_ORDER: &[&str] = &[
+    "schema_version",
+    "app_meta",
+    "source_files",
+    "datasets",
+    "courses",
+    "models",
+    "runs",
+    "inference_results",
+    "ccm_taxonomy",
+];
+
+/// Set-aside WALs other than the newest are deleted once they are this old.
+const SET_ASIDE_WAL_MAX_AGE: std::time::Duration = std::time::Duration::from_hours(30 * 24);
 
 /// Ordered list of migration scripts. Add new entries — never edit or reorder
 /// existing ones. Version numbers are monotonic and gap-free by convention.
@@ -66,6 +102,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         7,
         include_str!("../migrations/0007_dataset_input_profile.sql"),
+    ),
+    (
+        8,
+        include_str!("../migrations/0008_cache_without_run_fk.sql"),
     ),
 ];
 
@@ -117,6 +157,9 @@ impl AppDb {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
         }
+        // First, before anything opens the file: the upgrade guard and
+        // backup below must see the swapped database.
+        apply_pending_compaction(&path)?;
         let (rw, recovery_notice) = match Connection::open(&path) {
             Ok(conn) => (conn, None),
             Err(e) if is_wal_replay_failure(&e) => {
@@ -133,6 +176,7 @@ impl AppDb {
         };
         let rw = upgrade(rw, &path, app_version, progress)?;
         let ro = rw.try_clone().map_err(|e| e.to_string())?;
+        rotate_set_aside_wals(&path);
         Ok(Self {
             rw: Mutex::new(rw),
             ro: Mutex::new(ro),
@@ -156,6 +200,19 @@ impl AppDb {
         self.rw()?
             .execute_batch("CHECKPOINT")
             .map_err(|e| e.to_string())
+    }
+
+    /// The database file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// A further connection on the same instance, for a long job that must
+    /// not hold the read-write connection while it runs (the compaction
+    /// copy: the exit checkpoint has to get through).
+    pub(crate) fn connect(&self) -> Result<Connection, String> {
+        self.rw()?.try_clone().map_err(|e| e.to_string())
     }
 
     /// Borrow the read-write connection. The mutex is uncontended in single-user
@@ -208,7 +265,7 @@ fn set_aside_wal(db: &Path, cause: &duckdb::Error) -> Result<PathBuf, String> {
 }
 
 /// `DuckDB`'s WAL sits next to the database file as `<db>.wal`.
-fn wal_path(db: &Path) -> PathBuf {
+pub(crate) fn wal_path(db: &Path) -> PathBuf {
     suffixed(db, ".wal")
 }
 
@@ -236,6 +293,292 @@ fn recovery_notice(set_aside: &Path) -> String {
 /// `<local data>/college-course-map/app.duckdb`.
 pub fn db_path() -> Result<PathBuf, String> {
     Ok(crate::paths::data_dir()?.join(DB_FILE))
+}
+
+/// Files beside `db` named `<db file name><infix>…<suffix>`, sorted by name.
+fn siblings(db: &Path, infix: &str, suffix: &str) -> Vec<PathBuf> {
+    let (Some(dir), Some(name)) = (db.parent(), db.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}{infix}", name.to_string_lossy());
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|file| {
+                let file = file.to_string_lossy();
+                file.starts_with(&prefix) && file.ends_with(suffix)
+            })
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The WALs [`set_aside_wal`] has left beside `db`, oldest first.
+pub(crate) fn set_aside_wals(db: &Path) -> Vec<PathBuf> {
+    siblings(db, ".wal.corrupt-", "")
+}
+
+/// The pre-upgrade backups beside `db` (`<db>.pre-<app version>.bak`).
+pub(crate) fn backups(db: &Path) -> Vec<PathBuf> {
+    siblings(db, ".pre-", ".bak")
+}
+
+/// Keep the newest set-aside WAL and delete any other older than
+/// [`SET_ASIDE_WAL_MAX_AGE`] (#201). They are forensic evidence for a replay
+/// failure, not data, and nothing else ever removed them. Best effort.
+fn rotate_set_aside_wals(db: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut wals = set_aside_wals(db);
+    // The suffix is the unix time it was set aside; the newest sorts last.
+    wals.sort_by_key(|path| set_aside_at(path));
+    wals.pop();
+    for path in wals {
+        let age = now.saturating_sub(set_aside_at(&path));
+        if age < SET_ASIDE_WAL_MAX_AGE.as_secs() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => log::info!("startup: removed old set-aside WAL {}", path.display()),
+            Err(e) => log::warn!(
+                "startup: old set-aside WAL {} not removed: {e}",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// When a `<db>.wal.corrupt-<unix seconds>` file was set aside; 0 when the
+/// name doesn't end in a number.
+fn set_aside_at(path: &Path) -> u64 {
+    path.to_string_lossy()
+        .rsplit('-')
+        .next()
+        .and_then(|secs| secs.parse().ok())
+        .unwrap_or(0)
+}
+
+/// A string as a SQL literal body: `ATTACH` takes no parameter, so the path
+/// is inlined with its quotes doubled.
+fn sql_quoted(text: &str) -> String {
+    text.replace('\'', "''")
+}
+
+/// Write a compact, verified copy of the open database to `dest`, which must
+/// not exist. The live file is not touched. `conn` is any connection on the
+/// instance; nothing may be writing meanwhile (the caller holds the
+/// maintenance gate).
+///
+/// `DuckDB`'s one-statement `COPY FROM DATABASE` fails on this schema with a
+/// foreign-key violation, so this copies the schema with it (`(SCHEMA)`,
+/// which also carries sequences at their positions, constraints and
+/// indexes) and then the rows, table by table in [`COPY_ORDER`]. The copy is
+/// checked against the source before it is reported as good; on any failure
+/// the partial file is removed.
+pub(crate) fn copy_database(conn: &Connection, dest: &Path) -> Result<(), String> {
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    conn.execute_batch("CHECKPOINT")
+        .map_err(|e| format!("checkpoint before copy: {e}"))?;
+    conn.execute_batch(&format!(
+        "ATTACH '{}' AS {COPY_ALIAS}",
+        sql_quoted(&dest.to_string_lossy())
+    ))
+    .map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let copied = copy_into_attached(conn);
+    let detached = conn
+        .execute_batch(&format!("DETACH {COPY_ALIAS}"))
+        .map_err(|e| format!("close the copy: {e}"));
+    let result = copied.and(detached).and_then(|()| {
+        if wal_path(dest).exists() {
+            Err("the copy was left with a write-ahead log".to_owned())
+        } else {
+            Ok(())
+        }
+    });
+    if result.is_err() {
+        let _ = fs::remove_file(dest);
+        let _ = fs::remove_file(wal_path(dest));
+    }
+    result
+}
+
+/// The body of [`copy_database`], between `ATTACH` and `DETACH`.
+fn copy_into_attached(conn: &Connection) -> Result<(), String> {
+    let source: String = conn
+        .query_row("SELECT current_database()", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let source = format!("\"{}\"", source.replace('"', "\"\""));
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT table_name FROM duckdb_tables()
+             WHERE database_name = current_database() AND NOT temporary",
+        )
+        .map_err(|e| e.to_string())?;
+    let tables: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    if let Some(unknown) = tables
+        .iter()
+        .find(|table| !COPY_ORDER.contains(&table.as_str()))
+    {
+        return Err(format!("table {unknown} is not in the copy list"));
+    }
+
+    conn.execute_batch(&format!(
+        "COPY FROM DATABASE {source} TO {COPY_ALIAS} (SCHEMA)"
+    ))
+    .map_err(|e| format!("copy schema: {e}"))?;
+
+    for &table in COPY_ORDER
+        .iter()
+        .filter(|table| tables.iter().any(|t| t == *table))
+    {
+        let from = format!("{source}.main.{table}");
+        let to = format!("{COPY_ALIAS}.main.{table}");
+        if table == "datasets" {
+            // A dataset can reference another (`parent_dataset_id`,
+            // `supersedes_id`), and a row inserted in the same statement as
+            // the row it references fails the foreign-key check. So copy in
+            // passes: each takes the rows whose references are already
+            // across, until a pass copies nothing.
+            loop {
+                let copied = conn
+                    .execute(
+                        &format!(
+                            "INSERT INTO {to} SELECT s.* FROM {from} s
+                             WHERE s.id NOT IN (SELECT id FROM {to})
+                               AND (s.parent_dataset_id IS NULL
+                                    OR s.parent_dataset_id IN (SELECT id FROM {to}))
+                               AND (s.supersedes_id IS NULL
+                                    OR s.supersedes_id IN (SELECT id FROM {to}))"
+                        ),
+                        [],
+                    )
+                    .map_err(|e| format!("copy {table}: {e}"))?;
+                if copied == 0 {
+                    break;
+                }
+            }
+        } else {
+            conn.execute_batch(&format!("INSERT INTO {to} SELECT * FROM {from}"))
+                .map_err(|e| format!("copy {table}: {e}"))?;
+        }
+    }
+    conn.execute_batch(&format!("CHECKPOINT {COPY_ALIAS}"))
+        .map_err(|e| format!("checkpoint the copy: {e}"))?;
+
+    // Verify before anyone trusts the copy: every table has every row, and
+    // the runner's bookkeeping came across intact (a copy without `app_meta`
+    // would look like a `DuckDB` version change at its next open).
+    for table in &tables {
+        let count = |database: &str| -> Result<i64, String> {
+            conn.query_row(
+                &format!("SELECT COUNT(*) FROM {database}.main.{table}"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("count {table}: {e}"))
+        };
+        let (expected, actual) = (count(&source)?, count(COPY_ALIAS)?);
+        if expected != actual {
+            return Err(format!(
+                "the copy has {actual} of {expected} rows in {table}"
+            ));
+        }
+    }
+    for (table, columns) in [("schema_version", "version"), ("app_meta", "key, value")] {
+        if !tables.iter().any(|t| t == table) {
+            continue;
+        }
+        let differing: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM (SELECT {columns} FROM {source}.main.{table}
+                     EXCEPT SELECT {columns} FROM {COPY_ALIAS}.main.{table})"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("compare {table}: {e}"))?;
+        if differing != 0 {
+            return Err(format!("the copy's {table} differs"));
+        }
+    }
+    Ok(())
+}
+
+/// Compaction, first half (#201): copy the database to
+/// `<db>.compact.part`, sync it, and rename it to `<db>.compact`. The
+/// finished name is the marker [`apply_pending_compaction`] acts on at the
+/// next open; being killed at any point leaves at most a `.part`, which is
+/// never applied. The caller keeps the maintenance gate until the process
+/// exits, so nothing is written after the copy.
+pub(crate) fn stage_compaction(conn: &Connection, db: &Path) -> Result<(), String> {
+    let staging = suffixed(db, COMPACT_STAGING);
+    remove_if_present(&staging)?;
+    remove_if_present(&wal_path(&staging))?;
+    copy_database(conn, &staging)?;
+    let staged = fs::File::open(&staging)
+        .and_then(|file| file.sync_all())
+        .and_then(|()| fs::rename(&staging, suffixed(db, COMPACT_READY)));
+    staged.map_err(|e| {
+        let _ = fs::remove_file(&staging);
+        format!("finish the compacted copy: {e}")
+    })
+}
+
+/// Compaction, second half: runs first in [`AppDb::open_at`], before the
+/// database is opened. Sweeps a copy that was never finished, and puts a
+/// finished one in place of the database with one atomic rename. The old
+/// file's WAL is discarded first: the copy was made after a checkpoint and
+/// nothing has written since, so it holds nothing the copy lacks. Errors are
+/// shown on the boot screen.
+fn apply_pending_compaction(db: &Path) -> Result<(), String> {
+    let staging = suffixed(db, COMPACT_STAGING);
+    for leftover in [wal_path(&staging), staging] {
+        if let Err(e) = remove_if_present(&leftover) {
+            log::warn!("startup: {e}");
+        }
+    }
+    let ready = suffixed(db, COMPACT_READY);
+    if !ready.exists() {
+        return Ok(());
+    }
+    let before = fs::metadata(db).map_or(0, |m| m.len());
+    let swapped = remove_if_present(&wal_path(db))
+        .and_then(|()| fs::rename(&ready, db).map_err(|e| e.to_string()));
+    if let Err(e) = swapped {
+        return Err(format!(
+            "The compacted database could not be put in place ({e}). Your data is unchanged.              Start the app again. If this keeps happening, delete \"{}\" from {}.",
+            ready
+                .file_name()
+                .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+            db.parent().unwrap_or(db).display(),
+        ));
+    }
+    let after = fs::metadata(db).map_or(0, |m| m.len());
+    log::info!("startup: database compacted, {before} -> {after} bytes");
+    Ok(())
+}
+
+fn remove_if_present(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            Err(format!("remove {}: {e}", path.display()))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// How much of the database the pre-upgrade backup copies between progress
@@ -622,8 +965,10 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        AppDb, Meta, back_up, head_version, is_newer_storage, library_version, migrate,
-        newer_data_message, schema_version, suffixed, wal_path,
+        AppDb, COPY_ORDER, Meta, SET_ASIDE_WAL_MAX_AGE, back_up, backups as backup_files,
+        copy_database, head_version, is_newer_storage, library_version, migrate,
+        newer_data_message, rotate_set_aside_wals, schema_version, set_aside_wals,
+        stage_compaction, suffixed, wal_path,
     };
     use crate::boot::{Boot, Phase, Progress};
 
@@ -979,6 +1324,263 @@ mod tests {
                 .map_err(|e| e.to_string())?;
             assert_eq!(written, 1, "{label}");
         }
+        Ok(())
+    }
+
+    /// 0008 on a populated database (the v7 fixture: cached results whose
+    /// `computed_by_run` references a run): the run can now be deleted and
+    /// its results stay, the cache keeps its primary key and its foreign key
+    /// to `models`, a `models` row nothing references can still be deleted
+    /// (the `RENAME` hazard the migration avoids), and the secondary indexes
+    /// are gone.
+    #[test]
+    fn cache_rebuild_frees_runs_and_drops_secondary_indexes() -> Result<(), String> {
+        let fixture = fixtures()?
+            .into_iter()
+            .find(|path| path.to_string_lossy().contains("schema-v7_"))
+            .ok_or("no v7 fixture")?;
+        let root = scratch("cache-rebuild")?;
+        let path = root.join("app.duckdb");
+        unpack(&fixture, &path)?;
+        let db = AppDb::open_at(path, "test", &Progress::none())?;
+        let conn = db.rw()?;
+        let count = |sql: &str| -> Result<i64, String> {
+            conn.query_row(sql, [], |r| r.get(0))
+                .map_err(|e| format!("{sql}: {e}"))
+        };
+
+        let results = count("SELECT COUNT(*) FROM inference_results")?;
+        assert!(results > 0, "fixture has no cached results");
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM inference_results ir
+                 JOIN runs r ON r.id = ir.computed_by_run"
+            )?,
+            results,
+            "fixture results don't reference a run"
+        );
+        conn.execute_batch("DELETE FROM runs")
+            .map_err(|e| format!("delete runs: {e}"))?;
+        assert_eq!(count("SELECT COUNT(*) FROM inference_results")?, results);
+
+        let duplicate = conn.execute_batch(
+            "INSERT INTO inference_results (model_id, content_hash, classification, computed_at)
+             SELECT model_id, content_hash, 'x', now() FROM inference_results LIMIT 1",
+        );
+        assert!(duplicate.is_err(), "primary key not enforced");
+        let orphan = conn.execute_batch(
+            "INSERT INTO inference_results (model_id, content_hash, classification, computed_at)
+             VALUES (-1, 'h', 'x', now())",
+        );
+        assert!(orphan.is_err(), "models foreign key not enforced");
+        conn.execute_batch(
+            "INSERT INTO models (id, hf_repo, hf_revision, model_type, precision)
+             VALUES (-1, 'r', 'v', '2', 'f32');
+             DELETE FROM models WHERE id = -1;",
+        )
+        .map_err(|e| format!("delete an unreferenced models row: {e}"))?;
+
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM duckdb_indexes()
+                 WHERE table_name IN ('courses', 'inference_results')"
+            )?,
+            0,
+            "secondary indexes remain"
+        );
+        Ok(())
+    }
+
+    /// The head fixture, unpacked and opened: a seeded database (datasets,
+    /// courses, a run, cached results) at the current schema.
+    fn seeded(name: &str) -> Result<(PathBuf, AppDb), String> {
+        let fixture = fixtures()?
+            .into_iter()
+            .find(|path| {
+                path.to_string_lossy()
+                    .contains(&format!("schema-v{}_", head_version()))
+            })
+            .ok_or("no head fixture")?;
+        let root = scratch(name)?;
+        let path = root.join("app.duckdb");
+        unpack(&fixture, &path)?;
+        let db = AppDb::open_at(path, "test", &Progress::none())?;
+        Ok((root, db))
+    }
+
+    fn all_row_counts(conn: &duckdb::Connection) -> Result<Vec<(String, i64)>, String> {
+        COPY_ORDER
+            .iter()
+            .map(|table| {
+                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                    .map(|count| ((*table).to_owned(), count))
+                    .map_err(|e| format!("count {table}: {e}"))
+            })
+            .collect()
+    }
+
+    /// `COPY_ORDER` is exactly the tables of an opened database, so a table
+    /// added later can't be silently left out of a compaction or backup.
+    #[test]
+    fn copy_order_lists_every_table() -> Result<(), String> {
+        let root = scratch("copy-order")?;
+        let db = AppDb::open_at(root.join("app.duckdb"), "test", &Progress::none())?;
+        let conn = db.rw()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT table_name FROM duckdb_tables()
+                 WHERE database_name = current_database() ORDER BY 1",
+            )
+            .map_err(|e| e.to_string())?;
+        let tables: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let mut listed: Vec<&str> = COPY_ORDER.to_vec();
+        listed.sort_unstable();
+        assert_eq!(tables, listed);
+        Ok(())
+    }
+
+    /// The copy holds every row of every table, including a chain of derived
+    /// datasets (each references the one before); its sequences carry on
+    /// past the copied ids; its constraints are enforced; and it opens as an
+    /// ordinary database of the same app and `DuckDB` version, so no
+    /// pre-upgrade backup is taken. The source is untouched.
+    #[test]
+    fn copy_database_is_complete_and_usable() -> Result<(), String> {
+        let (root, db) = seeded("copy")?;
+        let dest = root.join("copy").join("app.duckdb");
+        std::fs::create_dir_all(root.join("copy")).map_err(|e| e.to_string())?;
+        let expected = {
+            let conn = db.rw()?;
+            // Ids chosen to sort before their parents: insertion order must
+            // not depend on it.
+            conn.execute_batch(
+                "INSERT INTO datasets
+                    (id, title, source_kind, parent_dataset_id, imported_at, row_count, import_state)
+                 SELECT '1-child', 'c', 'derived', min(id), now(), 0, 'ready' FROM datasets;
+                 INSERT INTO datasets
+                    (id, title, source_kind, parent_dataset_id, supersedes_id, imported_at,
+                     row_count, import_state)
+                 VALUES ('0-grandchild', 'g', 'derived', '1-child', '1-child', now(), 0, 'ready');",
+            )
+            .map_err(|e| e.to_string())?;
+            all_row_counts(&conn)?
+        };
+
+        copy_database(&db.connect()?, &dest)?;
+        assert!(!wal_path(&dest).exists());
+        assert_eq!(all_row_counts(&*db.rw()?)?, expected, "source changed");
+        // The read-write connection was never held: the exit checkpoint
+        // would have gone through.
+        db.checkpoint()?;
+
+        {
+            let conn = raw(&dest)?;
+            assert_eq!(all_row_counts(&conn)?, expected);
+            let source_meta = Meta::read(&*db.rw()?)?;
+            let meta = Meta::read(&conn)?;
+            assert_eq!(meta.app_version, source_meta.app_version);
+            assert_eq!(meta.duckdb_version, source_meta.duckdb_version);
+            conn.execute_batch(
+                "INSERT INTO courses (dataset_id, row_index, content_hash)
+                 VALUES ('1-child', 0, 'after-copy')",
+            )
+            .map_err(|e| format!("insert through the copied sequence: {e}"))?;
+            let orphan = conn.execute_batch(
+                "INSERT INTO courses (dataset_id, row_index, content_hash)
+                 VALUES ('no-such-dataset', 0, 'x')",
+            );
+            assert!(orphan.is_err(), "foreign key not enforced in the copy");
+        }
+        drop(AppDb::open_at(dest.clone(), "test", &Progress::none())?);
+        assert!(backup_files(&dest).is_empty(), "the copy was backed up");
+
+        // An existing destination is refused, not overwritten.
+        assert!(copy_database(&db.connect()?, &dest).is_err());
+        Ok(())
+    }
+
+    /// Compaction end to end: after a large delete, the staged copy appears
+    /// only under its finished name, nothing changes until the next open,
+    /// and that open swaps it in (smaller file, same rows) and sweeps an
+    /// unfinished copy without applying it.
+    #[test]
+    fn compaction_is_staged_then_swapped_at_the_next_open() -> Result<(), String> {
+        let (root, db) = seeded("compact")?;
+        let path = root.join("app.duckdb");
+        let staging = suffixed(&path, ".compact.part");
+        let ready = suffixed(&path, ".compact");
+        {
+            let conn = db.rw()?;
+            conn.execute_batch(
+                "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
+                 VALUES ('bulk', 'b', 'file', now(), 0, 'ready');
+                 INSERT INTO courses (dataset_id, row_index, course_title, content_hash)
+                 SELECT 'bulk', i, 'Course title number ' || i, sha256(i::VARCHAR)
+                 FROM range(300000) t(i);
+                 CHECKPOINT;
+                 DELETE FROM courses WHERE dataset_id = 'bulk';
+                 CHECKPOINT;",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        let expected = all_row_counts(&*db.rw()?)?;
+        let before = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+
+        stage_compaction(&db.connect()?, &path)?;
+        assert!(ready.exists() && !staging.exists());
+        assert_eq!(
+            std::fs::metadata(&path).map_err(|e| e.to_string())?.len(),
+            before,
+            "the live file changed before the swap"
+        );
+        // The exit checkpoint, then the process ends.
+        db.checkpoint()?;
+        drop(db);
+
+        // A copy that was never finished is swept, not applied.
+        std::fs::write(&staging, b"half a copy").map_err(|e| e.to_string())?;
+        let db = AppDb::open_at(path.clone(), "test", &Progress::none())?;
+        assert!(!ready.exists() && !staging.exists());
+        let after = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        assert!(after < before / 2, "{before} -> {after} bytes");
+        assert_eq!(all_row_counts(&*db.rw()?)?, expected);
+        assert!(
+            backup_files(&path).is_empty(),
+            "the swap triggered a backup"
+        );
+        Ok(())
+    }
+
+    /// Set-aside WALs: the newest is always kept, others go once they are
+    /// older than the limit.
+    #[test]
+    fn set_aside_wals_are_rotated() -> Result<(), String> {
+        let root = scratch("wal-rotation")?;
+        let path = root.join("app.duckdb");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
+        let day = 24 * 60 * 60;
+        let limit = SET_ASIDE_WAL_MAX_AGE.as_secs();
+        let aside = |age: u64| suffixed(&path, &format!(".wal.corrupt-{}", now - age));
+        let (ancient, old, recent) = (aside(limit + 10 * day), aside(limit + day), aside(5 * day));
+        for file in [&ancient, &old, &recent] {
+            std::fs::write(file, b"wal").map_err(|e| e.to_string())?;
+        }
+
+        rotate_set_aside_wals(&path);
+        assert_eq!(set_aside_wals(&path), std::slice::from_ref(&recent));
+
+        // Alone, an old one is the newest and stays.
+        std::fs::remove_file(&recent).map_err(|e| e.to_string())?;
+        std::fs::write(&old, b"wal").map_err(|e| e.to_string())?;
+        rotate_set_aside_wals(&path);
+        assert_eq!(set_aside_wals(&path), [old]);
         Ok(())
     }
 
