@@ -65,6 +65,11 @@ Uninstalling removes the app but not its data, which can reach several GB with m
 | macOS | `~/Library/Application Support/college-course-map`, `~/Library/Caches/college-course-map` |
 | Linux | `~/.config/college-course-map`, `~/.local/share/college-course-map` |
 
+The app's window also keeps a small WebView storage folder named after its bundle ID. The Windows uninstaller removes it with the same checkbox; on macOS and Linux, delete it too:
+
+- **macOS**: `~/Library/WebKit/edu.umich.epi.college-course-map`, `~/Library/Caches/edu.umich.epi.college-course-map`
+- **Linux**: `~/.local/share/edu.umich.epi.college-course-map`
+
 ## Development
 
 Everything below is for working on the app itself. If you installed a release build, you're done; none of this applies.

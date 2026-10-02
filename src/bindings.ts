@@ -218,7 +218,8 @@ async validateImport(path: string, encoding: TextEncoding) : Promise<Result<Vali
 }
 },
 /**
- * Write the reset marker and relaunch; the next process does the deleting.
+ * Write the reset marker. The caller relaunches; the next process does the
+ * deleting.
  */
 async requestReset(keepSettings: boolean) : Promise<Result<null, string>> {
     try {

@@ -1,7 +1,6 @@
 <script setup lang="ts">
 // Real general settings (default model selection, data directory override,
-// telemetry opt-out, etc.) land alongside their underlying features. The
-// reset action moves to Settings → Storage once that section exists (#196).
+// telemetry opt-out, etc.) land alongside their underlying features.
 import ResetAppData from "./ResetAppData.vue";
 </script>
 
