@@ -1014,7 +1014,13 @@ fn install_pack_with_progress(
     reason = "Tauri command arguments are deserialized by value"
 )]
 pub(crate) fn relaunch_app(app: tauri::AppHandle) {
-    app.restart();
+    // `request_restart`, not `restart`: this sync command runs on the main
+    // thread, where `restart` skips `RunEvent::Exit` and spawns the new
+    // process straight away. Going through the event loop runs the exit
+    // handlers first — the single-instance plugin releases its lock (#207),
+    // so the new process isn't turned away as a second instance, and the
+    // database gets its exit checkpoint.
+    app.request_restart();
 }
 
 #[cfg(test)]

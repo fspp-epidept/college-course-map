@@ -72,6 +72,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 tauri-plugin-log = "2"
 log = "0.4"
 tracing = { version = "0.1", features = ["log"] }
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 flate2 = "1"
