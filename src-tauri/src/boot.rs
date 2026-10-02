@@ -153,6 +153,17 @@ impl Boot {
     }
 }
 
+#[cfg(test)]
+impl Boot {
+    /// A `Boot` whose shutdown has already asked startup to stop.
+    pub(crate) fn cancelled() -> Self {
+        Self {
+            cancel: AtomicBool::new(true),
+            ..Self::default()
+        }
+    }
+}
+
 /// Marks the step runner finished when dropped, so [`shutdown`] stops waiting
 /// however the runner ends: published, failed, or panicked.
 struct Finished<'a>(&'a Boot);
@@ -192,7 +203,7 @@ impl<'a> Progress<'a> {
         Self { boot: None }
     }
 
-    fn of(boot: &'a Boot) -> Self {
+    pub(crate) fn of(boot: &'a Boot) -> Self {
         Self { boot: Some(boot) }
     }
 

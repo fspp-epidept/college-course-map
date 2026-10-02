@@ -287,7 +287,7 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{Copied, copy, copy_across, migrate, move_entry};
-    use crate::boot::Progress;
+    use crate::boot::{Boot, Progress};
 
     fn scratch(name: &str) -> Result<PathBuf, String> {
         let root = std::env::temp_dir().join(format!("ccm-paths-{name}-{}", std::process::id()));
@@ -490,6 +490,32 @@ mod tests {
         assert!(!root.join("local/models.migrating").exists());
         assert!(!root.join("roaming/models").exists());
         assert!(!root.join("roaming/models.migrated").exists());
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    /// Cancelled: the copy stops before its first chunk, removes its staged
+    /// copy and keeps the source; the migration moves no further entry.
+    #[test]
+    fn cancel_discards_staging_and_stops() -> Result<(), String> {
+        let root = scratch("cancel")?;
+        let legacy = root.join("roaming");
+        let data = root.join("local");
+        write(&legacy.join("models/two/model.onnx"), "onnx")?;
+        write(&legacy.join("app.duckdb"), "db")?;
+        fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+        let boot = Boot::cancelled();
+        let progress = Progress::of(&boot);
+
+        assert!(copy_across(&legacy.join("models"), &data.join("models"), &progress).is_err());
+        assert!(!data.join("models.migrating").exists());
+        assert!(!data.join("models").exists());
+        assert!(legacy.join("models/two/model.onnx").exists());
+
+        let report = migrate(&legacy, &data, &progress);
+        assert!(report.is_empty(), "{report:?}");
+        assert!(legacy.join("app.duckdb").exists());
+        assert!(!data.join("app.duckdb").exists());
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
