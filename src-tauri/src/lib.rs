@@ -18,6 +18,8 @@ pub mod runs;
 // Public for the dev pack fetcher (examples/runtime_install.rs, EPI-73).
 pub mod runtime;
 pub mod seed;
+#[cfg(unix)]
+mod signals;
 mod taxonomy;
 // The native menu is macOS-only (Windows/Linux use custom in-WebView chrome,
 // decision #102); the module itself builds everywhere for its typed event.
@@ -113,6 +115,10 @@ pub fn run() {
         .setup(move |app| {
             use tauri::Manager as _;
             specta.mount_events(app);
+            // Termination signals take the same exit path as closing the
+            // window, so the checkpoint below runs (#227).
+            #[cfg(unix)]
+            signals::install(app.handle())?;
             // Open DuckDB + apply migrations before the first command can fire.
             // Failing here is unrecoverable (no app without storage), so we
             // surface the error and let Tauri short-circuit setup.
