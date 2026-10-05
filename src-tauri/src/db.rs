@@ -902,9 +902,13 @@ pub(crate) fn migrate(conn: &Connection, progress: &Progress<'_>) -> Result<(), 
 /// place database state gets established — don't add seeding at startup.
 fn post_migration(version: u32, conn: &Connection) -> Result<(), String> {
     match version {
-        // 0006 empties the table so existing databases pick up the corrected
-        // CSVs; fresh databases seed at 3 and again at 6.
-        3 | 6 => seed_ccm_taxonomy(conn),
+        // 0003 creates the table, 0006 empties it so existing databases pick
+        // up the corrected CSVs, and only 6 seeds: `migrate` applies every
+        // pending migration in one call, so a database that runs 3 runs 6
+        // right after. Each migration commits on its own, so a failure in
+        // 4-6 leaves an empty taxonomy at version 3 until the next launch
+        // retries; that failure is already fatal at startup.
+        6 => seed_ccm_taxonomy(conn),
         _ => Ok(()),
     }
 }
@@ -934,12 +938,14 @@ fn insert_taxonomy_csv(conn: &Connection, digit_level: u8, data: &str) -> Result
     // Column 3 is `title_short` for the 2-digit file, `description` for the
     // 6-digit file; route it to the matching table column.
     let third_is_short = headers.get(2) == Some("title_short");
-    let mut stmt = conn
-        .prepare(
-            "INSERT INTO ccm_taxonomy (digit_level, code, title, title_short, description)
-             VALUES (?, ?, ?, ?, ?)",
+    // The Appender writes into the migration's open transaction: its rows
+    // commit and roll back with it.
+    let mut appender = conn
+        .appender_with_columns(
+            "ccm_taxonomy",
+            &["digit_level", "code", "title", "title_short", "description"],
         )
-        .map_err(|e| format!("prepare taxonomy insert: {e}"))?;
+        .map_err(|e| format!("open taxonomy appender: {e}"))?;
     for record in reader.records() {
         let record = record.map_err(|e| format!("taxonomy csv record: {e}"))?;
         let code = record
@@ -954,10 +960,14 @@ fn insert_taxonomy_csv(conn: &Connection, digit_level: u8, data: &str) -> Result
         } else {
             (None, Some(third))
         };
-        stmt.execute(params![digit_level, code, title, title_short, description])
-            .map_err(|e| format!("insert taxonomy row {code}: {e}"))?;
+        appender
+            .append_row(params![digit_level, code, title, title_short, description])
+            .map_err(|e| format!("append taxonomy row {code}: {e}"))?;
     }
-    Ok(())
+    // Drop flushes implicitly; flushing here surfaces the error.
+    appender
+        .flush()
+        .map_err(|e| format!("flush taxonomy appender: {e}"))
 }
 
 #[cfg(test)]
@@ -967,8 +977,8 @@ mod tests {
     use super::{
         AppDb, COPY_ORDER, Meta, SET_ASIDE_WAL_MAX_AGE, back_up, backups as backup_files,
         copy_database, head_version, is_newer_storage, library_version, migrate,
-        newer_data_message, rotate_set_aside_wals, schema_version, set_aside_wals,
-        stage_compaction, suffixed, wal_path,
+        newer_data_message, rotate_set_aside_wals, schema_version, seed_ccm_taxonomy,
+        set_aside_wals, stage_compaction, suffixed, wal_path,
     };
     use crate::boot::{Boot, Phase, Progress};
 
@@ -1645,7 +1655,7 @@ mod tests {
         Ok(())
     }
 
-    /// Full migration chain on a fresh database: schema applies, the 0003
+    /// Full migration chain on a fresh database: schema applies, the 0006
     /// data hook seeds the taxonomy inside the same transaction, and a second
     /// `migrate` call is a no-op (no duplicate seeding).
     #[test]
@@ -1738,6 +1748,36 @@ mod tests {
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn, &Progress::none())?;
         assert_eq!(count(2)?, 48);
+        Ok(())
+    }
+
+    /// The taxonomy Appender writes into the migration's open transaction: a
+    /// hook that fails rolls its appended rows back with everything else.
+    #[test]
+    fn taxonomy_seed_rolls_back_with_transaction() -> Result<(), String> {
+        let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
+        migrate(&conn, &Progress::none())?;
+        conn.execute_batch("DELETE FROM ccm_taxonomy")
+            .map_err(|e| e.to_string())?;
+        let count = || -> Result<i64, String> {
+            conn.query_row("SELECT COUNT(*) FROM ccm_taxonomy", [], |r| r.get(0))
+                .map_err(|e| e.to_string())
+        };
+
+        // First seed appends, the second hits the primary key and fails.
+        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+        seed_ccm_taxonomy(&conn)?;
+        assert!(
+            seed_ccm_taxonomy(&conn).is_err(),
+            "duplicate seed succeeded"
+        );
+        conn.execute_batch("ROLLBACK").map_err(|e| e.to_string())?;
+        assert_eq!(count()?, 0);
+
+        conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+        seed_ccm_taxonomy(&conn)?;
+        conn.execute_batch("COMMIT").map_err(|e| e.to_string())?;
+        assert_eq!(count()?, 48 + 2119);
         Ok(())
     }
 }

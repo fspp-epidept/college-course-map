@@ -12,7 +12,7 @@
 -- were unaffected (their title_short is app-authored, not PDF text).
 --
 -- The DELETE empties the table; the post-migration data hook (db.rs)
--- re-seeds it from the corrected CSVs in the same transaction. Nothing
+-- seeds it from the corrected CSVs in the same transaction. Nothing
 -- references ccm_taxonomy by foreign key — readers LEFT JOIN by code.
 
 DELETE FROM ccm_taxonomy;
