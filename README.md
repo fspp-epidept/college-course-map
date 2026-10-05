@@ -64,7 +64,7 @@ Once you're happy with the update, delete the backup under **Settings → Storag
 
 ## Freeing disk space
 
-To delete a dataset or a run, open it and click **Delete Dataset…** or **Delete Run…**. Deleting a dataset removes its courses and runs. Cached classifications stay, so importing the same courses again needs no new inference.
+To delete a dataset, open it and click **Delete Dataset…**. That removes its courses and runs. To delete one run's record, use the trash button on that run, on the dataset's page. Cached classifications stay, so importing the same courses again needs no new inference.
 
 **Settings → Storage** lists what the app keeps on disk and gives space back:
 

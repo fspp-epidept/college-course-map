@@ -331,14 +331,6 @@ async getLatestRun(datasetId: string) : Promise<Result<RunDetail | null, string>
     else return { status: "error", error: e  as any };
 }
 },
-async getRun(id: string) : Promise<Result<RunDetail, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_run", { id }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
 async listRuns() : Promise<Result<RunSummary[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_runs") };
@@ -1019,7 +1011,7 @@ export type StartRunRequest = {
 datasetId: string }
 /**
  * Response from `start_run`: the run has been queued and is already updating
- * its own row. The frontend polls `get_run(run_id)` from here.
+ * its own row. The frontend polls `get_latest_run` for its dataset from here.
  */
 export type StartRunResponse = { runId: string; rowsTotal: number }
 export type StorageStatus = { 

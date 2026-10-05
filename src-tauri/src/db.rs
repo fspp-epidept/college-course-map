@@ -5,7 +5,7 @@
 //! cloned from it ([`Connection::try_clone`]) for list/dashboard reads. The
 //! clone matters: a *separate* read-only instance (`open_with_flags`) is a
 //! point-in-time snapshot frozen at open and never observes the RW instance's
-//! later commits — so polling reads (`list_datasets`, `get_run`) would show an
+//! later commits — so polling reads (`list_datasets`, `get_latest_run`) would show an
 //! import or run stuck at zero forever. Connections cloned from one instance
 //! share `DuckDB`'s MVCC, so reads see committed writes immediately. The read
 //! handle is therefore not access-mode read-only; it's only handed to read
