@@ -836,6 +836,7 @@ pub fn dev_cpu_pack_dir() -> PathBuf {
 /// per process — switching packs requires an app relaunch.
 pub fn init_ort(pack_dir: &Path) -> Result<(), String> {
     let dylib = dylib_file(pack_dir);
+    let _pass = crate::inference::ort_pass();
     let committed = ort::init_from(&dylib)
         .map_err(|e| format!("load ONNX Runtime from {}: {e}", dylib.display()))?
         .commit();

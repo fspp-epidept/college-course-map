@@ -57,7 +57,7 @@ pub struct LoadedModel {
     pub resolved_ep: EpKind,
     /// The session needs `&mut self` to run; wrap so we can hold it behind an
     /// `Arc` shared from the inference registry.
-    session: Mutex<Session>,
+    session: Mutex<OrtSession>,
     tokenizer: Tokenizer,
     /// Index → CCM code string, e.g. `id2label[14] == "27"` for the 2-digit
     /// model.
@@ -135,6 +135,111 @@ impl FailedEps {
 }
 
 static FAILED_EPS: FailedEps = FailedEps::new();
+
+/// Who is inside ONNX Runtime, so the process never exits while anyone is
+/// (#231). `exit()` runs ORT's and the CUDA provider's static destructors
+/// on the main thread, and a session build on another thread then hangs and
+/// segfaults. Every ORT call holds an [`OrtPass`]: loading the runtime
+/// ([`crate::runtime::init_ort`], on the boot thread), building a session
+/// ([`load_model`]), running one ([`classify_batch`]) and releasing one
+/// ([`OrtSession`]'s drop). `boot::shutdown` calls [`close_ort`] before the
+/// process exits; after that a thread that reaches ORT parks until the
+/// process ends instead of entering. Parking, not an error: a run stopped
+/// there is left `running` and swept to `interrupted` on the next launch, as
+/// for any exit, and a three-model load stops between models.
+struct OrtGate {
+    state: Mutex<GateState>,
+    drained: std::sync::Condvar,
+}
+
+struct GateState {
+    inside: usize,
+    closed: bool,
+}
+
+static ORT_GATE: OrtGate = OrtGate::new();
+
+impl OrtGate {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(GateState {
+                inside: 0,
+                closed: false,
+            }),
+            drained: std::sync::Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn enter(&'static self) -> OrtPass {
+        let mut state = self.lock();
+        if state.closed {
+            drop(state);
+            loop {
+                std::thread::park();
+            }
+        }
+        state.inside += 1;
+        OrtPass(self)
+    }
+
+    fn close(&self, wait: std::time::Duration) -> usize {
+        let mut state = self.lock();
+        state.closed = true;
+        let (state, _) = self
+            .drained
+            .wait_timeout_while(state, wait, |state| state.inside > 0)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.inside
+    }
+}
+
+/// Held for the duration of one ORT call.
+pub(crate) struct OrtPass(&'static OrtGate);
+
+impl Drop for OrtPass {
+    fn drop(&mut self) {
+        let mut state = self.0.lock();
+        state.inside = state.inside.saturating_sub(1);
+        if state.inside == 0 {
+            self.0.drained.notify_all();
+        }
+    }
+}
+
+/// Enter ONNX Runtime, or park for good once [`close_ort`] has run.
+pub(crate) fn ort_pass() -> OrtPass {
+    ORT_GATE.enter()
+}
+
+/// Close the gate and wait up to `wait` for the threads inside ORT to leave.
+/// Returns how many are still inside when the wait runs out.
+pub(crate) fn close_ort(wait: std::time::Duration) -> usize {
+    ORT_GATE.close(wait)
+}
+
+/// A session whose release goes through the gate like every other ORT call.
+struct OrtSession(Option<Session>);
+
+impl OrtSession {
+    fn get(&mut self) -> anyhow::Result<&mut Session> {
+        self.0
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("session already released"))
+    }
+}
+
+impl Drop for OrtSession {
+    fn drop(&mut self) {
+        let _pass = ort_pass();
+        drop(self.0.take());
+    }
+}
 
 /// Register execution providers on a session builder in priority order
 /// (EPI-73). Returns the first EP that registered successfully — the one ONNX
@@ -255,6 +360,9 @@ pub fn load_model(
         pad_token,
     }));
 
+    // Declared before the builder, so it is dropped (an ORT call) inside the
+    // pass too.
+    let _pass = ort_pass();
     // ort's `Error` carries a builder phantom that's not `Send + Sync`, so we
     // can't `?` it into `anyhow::Error`; stringify at the boundary.
     let mut builder = Session::builder()
@@ -278,7 +386,7 @@ pub fn load_model(
     Ok(LoadedModel {
         digit_level,
         resolved_ep,
-        session: Mutex::new(session),
+        session: Mutex::new(OrtSession(Some(session))),
         tokenizer,
         id2label,
     })
@@ -338,6 +446,9 @@ pub fn classify_batch(model: &LoadedModel, inputs: &[&str]) -> anyhow::Result<Ve
     let max_len_i64 =
         i64::try_from(max_len).map_err(|_| anyhow::anyhow!("seq len overflows i64"))?;
     let shape = vec![n_i64, max_len_i64];
+    // Covers the tensors and outputs too: creating and dropping them are ORT
+    // calls.
+    let _pass = ort_pass();
     let ids_tensor = TensorRef::from_array_view((shape.clone(), ids.as_slice()))
         .map_err(|e| anyhow::anyhow!("ids tensor: {e}"))?;
     let mask_tensor = TensorRef::from_array_view((shape, mask.as_slice()))
@@ -348,6 +459,7 @@ pub fn classify_batch(model: &LoadedModel, inputs: &[&str]) -> anyhow::Result<Ve
         .lock()
         .map_err(|_| anyhow::anyhow!("session mutex poisoned"))?;
     let outputs = session
+        .get()?
         .run(inputs![
             "input_ids" => ids_tensor,
             "attention_mask" => mask_tensor,
@@ -652,8 +764,47 @@ impl ModelStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailedEps, normalize_ccm_code, softmax_denom, top5_indices};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::{FailedEps, OrtGate, normalize_ccm_code, softmax_denom, top5_indices};
     use crate::runtime::EpKind;
+
+    /// Closing waits for the threads inside, gives up with a count when one
+    /// stays past the bound, and a thread that arrives after closing never
+    /// gets in (#231).
+    #[test]
+    fn ort_gate_drains_then_parks_latecomers() {
+        let gate: &'static OrtGate = Box::leak(Box::new(OrtGate::new()));
+        let held = gate.enter();
+        assert_eq!(gate.lock().inside, 1);
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let started = Instant::now();
+        assert_eq!(gate.close(Duration::from_secs(5)), 0);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert!(release.join().is_ok());
+
+        let (entered, got_in) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _pass = gate.enter();
+            let _ = entered.send(());
+        });
+        assert!(got_in.recv_timeout(Duration::from_millis(300)).is_err());
+        assert_eq!(gate.lock().inside, 0);
+    }
+
+    /// A pass still held when the bound runs out is reported.
+    #[test]
+    fn ort_gate_reports_threads_still_inside() {
+        let gate: &'static OrtGate = Box::leak(Box::new(OrtGate::new()));
+        let held = gate.enter();
+        assert_eq!(gate.close(Duration::from_millis(50)), 1);
+        drop(held);
+        assert_eq!(gate.lock().inside, 0);
+    }
 
     /// A provider that failed once is remembered for the process; others are
     /// unaffected and repeats don't accumulate (EPI-104).
