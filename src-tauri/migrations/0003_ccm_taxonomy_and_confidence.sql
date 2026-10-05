@@ -4,9 +4,9 @@
 -- 2-digit (48 codes: title + short title) and 6-digit (2,119 codes: title +
 -- description) levels. The government publishes no 4-digit labels; 4-digit
 -- results resolve to their 2-digit parent at read time. Rows are inserted by
--- a Rust data hook that runs inside this migration's transaction (db.rs),
--- sourced from CSVs embedded in the binary — so seeding happens exactly once
--- per database with no startup check.
+-- a Rust data hook (db.rs) sourced from CSVs embedded in the binary. The
+-- hook runs inside 0006's transaction, which every database that applies
+-- this migration also applies in the same startup.
 --
 -- inference_results changes:
 --   * probability changes meaning: it previously stored the raw argmax
