@@ -94,6 +94,27 @@ async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, s
 }
 },
 /**
+ * Delete a dataset with its courses and runs, and its `source_files` row
+ * when no other dataset uses it (#199). The original CSV on disk is never
+ * touched, and neither is the results cache: classifications are keyed by
+ * model and input, not by dataset, and are reused if the same courses are
+ * imported again.
+ * 
+ * Refused while the dataset is importing or has a run in progress, while
+ * another dataset was derived from it, or while other maintenance runs.
+ * Slow on a large dataset (seconds per million courses), so it runs on the
+ * blocking pool. Deleting a dataset that is already gone is not an error,
+ * and deleting one left `delete_incomplete` finishes the job.
+ */
+async deleteDataset(datasetId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_dataset", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * The input profile the import worker stored on the dataset (profile.rs),
  * or `None` when the dataset is unknown or predates the profile. A stored
  * profile that fails to parse is an error, not `None`: the UI must not
@@ -260,9 +281,37 @@ async downloadRuntime(packId: string) : Promise<Result<null, string>> {
 async relaunchApp() : Promise<void> {
     await TAURI_INVOKE("relaunch_app");
 },
+/**
+ * Delete a downloaded backend (#203): its pack folder, and its support
+ * libraries when no other backend needs them. The bundled CPU pack and the
+ * backend in use are refused. A preference for the removed backend is
+ * cleared, so the next launch falls back to the provider priority.
+ */
+async removeRuntime(packId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_runtime", { packId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async runtimeStatus() : Promise<Result<RuntimeStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("runtime_status") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete a run's record (#198). Refused while the run is executing; any
+ * other state goes. The classifications it computed stay in the cache —
+ * they are keyed by `(model_id, content_hash)`, not by run — and the next
+ * run reuses them. Deleting a run that is already gone is not an error.
+ */
+async deleteRun(runId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_run", { runId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -327,6 +376,71 @@ async resumeRun(runId: string) : Promise<Result<StartRunResponse, string>> {
 async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Compact the database (#201): write a fresh copy holding only the live
+ * rows, then relaunch; the next start puts the copy in place of the old
+ * file before opening it (`db.rs`). Refused while an import or run is
+ * working or other maintenance runs. From the moment the copy starts until
+ * the app exits nothing may write, so the maintenance slot is never given
+ * back on success. Closing the app during the copy just abandons it.
+ */
+async compactDatabase() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("compact_database") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Open the data folder in the platform file manager. Rust-side opener call:
+ * no capability widening for the `WebView`.
+ */
+async openDataDir() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_data_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete the leftover files of one kind.
+ */
+async storageClear(target: ClearTarget) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("storage_clear", { target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove the cached classifications in `scope` and return how many went
+ * ([`StorageStatus::cache`] says beforehand how many that is). Refused
+ * while an import or run is working or other maintenance runs; the space
+ * comes back when the database is next compacted.
+ */
+async storagePrune(scope: PruneScope) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("storage_prune", { scope }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * What the app keeps on disk. Off the main thread: it walks the model and
+ * runtime folders and counts the cache.
+ */
+async storageStatus() : Promise<Result<StorageStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("storage_status") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -420,11 +534,27 @@ export type BootStatus = { status: "starting" } | { status: "ready" } |
  */
 { status: "failed"; message: string; notices: string[]; logDir: string | null }
 /**
+ * Cached classifications, counted in rows.
+ */
+export type CacheUsage = { total: number; 
+/**
+ * Computed by a model revision this build no longer ships.
+ */
+superseded: number; 
+/**
+ * For an input that no dataset contains any more.
+ */
+unreferenced: number }
+/**
  * One `ccm_taxonomy` row. 2-digit rows carry `title_short`, 6-digit rows
  * carry `description`; there are no 4-digit rows.
  */
 export type CcmEntry = { digitLevel: number; code: string; title: string; titleShort: string | null; description: string | null }
 export type CheckCount = { code: FindingCode; count: number }
+/**
+ * Leftover files [`storage_clear`] deletes.
+ */
+export type ClearTarget = "set_aside_wals" | "database_backups" | "coreml_cache"
 /**
  * A `--ui-color-{role}-{shade}` ramp. Each shade is optional so a theme can
  * override a subset. Field names render to the numeric shade keys.
@@ -487,6 +617,11 @@ ccmTitleLevel: number | null }
  * content hashes count once per course row), matching what a run would report.
  */
 export type CoverageRow = { modelId: number; digitLevel: number; classified: number; total: number }
+export type DatabaseUsage = { path: string; fileBytes: number; walBytes: number; 
+/**
+ * Exact: the free blocks inside the file, which a compaction returns.
+ */
+reclaimableBytes: number }
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -502,9 +637,13 @@ rowCount: number;
 /**
  * `importing` while the background worker is still streaming rows in,
  * `ready` when complete, `failed` when the worker errored or the app
- * closed mid-import.
+ * closed mid-import. `deleting` while [`delete_dataset`] is at work on
+ * it, and `delete_incomplete` when a delete was cut off (the app closed)
+ * and is waiting to be finished. The last is computed at read time from
+ * the stored `deleting` plus the maintenance gate, never stored.
  */
 importState: string; importError: string | null }
+export type DirUsage = { path: string; bytes: number }
 /**
  * Last-known download position for one digit level, kept server-side so a
  * freshly-mounted client renders the true state from `models_status` without
@@ -554,6 +693,7 @@ lenMin: number; lenMedian: number; lenMax: number;
  */
 topShapes: ValueCount[] }
 export type FieldShapes = { subject: FieldShape; catalog: FieldShape; title: FieldShape }
+export type FileUsage = { name: string; bytes: number; modifiedAt: string | null }
 export type Finding = { code: FindingCode; severity: Severity; field: Field; count: number; 
 /**
  * `count / importable`; 0.0 for dataset-level checks with no row count.
@@ -637,9 +777,8 @@ modelId: number | null;
  * Key-set cursor: include rows with `row_index >= cursor`. `None` (and 0)
  * mean "from the start". The frontend hands back the row index of the
  * last row of a page + 1 to advance. Replaces `OFFSET` because `DuckDB`'s
- * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` ignores the
- * `(dataset_id, row_index)` index and scans the whole partition;
- * the range predicate lets the index drive the scan.
+ * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` scans the whole
+ * partition; the range predicate lets the scan skip to the cursor.
  */
 cursor: number | null; limit: number }
 export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title: ColumnStats }
@@ -662,7 +801,13 @@ export type ModelStatus = { digitLevel: number; displayName: string; hfRepo: str
  * Files on disk with the manifest's exact size. Full sha256 verification
  * happens during download, not on status polls.
  */
-filesPresent: number; totalBytes: number; loaded: boolean; loading: boolean; 
+filesPresent: number; 
+/**
+ * The files on disk were downloaded for an earlier release's revision
+ * of this model (#202). It can't be loaded until downloaded again,
+ * even when `files_present` says every file is there.
+ */
+updateRequired: boolean; totalBytes: number; loaded: boolean; loading: boolean; 
 /**
  * Whether a download is in flight app-wide (same value on every row).
  * This — not any component-local pending flag — gates the Download
@@ -691,6 +836,20 @@ export type Phase = "MigratingData" | "OpeningDatabase" |
  * not by a step.
  */
 "BackingUp" | "UpgradingSchema" | "LoadingRuntime"
+/**
+ * Which cached classifications [`storage_prune`] removes.
+ */
+export type PruneScope = 
+/**
+ * Results of model revisions this build no longer ships. Nothing in the
+ * app can show or export them.
+ */
+"superseded_models" | 
+/**
+ * Results for inputs no dataset contains. They would be recomputed if
+ * the same courses were imported again.
+ */
+"unreferenced"
 export type RaggedRow = { row: number; fields: number }
 /**
  * Row granularity of the export (EPI-78).
@@ -717,7 +876,7 @@ export type RunDetail = { id: string; datasetId: string; datasetTitle: string; d
  * How many models the run covers (EPI-96). Row counters are in
  * row×model units — the UI divides by this to talk about dataset rows.
  */
-modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[] }
+modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[]; superseded: boolean }
 /**
  * One row in the Runs sidebar list. Joined with the dataset title so the UI
  * doesn't need a second IPC call to render a meaningful label.
@@ -744,7 +903,11 @@ resumable: boolean;
  * (`model_superseded`, `model_not_loaded`). Empty when resumable, and
  * for states resume doesn't apply to.
  */
-resumeBlockers: string[] }
+resumeBlockers: string[]; 
+/**
+ * The run used a model version this build no longer ships (#202).
+ */
+superseded: boolean }
 /**
  * Per-pack download progress, mirroring `models::ModelDownloadProgress`.
  */
@@ -788,6 +951,11 @@ platformDefaultPriority: EpKind[]; packs: RuntimePackStatus[];
  * damaged-pack fallback, missing CUDA directory, failed preloads.
  */
 notices: string[] }
+export type RuntimeUsage = { ortVersion: string; 
+/**
+ * Whether this is the version the app loads packs from.
+ */
+current: boolean; path: string; bytes: number }
 export type Sample = { row: number; input: string }
 /**
  * A count of occurrences plus the first few examples.
@@ -854,6 +1022,31 @@ datasetId: string }
  * its own row. The frontend polls `get_run(run_id)` from here.
  */
 export type StartRunResponse = { runId: string; rowsTotal: number }
+export type StorageStatus = { 
+/**
+ * The data folder everything below lives in (except the `CoreML` cache).
+ */
+dataDir: string; database: DatabaseUsage; cache: CacheUsage; models: DirUsage; 
+/**
+ * Downloaded runtime packs, one entry per ONNX Runtime version folder.
+ */
+runtimes: RuntimeUsage[]; 
+/**
+ * Compiled `CoreML` models; `None` off macOS, where none are made.
+ */
+coremlCache: DirUsage | null; logs: DirUsage; 
+/**
+ * WALs set aside after a failed replay, oldest first.
+ */
+setAsideWals: FileUsage[]; 
+/**
+ * Pre-upgrade database backups. Each is as large as the database was.
+ */
+databaseBackups: FileUsage[]; 
+/**
+ * Why prune and compact can't start right now, or `None` when they can.
+ */
+busy: string | null }
 /**
  * Text encoding of a source CSV. `Utf8` covers files with or without a BOM;
  * the legacy variants are the two single-byte codepages Excel writes for

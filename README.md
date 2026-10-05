@@ -60,11 +60,23 @@ Before an update changes the database, the app copies it to `app.duckdb.pre-<ver
 
 A version of the app that is older than its data refuses to open it and names the version to install. Versions 0.5.0 and earlier do not make that check.
 
-**Reset app data** deletes this backup along with everything else.
+Once you're happy with the update, delete the backup under **Settings → Storage**. **Reset App Data…** deletes it along with everything else.
+
+## Freeing disk space
+
+To delete a dataset or a run, open it and click **Delete Dataset…** or **Delete Run…**. Deleting a dataset removes its courses and runs. Cached classifications stay, so importing the same courses again needs no new inference.
+
+**Settings → Storage** lists what the app keeps on disk and gives space back:
+
+- **Cached classifications**: remove results from earlier model versions, or results for courses no dataset contains any more
+- **Compact Database…**: the database file never shrinks by itself, so deleted data leaves free space inside it. Compacting writes a fresh copy without that space, then relaunches the app
+- **Database backup**: delete the pre-update backup
+
+To delete a GPU backend you no longer use, click **Remove** on its row in **Settings → Compute**.
 
 ## Resetting and uninstalling
 
-To start over without uninstalling, open **Settings → General** and click **Reset app data…**. The app relaunches and deletes every dataset, run, cached result, downloaded model, and runtime pack before it starts. Settings and custom themes are kept unless you tick **Also reset settings and themes**.
+To start over without uninstalling, open **Settings → Storage** and click **Reset App Data…**. The app relaunches and deletes every dataset, run, cached result, downloaded model, and runtime pack before it starts. Settings and custom themes are kept unless you tick **Also reset settings and themes**.
 
 Uninstalling removes the app but not its data, which can reach several GB with models and GPU runtime packs:
 

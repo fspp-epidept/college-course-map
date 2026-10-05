@@ -191,14 +191,15 @@ fn register_eps(
 /// format with native `LayerNormalization` / Erf / `Unsqueeze`, and it keeps
 /// our fp32 weights fp32, so the program runs fp32 on the GPU (the
 /// fp16-only Neural Engine is skipped). Compiled models are cached under
-/// the product cache dir: ONNX Runtime keys that cache by model path and
-/// never invalidates it, so `models::download_all` wipes the dir whenever a
-/// model file changes.
+/// the product cache dir, in a folder per ONNX Runtime version: ONNX Runtime
+/// keys that cache by model path and never invalidates it, so
+/// `models::download_all` wipes the dir whenever a model file changes and
+/// startup drops other versions' folders.
 fn register_coreml(
     builder: &mut ort::session::builder::SessionBuilder,
 ) -> Result<(), ep::RegisterError> {
     let mut coreml = ep::CoreML::default().with_model_format(ep::coreml::ModelFormat::MLProgram);
-    match crate::paths::coreml_cache_dir() {
+    match crate::runtime::coreml_cache_dir() {
         Ok(dir) => coreml = coreml.with_model_cache_dir(dir.display()),
         Err(e) => log::warn!("coreml: compiled-model cache disabled: {e}"),
     }

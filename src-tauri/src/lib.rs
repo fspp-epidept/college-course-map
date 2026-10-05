@@ -1,5 +1,6 @@
 // Public for `boot::Progress`, which `AppDb::open_at` takes and the examples
 // pass as `Progress::none()`.
+mod activity;
 pub mod boot;
 mod config;
 mod courses;
@@ -25,6 +26,7 @@ pub mod runtime;
 pub mod seed;
 #[cfg(unix)]
 mod signals;
+mod storage;
 mod taxonomy;
 // The native menu is macOS-only (Windows/Linux use custom in-WebView chrome,
 // decision #102); the module itself builds everywhere for its typed event.
@@ -46,6 +48,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             courses::get_classification_coverage,
             courses::list_courses_with_results,
             courses::model_id_for_digit_level,
+            datasets::delete_dataset,
             datasets::get_input_profile,
             datasets::list_datasets,
             export::export_results,
@@ -62,13 +65,20 @@ fn specta_builder() -> Builder<tauri::Wry> {
             reset::request_reset,
             runtime::download_runtime,
             runtime::relaunch_app,
+            runtime::remove_runtime,
             runtime::runtime_status,
+            runs::delete_run,
             runs::get_latest_run,
             runs::get_run,
             runs::list_runs,
             runs::pause_run,
             runs::resume_run,
             runs::start_run,
+            storage::compact_database,
+            storage::open_data_dir,
+            storage::storage_clear,
+            storage::storage_prune,
+            storage::storage_status,
             taxonomy::list_ccm_taxonomy,
             taxonomy::open_ccm_reference,
         ])

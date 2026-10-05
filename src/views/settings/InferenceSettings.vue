@@ -6,6 +6,7 @@ import {
   useApplyInferenceSettings,
   useDownloadRuntime,
   useInferenceSettings,
+  useRemoveRuntime,
   useRuntimeEvents,
   useRuntimeStatus,
   useSaveRelaunchSetting,
@@ -24,6 +25,7 @@ const settings = useInferenceSettings();
 const apply = useApplyInferenceSettings();
 const saveRelaunch = useSaveRelaunchSetting();
 const downloadRuntime = useDownloadRuntime();
+const removeRuntime = useRemoveRuntime();
 const { progress } = useRuntimeEvents();
 
 // Backend startup notices (EPI-87: damaged pack, stale CUDA dir, missing
@@ -247,10 +249,25 @@ function fmtSize(bytes: number): string {
           >
             Download
           </UButton>
+          <!-- The bundled CPU backend and the one in use can't be removed. -->
+          <UButton
+            v-if="backend.installed && !backend.active && backend.id !== 'cpu'"
+            size="xs"
+            variant="ghost"
+            color="neutral"
+            :loading="removeRuntime.isPending.value && removeRuntime.variables.value === backend.id"
+            :disabled="removeRuntime.isPending.value"
+            @click="removeRuntime.mutate(backend.id)"
+          >
+            Remove
+          </UButton>
         </li>
       </ul>
       <p v-if="downloadRuntime.error.value" class="text-xs text-(--ui-color-error-500)">
         {{ downloadRuntime.error.value.message }}
+      </p>
+      <p v-if="removeRuntime.error.value" class="text-xs text-(--ui-color-error-500)">
+        {{ removeRuntime.error.value.message }}
       </p>
     </div>
 

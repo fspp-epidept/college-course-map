@@ -218,3 +218,23 @@ export function usePauseRun() {
     },
   });
 }
+
+/**
+ * Delete a run's record (#198). Its cached classifications stay and are
+ * reused by the next run. The per-run query is removed, not refetched: a
+ * refetch would fail with "not found" before the sidebar drops the selection.
+ */
+export function useDeleteRun() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (runId: string) => {
+      const result = await commands.deleteRun(runId);
+      if (result.status === "error") throw new Error(result.error);
+    },
+    onSuccess: (_data, runId) => {
+      queryClient.removeQueries({ queryKey: ["runs", runId], exact: true });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["metrics"] });
+    },
+  });
+}

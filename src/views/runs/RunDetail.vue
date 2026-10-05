@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import {
   resumeBlockerText,
+  useDeleteRun,
   usePauseRun,
   useResumeRun,
   useRun,
   useRunRate,
 } from "../../composables/useRuns";
+import { useWorkspace } from "../../stores/workspace";
 import { runStateMeta } from "./runState";
 
 // Master/detail (EPI-58): RunsPanel keys this component by run id.
@@ -30,6 +32,20 @@ function onPause() {
 const resumeRun = useResumeRun();
 function onResume() {
   resumeRun.mutate(currentRunId.value);
+}
+
+// Delete (#198): the record only. Clear the selection first so this
+// component unmounts instead of refetching a run that no longer exists.
+const workspace = useWorkspace();
+const deleteRun = useDeleteRun();
+const deleteOpen = ref(false);
+function onDelete() {
+  deleteRun.mutate(currentRunId.value, {
+    onSuccess: () => {
+      deleteOpen.value = false;
+      workspace.selectRun(null);
+    },
+  });
 }
 
 const rate = useRunRate(run);
@@ -87,30 +103,69 @@ function fmtTime(iso: string | null | undefined): string {
         <span v-if="run.executionProvider" class="text-sm text-(--ui-text-dimmed)">
           · {{ run.executionProvider }}
         </span>
-        <UButton
-          v-if="run.state === 'running'"
-          class="ml-auto"
-          color="neutral"
-          variant="subtle"
-          size="xs"
-          icon="i-lucide-pause"
-          :loading="pauseRun.isPending.value"
-          @click="onPause"
+        <span
+          v-if="run.superseded"
+          class="text-sm text-(--ui-text-dimmed)"
+          title="This run used a model version this release no longer ships."
         >
-          Pause
-        </UButton>
-        <UButton
-          v-else-if="run.resumable"
-          class="ml-auto"
-          color="primary"
-          size="xs"
-          icon="i-lucide-play"
-          :loading="resumeRun.isPending.value"
-          @click="onResume"
-        >
-          Resume
-        </UButton>
+          · older model version
+        </span>
+        <div class="ml-auto flex items-center gap-2">
+          <UButton
+            v-if="run.state === 'running'"
+            color="neutral"
+            variant="subtle"
+            size="xs"
+            icon="i-lucide-pause"
+            :loading="pauseRun.isPending.value"
+            @click="onPause"
+          >
+            Pause
+          </UButton>
+          <UButton
+            v-else-if="run.resumable"
+            color="primary"
+            size="xs"
+            icon="i-lucide-play"
+            :loading="resumeRun.isPending.value"
+            @click="onResume"
+          >
+            Resume
+          </UButton>
+          <UButton
+            v-if="run.state !== 'running'"
+            color="error"
+            variant="outline"
+            size="xs"
+            icon="i-lucide-trash-2"
+            @click="deleteOpen = true"
+          >
+            Delete Run…
+          </UButton>
+        </div>
       </div>
+
+      <UModal v-model:open="deleteOpen" title="Delete this run?">
+        <template #body>
+          <div class="flex flex-col gap-3 text-sm">
+            <p class="text-(--ui-text-muted)">
+              This removes the run's record from the list. The classifications it
+              computed are kept and reused by the next run on the same courses.
+            </p>
+            <p v-if="deleteRun.error.value" class="text-(--ui-color-error-500)">
+              Delete failed: {{ deleteRun.error.value.message }}
+            </p>
+          </div>
+        </template>
+        <template #footer>
+          <div class="flex justify-end gap-2 w-full">
+            <UButton variant="ghost" color="neutral" @click="deleteOpen = false">Cancel</UButton>
+            <UButton color="error" :loading="deleteRun.isPending.value" @click="onDelete">
+              Delete Run
+            </UButton>
+          </div>
+        </template>
+      </UModal>
 
       <div
         v-if="run.state === 'interrupted' && !run.resumable"

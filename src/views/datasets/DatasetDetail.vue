@@ -15,6 +15,7 @@ import {
   useRuns,
 } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
+import DeleteDatasetDialog from "./DeleteDatasetDialog.vue";
 // Master/detail (EPI-58): DatasetsPanel keys this component by dataset id, so
 // all local state (view level, cursors, dialogs) is per-dataset by
 // construction.
@@ -142,6 +143,11 @@ const { data: datasets } = useDatasets();
 const dataset = computed(() => datasets.value?.find((d) => d.id === currentDatasetId.value));
 const isImporting = computed(() => dataset.value?.importState === "importing");
 const importFailed = computed(() => dataset.value?.importState === "failed");
+// A delete in flight, or one that was cut off and waits to be finished
+// (#199). Either way the dataset is closed to new work.
+const isDeleting = computed(() => dataset.value?.importState === "deleting");
+const deleteIncomplete = computed(() => dataset.value?.importState === "delete_incomplete");
+const beingDeleted = computed(() => isDeleting.value || deleteIncomplete.value);
 
 // When import finishes (or fails), refresh the courses + coverage queries
 // exactly once so the table fills in, and the input profile the worker
@@ -177,6 +183,7 @@ const profileSummary = computed(() => {
 // Why Classify can't start right now (null = it can). The button's disabled
 // state and the Run menu's toast both read this.
 const classifyBlocker = computed<string | null>(() => {
+  if (beingDeleted.value) return "This dataset is being deleted.";
   if (isImporting.value) return "The import is still running.";
   if (importFailed.value) return "The import failed.";
   if (isRunning.value) return "This dataset is already classifying.";
@@ -185,6 +192,20 @@ const classifyBlocker = computed<string | null>(() => {
   return null;
 });
 const classifyDisabled = computed(() => classifyBlocker.value !== null);
+
+// --- Delete (#199) ---
+// Why Delete can't start right now (null = it can); see classifyBlocker.
+// The backend enforces the same rules.
+const deleteOpen = ref(false);
+const deleteBlocker = computed<string | null>(() => {
+  if (isDeleting.value) return "This dataset is already being deleted.";
+  if (isImporting.value) return "The import is still running.";
+  if (isRunning.value) return "This dataset is classifying. Pause the run first.";
+  return null;
+});
+const runCount = computed(
+  () => allRuns.value?.filter((r) => r.datasetId === currentDatasetId.value).length ?? 0,
+);
 
 // --- Run card presentation ---
 
@@ -306,6 +327,7 @@ const uniqueRows = ref(false);
 
 // Why Export can't open right now (null = it can); see classifyBlocker.
 const exportBlocker = computed<string | null>(() => {
+  if (beingDeleted.value) return "This dataset is being deleted.";
   if (modelId.value == null) return "The models aren't loaded yet.";
   if (isRunning.value) return "Wait for the run to finish.";
   if (totalRows.value === 0) return "There are no courses to export.";
@@ -396,7 +418,62 @@ watch(
       >
         import failed
       </span>
+      <span
+        v-else-if="isDeleting"
+        class="text-(--ui-color-info-500) animate-pulse text-xs uppercase tracking-wide"
+      >
+        deleting
+      </span>
+      <span
+        v-else-if="deleteIncomplete"
+        class="text-(--ui-color-warning-500) text-xs uppercase tracking-wide"
+      >
+        delete incomplete
+      </span>
+      <UButton
+        v-if="dataset && !isDeleting"
+        class="ml-auto"
+        color="error"
+        variant="outline"
+        size="xs"
+        icon="i-lucide-trash-2"
+        :disabled="deleteBlocker !== null"
+        :title="deleteBlocker ?? undefined"
+        @click="deleteOpen = true"
+      >
+        {{ deleteIncomplete ? "Finish Deleting…" : "Delete Dataset…" }}
+      </UButton>
     </header>
+
+    <DeleteDatasetDialog
+      v-if="dataset"
+      v-model:open="deleteOpen"
+      :dataset-id="dataset.id"
+      :title="dataset.title"
+      :course-count="dataset.rowCount"
+      :run-count="runCount"
+      :incomplete="deleteIncomplete"
+    />
+
+    <div
+      v-if="isDeleting"
+      class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-1"
+    >
+      <span class="text-(--ui-text) font-medium">Deleting this dataset…</span>
+      <span class="text-(--ui-text-dimmed) text-xs">
+        A large dataset can take a minute. You can keep working elsewhere in the app.
+      </span>
+    </div>
+    <div
+      v-else-if="deleteIncomplete"
+      class="rounded-lg border border-(--ui-color-warning-500)/40 bg-(--ui-color-warning-500)/10 px-4 py-3 text-sm flex flex-col gap-1"
+    >
+      <span class="text-(--ui-text) font-medium">Deleting this dataset didn't finish</span>
+      <span class="text-(--ui-text-muted)">
+        The app closed before the delete was done. Its courses and runs are already
+        gone. Use Finish Deleting to remove what is left.
+      </span>
+    </div>
 
     <div
       v-if="isImporting"
@@ -452,7 +529,7 @@ watch(
       </p>
     </div>
 
-    <section class="flex flex-col gap-3">
+    <section v-if="!beingDeleted" class="flex flex-col gap-3">
       <!-- Classify action: one button, one confirm (EPI-96 — a run always
            covers every model). Selection of what to LOOK at lives in the
            table header below; this control only starts work. -->
@@ -666,7 +743,7 @@ watch(
       </Transition>
     </section>
 
-    <section v-if="!isImporting" class="flex flex-col gap-3 min-h-0">
+    <section v-if="!isImporting && !beingDeleted" class="flex flex-col gap-3 min-h-0">
       <div class="flex items-center justify-between gap-3 flex-wrap">
         <div class="flex items-center gap-3">
           <h3 class="text-sm font-medium text-(--ui-text)">Courses</h3>
