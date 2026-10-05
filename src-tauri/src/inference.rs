@@ -145,9 +145,9 @@ static FAILED_EPS: FailedEps = FailedEps::new();
 /// ([`load_model`]), running one ([`classify_batch`]) and releasing one
 /// ([`OrtSession`]'s drop). `boot::shutdown` calls [`close_ort`] before the
 /// process exits; after that a thread that reaches ORT parks until the
-/// process ends instead of entering. Parking, not an error: a run stopped
-/// there is left `running` and swept to `interrupted` on the next launch, as
-/// for any exit, and a three-model load stops between models.
+/// process ends instead of entering. Parking, not an error: a classification
+/// stopped there is left `running` and swept to `stopped` on the next launch,
+/// as for any exit, and a three-model load stops between models.
 struct OrtGate {
     state: Mutex<GateState>,
     drained: std::sync::Condvar,
