@@ -1,24 +1,21 @@
 <script setup lang="ts">
-import { useMutation, useQueryClient } from "@tanstack/vue-query";
+import { useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
-import { commands } from "../../bindings";
+import { type ClassifyState, commands } from "../../bindings";
 import InputProfilePanel from "../../components/InputProfilePanel.vue";
 import InputSamples from "../../components/InputSamples.vue";
 import { INPUT_FINDINGS } from "../../config/inputFindings";
 import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useDatasets, useInputProfile } from "../../composables/useDatasets";
 import {
-  resumeBlockerText,
-  useLatestRun,
-  usePauseRun,
-  useResumeRun,
-  useRunRate,
-  useRuns,
-} from "../../composables/useRuns";
+  progressDone,
+  progressTotal,
+  useClassifyDataset,
+  useClassifyRate,
+  useStopClassification,
+} from "../../composables/useClassify";
 import { useWorkspace } from "../../stores/workspace";
 import DeleteDatasetDialog from "./DeleteDatasetDialog.vue";
-import DeleteRunDialog from "./DeleteRunDialog.vue";
-import RunHistory from "./RunHistory.vue";
 // Master/detail (EPI-58): DatasetsPanel keys this component by dataset id, so
 // all local state (view level, cursors, dialogs) is per-dataset by
 // construction.
@@ -35,109 +32,6 @@ const LEVELS: readonly DigitLevel[] = [2, 4, 6] as const;
 const viewLevel = ref<DigitLevel>(6);
 
 const queryClient = useQueryClient();
-
-// --- Run state (backend-derived, EPI-68) ---
-// The run surface card renders from "the dataset's latest run" as the backend
-// reports it — not from a component-local run id — so it survives tab
-// close/reopen and app restart. Polls 250 ms while running.
-const { data: latestRun } = useLatestRun(currentDatasetId);
-const isRunning = computed(() => latestRun.value?.state === "running");
-
-// Global runs list (1 s heartbeat while anything runs) tells this tab about
-// runs on *other* datasets: only one run may be active app-wide.
-const { data: allRuns } = useRuns();
-const activeElsewhere = computed(() => {
-  const other = allRuns.value?.find(
-    (r) => r.state === "running" && r.datasetId !== currentDatasetId.value,
-  );
-  return other ?? null;
-});
-
-// --- Coverage (EPI-68) ---
-// Per-model classified/total counts: feeds the view-switcher chips and the
-// confirm panel's "already classified" line.
-const { data: coverage, refetch: refetchCoverage } = useCoverage(currentDatasetId);
-function coverageFor(level: DigitLevel) {
-  return coverage.value?.find((c) => c.digitLevel === level) ?? null;
-}
-function coverageLabel(level: DigitLevel): string {
-  const c = coverageFor(level);
-  if (!c || c.total === 0 || c.classified === 0) return "—";
-  const pct = Math.floor((c.classified / c.total) * 100);
-  // A dataset that's classified-but-not-quite-100% floors to 99, never
-  // rounds up to a dishonest 100.
-  return `${c.classified >= c.total ? 100 : Math.min(pct, 99)}%`;
-}
-
-// --- Classify action ---
-// A run always covers every model (EPI-96) — one button, one confirm.
-
-const confirmOpen = ref(false);
-const startError = ref<string | null>(null);
-
-const classify = useMutation({
-  mutationFn: async () => {
-    const result = await commands.startRun({ datasetId: currentDatasetId.value });
-    if (result.status === "error") throw new Error(result.error);
-    return result.data;
-  },
-  onSuccess: () => {
-    confirmOpen.value = false;
-    startError.value = null;
-    // ["runs"] prefix-matches the latest-run query, which flips the card to
-    // its running state on the next render.
-    queryClient.invalidateQueries({ queryKey: ["runs"] });
-    queryClient.invalidateQueries({ queryKey: ["datasets"] });
-    queryClient.invalidateQueries({ queryKey: ["metrics"] });
-  },
-  onError: (err: Error) => {
-    startError.value = err.message;
-  },
-});
-
-function requestRun(): void {
-  startError.value = null;
-  confirmOpen.value = true;
-  // The confirm panel quotes cache numbers; make sure they're current at the
-  // moment of decision, not from tab-mount time.
-  refetchCoverage();
-}
-
-// Confirm-panel numbers: what each level still needs to compute.
-const confirmLevels = computed(() =>
-  LEVELS.map((level) => {
-    const c = coverageFor(level);
-    return {
-      level,
-      remaining: c ? c.total - c.classified : null,
-      classified: c?.classified ?? 0,
-    };
-  }),
-);
-
-// --- Pause ---
-
-const pauseRun = usePauseRun();
-// `pause_run` flips a flag; the worker still drains its current batch before
-// the run flips to `interrupted`. Track the request locally so the card can
-// say "Pausing…" during that honest gap.
-const pauseRequested = ref(false);
-function onPause(): void {
-  if (!latestRun.value) return;
-  pauseRequested.value = true;
-  pauseRun.mutate(latestRun.value.id);
-}
-watch(isRunning, (running) => {
-  if (!running) pauseRequested.value = false;
-});
-
-// --- Resume (EPI-38) ---
-
-const resumeRun = useResumeRun();
-function onResume(): void {
-  if (!latestRun.value) return;
-  resumeRun.mutate(latestRun.value.id);
-}
 
 // --- Dataset import state ---
 // Surface this dataset's import state by reusing the cached datasets query
@@ -163,6 +57,89 @@ watch(isImporting, (now, before) => {
   }
 });
 
+// --- Classification (#249) ---
+// The dataset's classification state and, while a job runs, its live
+// progress ride on the datasets list, which polls every 500 ms meanwhile.
+const classification = computed(() => dataset.value?.classification);
+const isRunning = computed(() => classification.value?.state === "running");
+const progress = computed(() => classification.value?.progress ?? null);
+const stopping = computed(() => progress.value?.stopping ?? false);
+// Only one dataset classifies at a time, app-wide.
+const activeElsewhere = computed(
+  () =>
+    datasets.value?.find(
+      (d) => d.classification.state === "running" && d.id !== currentDatasetId.value,
+    ) ?? null,
+);
+
+// --- Coverage (EPI-68) ---
+// Per-model classified/total counts from the cache, at rest. While a job
+// runs, its in-memory progress stands in (same units), so the 500 ms poll
+// never turns into coverage scans.
+const { data: coverage, refetch: refetchCoverage } = useCoverage(currentDatasetId);
+function levelCounts(level: DigitLevel): { done: number; total: number } | null {
+  const live = progress.value?.levels.find((l) => l.digitLevel === level);
+  if (live) return { done: live.done, total: live.total };
+  const c = coverage.value?.find((row) => row.digitLevel === level);
+  return c ? { done: c.classified, total: c.total } : null;
+}
+function coverageLabel(level: DigitLevel): string {
+  const c = levelCounts(level);
+  if (!c || c.total === 0 || c.done === 0) return "—";
+  const pct = Math.floor((c.done / c.total) * 100);
+  // A dataset that's classified-but-not-quite-100% floors to 99, never
+  // rounds up to a dishonest 100.
+  return `${c.done >= c.total ? 100 : Math.min(pct, 99)}%`;
+}
+const fullyClassified = computed(() =>
+  LEVELS.every((level) => {
+    const c = levelCounts(level);
+    return c !== null && c.total > 0 && c.done >= c.total;
+  }),
+);
+const anyClassified = computed(() => LEVELS.some((level) => (levelCounts(level)?.done ?? 0) > 0));
+
+// --- Classify action ---
+// One button, one confirm: a job always covers every model, and classifying
+// a stopped dataset again is the resume (the cache skips finished courses).
+
+const confirmOpen = ref(false);
+const classify = useClassifyDataset();
+
+function requestClassify(): void {
+  classify.reset();
+  confirmOpen.value = true;
+  // The confirm panel quotes cache numbers; make sure they're current at the
+  // moment of decision, not from page-mount time.
+  refetchCoverage();
+}
+
+function startClassify(): void {
+  classify.mutate(currentDatasetId.value, {
+    onSuccess: () => {
+      confirmOpen.value = false;
+    },
+  });
+}
+
+// Confirm-panel numbers: what each level still needs to compute.
+const confirmLevels = computed(() =>
+  LEVELS.map((level) => {
+    const c = coverage.value?.find((row) => row.digitLevel === level);
+    return {
+      level,
+      remaining: c ? c.total - c.classified : null,
+      classified: c?.classified ?? 0,
+    };
+  }),
+);
+
+// --- Stop ---
+const stopClassification = useStopClassification();
+function onStop(): void {
+  stopClassification.mutate(currentDatasetId.value);
+}
+
 // --- Input check ---
 // The profile the import worker persisted (profile.rs). Null for datasets
 // imported before input checks existed; those say so rather than recompute.
@@ -184,14 +161,14 @@ const profileSummary = computed(() => {
 });
 
 // Why Classify can't start right now (null = it can). The button's disabled
-// state and the Run menu's toast both read this.
+// state and the Classify menu's toast both read this.
 const classifyBlocker = computed<string | null>(() => {
   if (beingDeleted.value) return "This dataset is being deleted.";
   if (isImporting.value) return "The import is still running.";
   if (importFailed.value) return "The import failed.";
   if (isRunning.value) return "This dataset is already classifying.";
-  if (activeElsewhere.value) return `A run is active on ${activeElsewhere.value.datasetTitle}.`;
-  if (classify.isPending.value) return "A run is already starting.";
+  if (activeElsewhere.value) return `${activeElsewhere.value.title} is classifying.`;
+  if (classify.isPending.value) return "Classification is already starting.";
   return null;
 });
 const classifyDisabled = computed(() => classifyBlocker.value !== null);
@@ -203,67 +180,62 @@ const deleteOpen = ref(false);
 const deleteBlocker = computed<string | null>(() => {
   if (isDeleting.value) return "This dataset is already being deleted.";
   if (isImporting.value) return "The import is still running.";
-  if (isRunning.value) return "This dataset is classifying. Pause the run first.";
+  if (isRunning.value) return "This dataset is classifying. Stop it first.";
   return null;
 });
 
-// --- This dataset's runs (#247) ---
-// The latest run has the run card; the ones before it are listed under it.
-// A run is a record about a dataset, so this page is the one place runs show.
-const datasetRuns = computed(
-  () => allRuns.value?.filter((r) => r.datasetId === currentDatasetId.value) ?? [],
-);
-const runCount = computed(() => datasetRuns.value.length);
-const earlierRuns = computed(() => datasetRuns.value.filter((r) => r.id !== latestRun.value?.id));
-// The run the delete confirm is open for, if any.
-const deleteRunId = ref<string | null>(null);
-
-// --- Run card presentation ---
+// --- Classification card presentation ---
 
 const progressPct = computed(() => {
-  const r = latestRun.value;
-  if (!r?.rowsTotal || r.rowsProcessed === null || r.rowsProcessed === undefined) {
-    return null;
-  }
-  return Math.round((r.rowsProcessed / r.rowsTotal) * 100);
+  const p = progress.value;
+  const total = p ? progressTotal(p) : 0;
+  if (!p || total === 0) return null;
+  return Math.floor((progressDone(p) / total) * 100);
 });
 
-const rate = useRunRate(latestRun);
+const rate = useClassifyRate(progress);
 const rateLabel = computed(() =>
   rate.value === null ? null : `≈ ${Math.round(rate.value).toLocaleString()} classifications/s`,
+);
+
+// The model the job is on: the first one not yet complete.
+const runningLevel = computed(
+  () => progress.value?.levels.find((l) => l.done < l.total)?.digitLevel ?? null,
 );
 
 function fmtTime(iso: string): string {
   return new Date(iso).toLocaleString();
 }
 
-const runStateHeading = computed(() => {
-  const r = latestRun.value;
-  if (!r) return "";
-  const level = r.digitLevel ? `${r.digitLevel}-digit` : "All-models";
-  if (r.state === "running" && pauseRequested.value)
-    return "Pausing — finishing the current batch…";
-  switch (r.state) {
-    case "running":
-      return `Classifying (${level.toLowerCase()})…`;
-    case "completed":
-      return `${level} run complete`;
-    case "interrupted":
-      return `${level} run paused`;
-    case "failed":
-      return `${level} run failed`;
-    default:
-      return `${level} run ${r.state}`;
-  }
+const STATE_HEADINGS: Record<ClassifyState, () => string> = {
+  running: () =>
+    stopping.value
+      ? "Stopping — finishing the current batch…"
+      : runningLevel.value
+        ? `Classifying with the ${runningLevel.value}-digit model…`
+        : "Classifying…",
+  stopped: () => "Classification stopped",
+  failed: () => "Classification failed",
+  idle: () =>
+    fullyClassified.value
+      ? "Classified with all models"
+      : anyClassified.value
+        ? "Partly classified"
+        : "Not classified",
+};
+const heading = computed(() => {
+  const state = classification.value?.state;
+  return state ? STATE_HEADINGS[state]() : "";
 });
 
-// While a run is writing results for the level being viewed, keep the visible
-// table page fresh. Other levels' columns can't change, so don't refetch them.
+// While a job is writing results for the level being viewed, keep the
+// visible table page fresh. Other levels' columns can't change, so don't
+// refetch them.
 watch(
-  () => latestRun.value?.rowsProcessed,
+  () => (progress.value ? progressDone(progress.value) : null),
   (next, prev) => {
-    if (!isRunning.value || next === prev) return;
-    if (latestRun.value?.digitLevel === viewLevel.value) {
+    if (next === null || next === prev) return;
+    if (runningLevel.value === viewLevel.value) {
       queryClient.invalidateQueries({ queryKey: ["courses", currentDatasetId.value] });
     }
   },
@@ -349,7 +321,7 @@ const uniqueRows = ref(false);
 const exportBlocker = computed<string | null>(() => {
   if (beingDeleted.value) return "This dataset is being deleted.";
   if (modelId.value == null) return "The models aren't loaded yet.";
-  if (isRunning.value) return "Wait for the run to finish.";
+  if (isRunning.value) return "Wait for classification to finish.";
   if (totalRows.value === 0) return "There are no courses to export.";
   return null;
 });
@@ -389,7 +361,7 @@ async function exportCsv(): Promise<void> {
 }
 
 // --- Menu requests (useNativeMenu) ---
-// File → Export Results and Run → Start Classification ask the selected
+// File → Export Results and Classify → Start Classification ask the selected
 // dataset for its Classify / Export button action. Wait until the queries
 // behind the blockers have settled, then do exactly what the button would.
 const workspace = useWorkspace();
@@ -397,7 +369,6 @@ const toast = useToast();
 const blockersSettled = computed(
   () =>
     dataset.value !== undefined &&
-    latestRun.value !== undefined &&
     (isImporting.value ||
       coursesError.value ||
       (modelId.value !== undefined && coursePage.value !== undefined)),
@@ -412,7 +383,7 @@ watch(
       const title = action === "classify" ? "Can't start classification" : "Can't export yet";
       toast.add({ title, description: blocker, color: "neutral" });
     } else if (action === "classify") {
-      requestRun();
+      requestClassify();
     } else {
       exportOpen.value = true;
     }
@@ -471,7 +442,6 @@ watch(
       :dataset-id="dataset.id"
       :title="dataset.title"
       :course-count="dataset.rowCount"
-      :run-count="runCount"
       :incomplete="deleteIncomplete"
     />
 
@@ -490,7 +460,7 @@ watch(
     >
       <span class="text-(--ui-text) font-medium">Deleting this dataset didn't finish</span>
       <span class="text-(--ui-text-muted)">
-        The app closed before the delete was done. Its courses and runs are already
+        The app closed before the delete was done. Its courses are already
         gone. Use Finish Deleting to remove what is left.
       </span>
     </div>
@@ -550,27 +520,26 @@ watch(
     </div>
 
     <section v-if="!beingDeleted" class="flex flex-col gap-3">
-      <!-- Classify action: one button, one confirm (EPI-96 — a run always
-           covers every model). Selection of what to LOOK at lives in the
-           table header below; this control only starts work. -->
+      <!-- Classify action: one button, one confirm (a job always covers
+           every model). Selection of what to LOOK at lives in the table
+           header below; this control only starts work. -->
       <div class="flex items-center gap-3">
         <UButton
           color="primary"
           icon="i-lucide-play"
           :disabled="classifyDisabled"
-          @click="requestRun"
+          @click="requestClassify"
         >
           Classify
         </UButton>
         <span v-if="activeElsewhere" class="text-xs text-(--ui-text-muted)">
-          A run is active on
-          <span class="text-(--ui-text)">{{ activeElsewhere.datasetTitle }}</span>
-          — pause it or wait for it to finish.
+          <span class="text-(--ui-text)">{{ activeElsewhere.title }}</span>
+          is classifying — stop it or wait for it to finish.
         </span>
       </div>
 
       <!-- Inline confirm panel (EPI-66's confirm requirement, EPI-68's form).
-           Expands in place of the run card; the numbers sit next to the table
+           Expands in place of the classification card; the numbers sit next to the table
            they describe. No overlay, nothing modal to dismiss. -->
       <Transition
         mode="out-in"
@@ -609,7 +578,7 @@ watch(
           </ul>
           <!-- What the model will read (decision 2026-09-30): the stored
                profile's samples and its warnings, so a bad mapping is visible
-               at the moment of decision. Informational; Start Run stays on. -->
+               at the moment of decision. Informational; Classify stays on. -->
           <div class="flex flex-col gap-1 text-xs">
             <template v-if="inputProfile">
               <p class="text-(--ui-text-muted)">
@@ -635,8 +604,8 @@ watch(
             Runs locally on this machine, one model at a time. You can keep
             working while it runs.
           </p>
-          <p v-if="startError" class="text-(--ui-color-error-500) text-xs">
-            {{ startError }}
+          <p v-if="classify.error.value" class="text-(--ui-color-error-500) text-xs">
+            {{ classify.error.value.message }}
           </p>
           <div class="flex justify-end gap-2 pt-1">
             <UButton variant="ghost" color="neutral" @click="confirmOpen = false">
@@ -646,63 +615,42 @@ watch(
               color="primary"
               :loading="classify.isPending.value"
               :disabled="classifyDisabled"
-              @click="classify.mutate()"
+              @click="startClassify"
             >
-              Start Run
+              Classify
             </UButton>
           </div>
         </div>
 
-        <!-- Run surface card: the dataset's latest run as the backend reports
-             it. Confirm panel takes its place while a decision is pending. -->
+        <!-- Classification card: the dataset's state as the backend reports
+             it, with per-model coverage as the status. Confirm panel takes
+             its place while a decision is pending. -->
         <div
-          v-else-if="latestRun"
-          key="run-card"
+          v-else-if="classification"
+          key="classification-card"
           class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
         >
           <div class="flex items-center justify-between gap-3">
-            <span class="text-(--ui-text) font-medium">{{ runStateHeading }}</span>
-            <div class="flex items-center gap-3">
-              <span v-if="progressPct !== null && isRunning" class="tabular-nums text-(--ui-text-muted)">
+            <span class="text-(--ui-text) font-medium">{{ heading }}</span>
+            <div v-if="isRunning" class="flex items-center gap-3">
+              <span v-if="progressPct !== null" class="tabular-nums text-(--ui-text-muted)">
                 {{ progressPct }}%
               </span>
               <UButton
-                v-if="isRunning"
                 color="neutral"
                 variant="subtle"
                 size="xs"
-                icon="i-lucide-pause"
-                :disabled="pauseRequested"
-                @click="onPause"
+                icon="i-lucide-square"
+                :disabled="stopping"
+                @click="onStop"
               >
-                {{ pauseRequested ? "Pausing…" : "Pause" }}
+                {{ stopping ? "Stopping…" : "Stop" }}
               </UButton>
-              <UButton
-                v-else-if="latestRun.resumable"
-                color="primary"
-                size="xs"
-                icon="i-lucide-play"
-                :loading="resumeRun.isPending.value"
-                :disabled="activeElsewhere !== null"
-                @click="onResume"
-              >
-                Resume
-              </UButton>
-              <UButton
-                v-if="!isRunning"
-                icon="i-lucide-trash-2"
-                variant="ghost"
-                color="neutral"
-                size="xs"
-                aria-label="Delete run"
-                title="Delete Run…"
-                @click="deleteRunId = latestRun.id"
-              />
             </div>
           </div>
 
           <UProgress
-            v-if="progressPct !== null && isRunning"
+            v-if="isRunning && progressPct !== null"
             :model-value="progressPct"
             :max="100"
             color="primary"
@@ -710,100 +658,39 @@ watch(
           />
 
           <div class="grid grid-cols-2 gap-x-6 gap-y-1 text-(--ui-text-muted)">
-            <span>Classifications</span>
-            <span class="text-(--ui-text) tabular-nums">
-              {{ (latestRun.rowsProcessed ?? 0).toLocaleString() }} /
-              {{ (latestRun.rowsTotal ?? 0).toLocaleString() }}
-              <span
-                v-if="latestRun.modelCount > 1 && latestRun.rowsTotal"
-                class="text-(--ui-text-dimmed)"
-              >
-                ({{ Math.round(latestRun.rowsTotal / latestRun.modelCount).toLocaleString() }}
-                rows × {{ latestRun.modelCount }} models)
+            <template v-for="level in LEVELS" :key="level">
+              <span>{{ level }}-digit model</span>
+              <span class="text-(--ui-text) tabular-nums">
+                <template v-if="levelCounts(level)">
+                  {{ levelCounts(level)!.done.toLocaleString() }} /
+                  {{ levelCounts(level)!.total.toLocaleString() }} courses
+                </template>
+                <template v-else>—</template>
               </span>
-            </span>
-            <span>New classifications</span>
-            <span class="text-(--ui-text) tabular-nums">
-              {{ (latestRun.uniqueInputsDone ?? 0).toLocaleString() }}
-            </span>
-            <span>Cache hits</span>
-            <span class="text-(--ui-text) tabular-nums">
-              {{ (latestRun.cacheHits ?? 0).toLocaleString() }}
-            </span>
-            <template v-if="rateLabel">
+            </template>
+            <template v-if="isRunning && rateLabel">
               <span>Throughput</span>
               <span class="text-(--ui-text) tabular-nums">{{ rateLabel }}</span>
             </template>
-            <template v-if="latestRun.executionProvider">
+            <template v-if="classification.executionProvider">
               <span>Ran on</span>
-              <span class="text-(--ui-text)">{{ latestRun.executionProvider }}</span>
+              <span class="text-(--ui-text)">{{ classification.executionProvider }}</span>
             </template>
-            <template v-if="latestRun.startedAt">
-              <span>Started</span>
-              <span class="text-(--ui-text)">{{ fmtTime(latestRun.startedAt) }}</span>
-            </template>
-            <template v-if="latestRun.completedAt">
-              <span>Finished</span>
-              <span class="text-(--ui-text)">{{ fmtTime(latestRun.completedAt) }}</span>
-            </template>
-            <template v-if="latestRun.resumeCount > 0">
-              <span>Resumed</span>
-              <span class="text-(--ui-text) tabular-nums">
-                {{ latestRun.resumeCount }} {{ latestRun.resumeCount === 1 ? "time" : "times" }}
-              </span>
+            <template v-if="classification.updatedAt && !isRunning">
+              <span>Updated</span>
+              <span class="text-(--ui-text)">{{ fmtTime(classification.updatedAt) }}</span>
             </template>
           </div>
 
-          <p v-if="latestRun.superseded" class="text-(--ui-text-dimmed) text-xs">
-            This run used an older model version than this release ships.
+          <p v-if="classification.state === 'stopped'" class="text-(--ui-text-dimmed) text-xs">
+            Classify picks up where it left off; courses already finished come
+            straight from the cache.
           </p>
-
-          <p
-            v-if="latestRun.state === 'interrupted' && latestRun.resumable"
-            class="text-(--ui-text-dimmed) text-xs"
-          >
-            Progress is saved. Resume picks up where it left off — courses
-            already finished come straight from the cache.
+          <p v-if="classification.state === 'failed' && classification.error" class="text-(--ui-color-error-500) text-xs">
+            {{ classification.error }}
           </p>
-          <div
-            v-else-if="latestRun.state === 'interrupted'"
-            class="text-(--ui-text-muted) text-xs flex flex-col gap-0.5"
-          >
-            <span v-for="blocker in latestRun.resumeBlockers" :key="blocker">
-              {{ resumeBlockerText(blocker) }}
-            </span>
-          </div>
-
-          <p v-if="resumeRun.isError.value" class="text-(--ui-color-error-500) text-xs">
-            Resume failed: {{ resumeRun.error.value?.message }}
-          </p>
-
-          <p v-if="latestRun.errorMessage" class="text-(--ui-color-error-500) text-xs">
-            {{ latestRun.errorMessage }}
-          </p>
-
-          <div
-            v-if="latestRun.state === 'completed' && latestRun.digitLevel && latestRun.digitLevel !== viewLevel"
-          >
-            <UButton
-              variant="link"
-              color="primary"
-              size="xs"
-              class="px-0"
-              @click="viewLevel = latestRun.digitLevel as 2 | 4 | 6"
-            >
-              View {{ latestRun.digitLevel }}-Digit Results
-            </UButton>
-          </div>
         </div>
       </Transition>
-
-      <RunHistory
-        v-if="earlierRuns.length > 0"
-        :runs="earlierRuns"
-        @delete="deleteRunId = $event"
-      />
-      <DeleteRunDialog v-model:run-id="deleteRunId" />
     </section>
 
     <section v-if="!isImporting && !beingDeleted" class="flex flex-col gap-3 min-h-0">

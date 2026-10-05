@@ -246,8 +246,8 @@ pub(crate) async fn load_models(app: AppHandle) -> Result<(), String> {
 
 /// Clear the store and load fresh — the settings path for changes that only
 /// take effect at session build time (EPI-73: EP priority reorder). Unlike
-/// `load_models`, already-loaded is not a no-op. A run in flight finishes on
-/// its `Arc` of the old registry; new runs see the new sessions.
+/// `load_models`, already-loaded is not a no-op. A classification in flight
+/// finishes on its `Arc` of the old registry; new jobs see the new sessions.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn reload_models(app: AppHandle) -> Result<(), String> {

@@ -293,9 +293,10 @@ pub(crate) fn model_id_for_digit_level(
 
 /// Per-model classification coverage for one dataset: how many of its courses
 /// already have a cached result for each manifest-active model. Drives the
-/// dataset tab's per-level coverage chips and the pre-run confirm panel's
-/// "already classified" count (EPI-68). Counts are course-level (duplicate
-/// content hashes count once per course row), matching what a run would report.
+/// dataset page's per-level coverage and the classify confirm panel's
+/// "already classified" count. Counts are course-level (duplicate content
+/// hashes count once per course row), in the same units as a job's live
+/// progress (`classify::LevelProgress`).
 #[derive(Type, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CoverageRow {

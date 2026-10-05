@@ -18,6 +18,27 @@ async bootState() : Promise<Result<BootState, string>> {
 }
 },
 /**
+ * Classify a dataset with every manifest model. Starting over and resuming
+ * are the same thing: only courses without a cached result are computed.
+ * Returns once the job is running; progress shows up on `list_datasets`.
+ */
+async classifyDataset(datasetId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("classify_dataset", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Ask a dataset's job to stop. The worker stops at its next batch boundary,
+ * after flushing what it classified, and the dataset becomes `stopped`.
+ * `false` when the dataset has no job.
+ */
+async stopClassification(datasetId: string) : Promise<boolean> {
+    return await TAURI_INVOKE("stop_classification", { datasetId });
+},
+/**
  * List user-supplied themes (built-in themes are registered on the frontend).
  * Unparseable or invalid files are skipped, not fatal, so one bad file can't hide
  * the rest.
@@ -94,13 +115,13 @@ async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, s
 }
 },
 /**
- * Delete a dataset with its courses and runs, and its `source_files` row
+ * Delete a dataset with its courses, and its `source_files` row
  * when no other dataset uses it (#199). The original CSV on disk is never
  * touched, and neither is the results cache: classifications are keyed by
  * model and input, not by dataset, and are reused if the same courses are
  * imported again.
  * 
- * Refused while the dataset is importing or has a run in progress, while
+ * Refused while the dataset is importing or classifying, while
  * another dataset was derived from it, or while other maintenance runs.
  * Slow on a large dataset (seconds per million courses), so it runs on the
  * blocking pool. Deleting a dataset that is already gone is not an error,
@@ -222,8 +243,8 @@ async modelsStatus() : Promise<Result<ModelStatus[], string>> {
 /**
  * Clear the store and load fresh — the settings path for changes that only
  * take effect at session build time (EPI-73: EP priority reorder). Unlike
- * `load_models`, already-loaded is not a no-op. A run in flight finishes on
- * its `Arc` of the old registry; new runs see the new sessions.
+ * `load_models`, already-loaded is not a no-op. A classification in flight
+ * finishes on its `Arc` of the old registry; new jobs see the new sessions.
  */
 async reloadModels() : Promise<Result<null, string>> {
     try {
@@ -304,80 +325,10 @@ async runtimeStatus() : Promise<Result<RuntimeStatus, string>> {
 }
 },
 /**
- * Delete a run's record (#198). Refused while the run is executing; any
- * other state goes. The classifications it computed stay in the cache —
- * they are keyed by `(model_id, content_hash)`, not by run — and the next
- * run reuses them. Deleting a run that is already gone is not an error.
- */
-async deleteRun(runId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_run", { runId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Most recent run for a dataset, or `None` if the dataset has never been
- * classified. The dataset tab's run surface card derives from this — backend
- * state, not component memory — so it survives tab close/reopen and app
- * restart (EPI-68).
- */
-async getLatestRun(datasetId: string) : Promise<Result<RunDetail | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_latest_run", { datasetId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async listRuns() : Promise<Result<RunSummary[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_runs") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Request a graceful pause of an in-flight run. The worker stops at its next
- * batch boundary — after the current batch's results and progress are flushed
- * in the usual transaction — and finalizes the run as `interrupted` (resumable
- * later; see EPI-38/EPI-39). Returns `true` if a running worker was signalled,
- * `false` if the run wasn't active (already terminal, or unknown id).
- */
-async pauseRun(runId: string) : Promise<boolean> {
-    return await TAURI_INVOKE("pause_run", { runId });
-},
-/**
- * Resume an `interrupted` run (EPI-38). Same worker, same run id: the row
- * flips back to `running` with `resume_count` bumped, and the pipeline
- * selects only the courses still missing a result for this model — progress
- * continues from where it stopped (`total - remaining`), never from zero.
- * Idempotent by construction: anything already in `inference_results` is
- * never recomputed.
- */
-async resumeRun(runId: string) : Promise<Result<StartRunResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("resume_run", { runId }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-async startRun(req: StartRunRequest) : Promise<Result<StartRunResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_run", { req }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
  * Compact the database (#201): write a fresh copy holding only the live
  * rows, then relaunch; the next start puts the copy in place of the old
- * file before opening it (`db.rs`). Refused while an import or run is
- * working or other maintenance runs. From the moment the copy starts until
+ * file before opening it (`db.rs`). Refused while an import or classification
+ * is working or other maintenance runs. From the moment the copy starts until
  * the app exits nothing may write, so the maintenance slot is never given
  * back on success. Closing the app during the copy just abandons it.
  */
@@ -415,8 +366,8 @@ async storageClear(target: ClearTarget) : Promise<Result<null, string>> {
 /**
  * Remove the cached classifications in `scope` and return how many went
  * ([`StorageStatus::cache`] says beforehand how many that is). Refused
- * while an import or run is working or other maintenance runs; the space
- * comes back when the database is next compacted.
+ * while an import or classification is working or other maintenance
+ * runs; the space comes back when the database is next compacted.
  */
 async storagePrune(scope: PruneScope) : Promise<Result<number, string>> {
     try {
@@ -489,17 +440,11 @@ runtimeStateChanged: "runtime-state-changed"
 
 /** user-defined types **/
 
-export type AppMetrics = { datasets: number; courses: number; runs: number; completedRuns: number; 
+export type AppMetrics = { datasets: number; courses: number; 
 /**
  * Distinct `(model_id, content_hash)` rows in `inference_results`.
  */
-classifications: number; 
-/**
- * Sum of `runs.cache_hits` divided by sum of `runs.rows_processed`, both
- * across all runs. `None` when no rows have been processed yet (avoids a
- * noisy 0% on a fresh DB).
- */
-cacheHitRate: number | null }
+classifications: number }
 /**
  * What the boot screen renders. `total == 0` means no total is known yet
  * (indeterminate progress). `seq` grows with every change, so a client
@@ -548,6 +493,53 @@ unreferenced: number }
  */
 export type CcmEntry = { digitLevel: number; code: string; title: string; titleShort: string | null; description: string | null }
 export type CheckCount = { code: FindingCode; count: number }
+/**
+ * A dataset's classification, as `list_datasets` reports it.
+ */
+export type Classification = { state: ClassifyState; 
+/**
+ * The last failure's message, while `state` is `failed`.
+ */
+error: string | null; 
+/**
+ * Execution provider the latest job ran on.
+ */
+executionProvider: string | null; 
+/**
+ * When the state last changed.
+ */
+updatedAt: string | null; 
+/**
+ * Only while a job is executing in this process.
+ */
+progress: ClassifyProgress | null }
+/**
+ * Live progress of one job.
+ */
+export type ClassifyProgress = { 
+/**
+ * One row per model, in the order they run.
+ */
+levels: LevelProgress[]; 
+/**
+ * A stop was requested; the worker is finishing its current batch.
+ */
+stopping: boolean }
+/**
+ * A dataset's classification state, stored as text in
+ * `datasets.classify_state`. `running` never survives a launch: the startup
+ * sweep turns it into `stopped`.
+ */
+export type ClassifyState = 
+/**
+ * Not classifying. Coverage says how complete it is.
+ */
+"idle" | "running" | 
+/**
+ * Stopped by the user, or by the app closing, before every model was
+ * done. Classifying again picks up where it left off.
+ */
+"stopped" | "failed"
 /**
  * Leftover files [`storage_clear`] deletes.
  */
@@ -609,9 +601,10 @@ ccmTitleLevel: number | null }
 /**
  * Per-model classification coverage for one dataset: how many of its courses
  * already have a cached result for each manifest-active model. Drives the
- * dataset tab's per-level coverage chips and the pre-run confirm panel's
- * "already classified" count (EPI-68). Counts are course-level (duplicate
- * content hashes count once per course row), matching what a run would report.
+ * dataset page's per-level coverage and the classify confirm panel's
+ * "already classified" count. Counts are course-level (duplicate content
+ * hashes count once per course row), in the same units as a job's live
+ * progress (`classify::LevelProgress`).
  */
 export type CoverageRow = { modelId: number; digitLevel: number; classified: number; total: number }
 export type DatabaseUsage = { path: string; fileBytes: number; walBytes: number; 
@@ -639,7 +632,7 @@ rowCount: number;
  * and is waiting to be finished. The last is computed at read time from
  * the stored `deleting` plus the maintenance gate, never stored.
  */
-importState: string; importError: string | null }
+importState: string; importError: string | null; classification: Classification }
 export type DirUsage = { path: string; bytes: number }
 /**
  * Last-known download position for one digit level, kept server-side so a
@@ -764,6 +757,11 @@ raggedRows: Samples<RaggedRow> }
  * the user can pick the one that reads correctly.
  */
 export type InvalidField = { row: number; column: string; windows1252: string; macRoman: string }
+/**
+ * How many of the dataset's courses have a result for one model. Same units
+ * as `get_classification_coverage`, so the card can switch between them.
+ */
+export type LevelProgress = { digitLevel: number; done: number; total: number }
 export type ListCoursesRequest = { datasetId: string; 
 /**
  * Optional model id for the joined classification + probability columns.
@@ -782,7 +780,7 @@ export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title:
 /**
  * A frontend-handled menu command. The serde name is the native menu item id.
  */
-export type MenuAction = "about" | "preferences" | "import_csv" | "export_results" | "start_classification" | "pause_run" | "toggle_sidebar" | "toggle_command_palette"
+export type MenuAction = "about" | "preferences" | "import_csv" | "export_results" | "start_classification" | "stop_classification" | "toggle_sidebar" | "toggle_command_palette"
 /**
  * Emitted when a native menu item (or its accelerator) fires.
  */
@@ -863,48 +861,6 @@ export type RowMode =
  * representative row is the first occurrence (lowest `row_index`).
  */
 "unique"
-/**
- * Full run detail for the run-tab body. Same shape as [`RunSummary`] plus the
- * model digit level (resolved from the JSON `model_ids` array) and the
- * `unique_inputs_done` + `error_message` fields the summary view drops.
- */
-export type RunDetail = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; digitLevel: number | null; 
-/**
- * How many models the run covers (EPI-96). Row counters are in
- * row×model units — the UI divides by this to talk about dataset rows.
- */
-modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; uniqueInputsDone: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; errorMessage: string | null; executionProvider: string | null; resumeCount: number; resumable: boolean; resumeBlockers: string[]; superseded: boolean }
-/**
- * One row in the Runs sidebar list. Joined with the dataset title so the UI
- * doesn't need a second IPC call to render a meaningful label.
- */
-export type RunSummary = { id: string; datasetId: string; datasetTitle: string; description: string | null; state: string; 
-/**
- * Resolved from the run's first `model_ids` entry so a list row can say
- * which model it was without a second IPC call (EPI-69).
- */
-digitLevel: number | null; 
-/**
- * How many models the run covers (EPI-96). Row counters are in
- * row×model units — the UI divides by this to talk about dataset rows.
- */
-modelCount: number; rowsTotal: number | null; rowsProcessed: number | null; cacheHits: number | null; createdAt: string; startedAt: string | null; completedAt: string | null; lastProgressAt: string | null; resumeCount: number; 
-/**
- * Whether `resume_run` would accept this run right now (EPI-69).
- * Computed at read time — never persisted — so external changes (models
- * swapped, files deleted) are reflected immediately.
- */
-resumable: boolean; 
-/**
- * Machine-stable reasons when an `interrupted` run can't resume
- * (`model_superseded`, `model_not_loaded`). Empty when resumable, and
- * for states resume doesn't apply to.
- */
-resumeBlockers: string[]; 
-/**
- * The run used a model version this build no longer ships (#202).
- */
-superseded: boolean }
 /**
  * Per-pack download progress, mirroring `models::ModelDownloadProgress`.
  */
@@ -1008,17 +964,6 @@ export type SkippedRow = { row: number;
  * Headers of the required columns that were empty.
  */
 missing: string[] }
-export type StartRunRequest = { 
-/**
- * A run always classifies the dataset with every manifest model
- * (EPI-96) — there is no level to pick.
- */
-datasetId: string }
-/**
- * Response from `start_run`: the run has been queued and is already updating
- * its own row. The frontend polls `get_latest_run` for its dataset from here.
- */
-export type StartRunResponse = { runId: string; rowsTotal: number }
 export type StorageStatus = { 
 /**
  * The data folder everything below lives in (except the `CoreML` cache).

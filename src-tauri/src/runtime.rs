@@ -47,7 +47,7 @@ pub enum EpKind {
 
 // serde(rename_all = "lowercase") maps variants to "tensorrt", "cuda",
 // "directml", "coreml", "cpu" — the strings runtimes.toml `eps` uses and
-// runs.execution_provider stores.
+// datasets.classify_ep stores.
 
 impl EpKind {
     #[must_use]

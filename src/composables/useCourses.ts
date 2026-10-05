@@ -57,10 +57,11 @@ export function useCourses(args: UseCoursesArgs) {
 /**
  * Per-model classification coverage for a dataset (EPI-68): one row per
  * manifest-active model with `classified` / `total` counts. Drives the
- * dataset tab's per-level coverage chips and the pre-run confirm panel's
- * "already classified" line. Refreshed via the global run-lifecycle watcher
- * (`useRunLifecycleRefresh`) rather than per-tick polling — three joined
- * COUNTs against a 2M-row dataset are not a 250 ms query.
+ * dataset page's coverage at rest and the classify confirm panel's "already
+ * classified" line. Refreshed when a classification ends
+ * (`useClassifyLifecycleRefresh`) rather than per-tick polling — three
+ * joined COUNTs against a 2M-row dataset are not a 500 ms query; while a job
+ * runs, its live progress stands in.
  */
 export function useCoverage(datasetId: MaybeRefOrGetter<string>) {
   return useQuery({

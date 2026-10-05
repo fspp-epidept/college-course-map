@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager as _, State};
 use crate::{
     activity::{Activity, Maintenance},
     boot::{self, Boot},
+    classify::{Classification, ClassifyRegistry, ClassifyState},
     db::AppDb,
     profile::InputProfile,
 };
@@ -40,6 +41,7 @@ pub(crate) struct DatasetSummary {
     /// the stored `deleting` plus the maintenance gate, never stored.
     pub(crate) import_state: String,
     pub(crate) import_error: Option<String>,
+    pub(crate) classification: Classification,
 }
 
 #[tauri::command]
@@ -51,11 +53,16 @@ pub(crate) struct DatasetSummary {
 pub(crate) fn list_datasets(
     boot: State<'_, Boot>,
     activity: State<'_, Activity>,
+    jobs: State<'_, ClassifyRegistry>,
 ) -> Result<Vec<DatasetSummary>, String> {
-    list(&*boot.ready()?.db.ro()?, &activity)
+    list(&*boot.ready()?.db.ro()?, &activity, &jobs)
 }
 
-fn list(conn: &duckdb::Connection, activity: &Activity) -> Result<Vec<DatasetSummary>, String> {
+fn list(
+    conn: &duckdb::Connection,
+    activity: &Activity,
+    jobs: &ClassifyRegistry,
+) -> Result<Vec<DatasetSummary>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT d.id,
@@ -64,33 +71,49 @@ fn list(conn: &duckdb::Connection, activity: &Activity) -> Result<Vec<DatasetSum
                     strftime(d.imported_at, '%Y-%m-%dT%H:%M:%SZ') AS imported_at,
                     COALESCE(d.row_count, 0)                      AS row_count,
                     COALESCE(d.import_state, 'ready')             AS import_state,
-                    d.import_error
+                    d.import_error,
+                    COALESCE(d.classify_state, 'idle')            AS classify_state,
+                    d.classify_error,
+                    d.classify_ep,
+                    strftime(d.classify_updated_at, '%Y-%m-%dT%H:%M:%SZ')
              FROM datasets d
              ORDER BY d.imported_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
-            Ok(DatasetSummary {
-                id: row.get(0)?,
-                title: row.get(1)?,
-                source_kind: row.get(2)?,
-                imported_at: row.get(3)?,
-                row_count: row.get(4)?,
-                import_state: row.get(5)?,
-                import_error: row.get(6)?,
-            })
+            let classify_state: String = row.get(7)?;
+            Ok((
+                DatasetSummary {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    source_kind: row.get(2)?,
+                    imported_at: row.get(3)?,
+                    row_count: row.get(4)?,
+                    import_state: row.get(5)?,
+                    import_error: row.get(6)?,
+                    classification: Classification {
+                        state: ClassifyState::Idle,
+                        error: row.get(8)?,
+                        execution_provider: row.get(9)?,
+                        updated_at: row.get(10)?,
+                        progress: None,
+                    },
+                },
+                classify_state,
+            ))
         })
         .map_err(|e| e.to_string())?;
-    let mut datasets = rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    for dataset in &mut datasets {
+    rows.map(|item| {
+        let (mut dataset, classify_state) = item.map_err(|e| e.to_string())?;
         if dataset.import_state == DELETING && !activity.is_deleting(&dataset.id) {
             DELETE_INCOMPLETE.clone_into(&mut dataset.import_state);
         }
-    }
-    Ok(datasets)
+        dataset.classification.state = ClassifyState::parse(&classify_state)?;
+        dataset.classification.progress = jobs.progress(&dataset.id);
+        Ok(dataset)
+    })
+    .collect()
 }
 
 /// The input profile the import worker stored on the dataset (profile.rs),
@@ -121,33 +144,13 @@ pub(crate) fn get_input_profile(
         .transpose()
 }
 
-/// Refuse to start work on a dataset whose delete has begun.
-pub(crate) fn ensure_not_deleting(
-    conn: &duckdb::Connection,
-    dataset_id: &str,
-) -> Result<(), String> {
-    let state: Option<String> = conn
-        .query_row(
-            "SELECT import_state FROM datasets WHERE id = ?",
-            [dataset_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|e| format!("dataset {dataset_id}: {e}"))?
-        .flatten();
-    if state.as_deref() == Some(DELETING) {
-        return Err("This dataset is being deleted.".to_owned());
-    }
-    Ok(())
-}
-
-/// Delete a dataset with its courses and runs, and its `source_files` row
+/// Delete a dataset with its courses, and its `source_files` row
 /// when no other dataset uses it (#199). The original CSV on disk is never
 /// touched, and neither is the results cache: classifications are keyed by
 /// model and input, not by dataset, and are reused if the same courses are
 /// imported again.
 ///
-/// Refused while the dataset is importing or has a run in progress, while
+/// Refused while the dataset is importing or classifying, while
 /// another dataset was derived from it, or while other maintenance runs.
 /// Slow on a large dataset (seconds per million courses), so it runs on the
 /// blocking pool. Deleting a dataset that is already gone is not an error,
@@ -165,8 +168,8 @@ pub(crate) async fn delete_dataset(app: AppHandle, dataset_id: String) -> Result
 
 /// The whole delete. `DuckDB` can't delete a parent row and its children in
 /// one transaction (the foreign-key check doesn't see the uncommitted child
-/// deletes), so it is three steps, children first: no orphaned course or run
-/// can exist at any point, and a crash between steps leaves a dataset marked
+/// deletes), so it is three steps, children first: no orphaned course can
+/// exist at any point, and a crash between steps leaves a dataset marked
 /// `deleting` that the next call finishes.
 fn delete(db: &AppDb, activity: &Activity, dataset_id: &str) -> Result<(), String> {
     let Some(_guard) = claim(db, activity, dataset_id)? else {
@@ -206,16 +209,13 @@ fn claim<'a>(
     }
     let running: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM runs WHERE dataset_id = ? AND state = 'running'",
+            "SELECT COUNT(*) FROM datasets WHERE id = ? AND classify_state = 'running'",
             [dataset_id],
             |row| row.get(0),
         )
-        .map_err(|e| format!("check runs of dataset {dataset_id}: {e}"))?;
+        .map_err(|e| format!("check classification of dataset {dataset_id}: {e}"))?;
     if running > 0 {
-        return Err(
-            "A classification run is active on this dataset. Pause it before deleting the dataset."
-                .to_owned(),
-        );
+        return Err("This dataset is classifying. Stop it before deleting the dataset.".to_owned());
     }
     let dependent: Option<String> = conn
         .query_row(
@@ -239,31 +239,14 @@ fn claim<'a>(
     Ok(Some(guard))
 }
 
-/// Step 2: the dataset's runs and courses, in one transaction.
+/// Step 2: the dataset's courses.
 fn delete_children(db: &AppDb, dataset_id: &str) -> Result<(), String> {
-    let conn = db.rw()?;
-    conn.execute_batch("BEGIN")
-        .map_err(|e| format!("begin delete of dataset {dataset_id}: {e}"))?;
-    let deleted = conn
-        .execute("DELETE FROM runs WHERE dataset_id = ?", [dataset_id])
-        .and_then(|runs| {
-            conn.execute("DELETE FROM courses WHERE dataset_id = ?", [dataset_id])
-                .map(|courses| (runs, courses))
-        });
-    match deleted {
-        Ok((runs, courses)) => {
-            conn.execute_batch("COMMIT")
-                .map_err(|e| format!("commit delete of dataset {dataset_id}: {e}"))?;
-            log::info!("dataset {dataset_id}: deleted {courses} course(s) and {runs} run(s)");
-            Ok(())
-        }
-        Err(e) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(format!(
-                "delete courses and runs of dataset {dataset_id}: {e}"
-            ))
-        }
-    }
+    let courses = db
+        .rw()?
+        .execute("DELETE FROM courses WHERE dataset_id = ?", [dataset_id])
+        .map_err(|e| format!("delete courses of dataset {dataset_id}: {e}"))?;
+    log::info!("dataset {dataset_id}: deleted {courses} course(s)");
+    Ok(())
 }
 
 /// Step 3: the dataset row, then its source file row if nothing else uses
@@ -299,15 +282,16 @@ fn delete_row(db: &AppDb, dataset_id: &str) -> Result<(), String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{DELETE_INCOMPLETE, claim, delete, delete_children, ensure_not_deleting, list};
+    use super::{DELETE_INCOMPLETE, claim, delete, delete_children, list};
     use crate::{
         activity::{Activity, Maintenance},
         boot::Progress,
+        classify::ClassifyRegistry,
         db::AppDb,
     };
 
-    /// Two datasets sharing one source file, each with courses and a run,
-    /// and one cached result — on a scratch database file.
+    /// Two datasets sharing one source file, each with courses, and one
+    /// cached result — on a scratch database file.
     fn seeded(name: &str) -> Result<AppDb, String> {
         let root: PathBuf =
             std::env::temp_dir().join(format!("ccm-datasets-test-{}-{name}", std::process::id()));
@@ -325,12 +309,9 @@ mod tests {
                  VALUES ('a', 0, 'h0'), ('a', 1, 'h1'), ('b', 0, 'h0');
                  INSERT INTO models (id, hf_repo, hf_revision, model_type, precision)
                  VALUES (1, 'r', 'v', '6', 'f32');
-                 INSERT INTO runs (id, dataset_id, state, model_ids, created_at)
-                 VALUES ('ra', 'a', 'completed', '[1]', now()),
-                        ('rb', 'b', 'completed', '[1]', now());
                  INSERT INTO inference_results
-                    (model_id, content_hash, classification, computed_at, computed_by_run)
-                 VALUES (1, 'h0', '11.0701', now(), 'ra');",
+                    (model_id, content_hash, classification, computed_at)
+                 VALUES (1, 'h0', '11.0701', now());",
             )
             .map_err(|e| e.to_string())?;
         Ok(db)
@@ -342,7 +323,7 @@ mod tests {
             .map_err(|e| format!("{sql}: {e}"))
     }
 
-    /// Deleting a dataset removes its courses and runs and leaves the other
+    /// Deleting a dataset removes its courses and leaves the other
     /// dataset, the shared source file and the results cache alone. The
     /// source file goes with the last dataset that used it.
     #[test]
@@ -354,7 +335,6 @@ mod tests {
         activity.ensure_idle()?;
         assert_eq!(count(&db, "SELECT COUNT(*) FROM datasets")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM courses")?, 1);
-        assert_eq!(count(&db, "SELECT COUNT(*) FROM runs")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM source_files")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM inference_results")?, 1);
 
@@ -366,7 +346,7 @@ mod tests {
         delete(&db, &activity, "b")
     }
 
-    /// A dataset that is importing, has a run in progress, has a dataset
+    /// A dataset that is importing, is classifying, has a dataset
     /// derived from it, or is asked for while other maintenance runs is
     /// refused, and nothing is deleted.
     #[test]
@@ -387,9 +367,9 @@ mod tests {
         refused("still importing")?;
         set("UPDATE datasets SET import_state = 'ready' WHERE id = 'a'")?;
 
-        set("UPDATE runs SET state = 'running' WHERE id = 'ra'")?;
-        refused("run is active")?;
-        set("UPDATE runs SET state = 'completed' WHERE id = 'ra'")?;
+        set("UPDATE datasets SET classify_state = 'running' WHERE id = 'a'")?;
+        refused("is classifying")?;
+        set("UPDATE datasets SET classify_state = 'idle' WHERE id = 'a'")?;
 
         // Inserted, not an UPDATE of `b`: `DuckDB` rewrites a row whose
         // indexed column changes, which the courses referencing `b` forbid.
@@ -408,14 +388,14 @@ mod tests {
 
     /// A delete cut off after its children went leaves the dataset
     /// `deleting`: reported as `deleting` while the delete holds the slot,
-    /// `delete_incomplete` once nothing does, closed to new work, and
-    /// finished by calling delete again.
+    /// `delete_incomplete` once nothing does, and finished by calling
+    /// delete again.
     #[test]
     fn interrupted_delete_is_reported_and_can_be_finished() -> Result<(), String> {
         let db = seeded("interrupted")?;
         let activity = Activity::default();
         let state_of_a = || -> Result<String, String> {
-            list(&*db.rw()?, &activity)?
+            list(&*db.rw()?, &activity, &ClassifyRegistry::default())?
                 .into_iter()
                 .find(|d| d.id == "a")
                 .map(|d| d.import_state)
@@ -425,8 +405,6 @@ mod tests {
         let guard = claim(&db, &activity, "a")?.ok_or("dataset a missing")?;
         delete_children(&db, "a")?;
         assert_eq!(state_of_a()?, "deleting");
-        assert!(ensure_not_deleting(&*db.rw()?, "a").is_err());
-        ensure_not_deleting(&*db.rw()?, "b")?;
         // The process dies here: the slot is gone, the row is not.
         drop(guard);
         assert_eq!(state_of_a()?, DELETE_INCOMPLETE);

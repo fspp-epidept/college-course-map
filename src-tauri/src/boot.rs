@@ -44,11 +44,11 @@ use tauri::{AppHandle, Manager as _};
 use tauri_specta::Event;
 
 use crate::{
-    config,
+    classify, config,
     db::{self, AppDb},
     import, inference, manifest,
     manifest::ModelCatalog,
-    models, reset, runs, runtime,
+    models, reset, runtime,
 };
 
 /// The startup phases, in order. The boot screen titles each one, so a
@@ -132,9 +132,9 @@ const STEPS: &[Step] = &[
     },
     Step {
         phase: Phase::OpeningDatabase,
-        name: "sweep runs",
-        label: "Checking for runs interrupted last time",
-        run: sweep_runs,
+        name: "sweep classifications",
+        label: "Checking for classifications interrupted last time",
+        run: sweep_classifications,
     },
     Step {
         phase: Phase::OpeningDatabase,
@@ -548,9 +548,9 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
     // Download in-flight guard + progress snapshots, managed before
     // autoload so models_status can always resolve it.
     app.manage(models::DownloadState::default());
-    // Tracks per-run cancellation flags so `pause_run` can signal an
-    // in-flight worker.
-    app.manage(runs::RunRegistry::default());
+    // The classification jobs in flight, so `stop_classification` can reach
+    // a worker and `list_datasets` can report its progress.
+    app.manage(classify::ClassifyRegistry::default());
     // The maintenance gate: one exclusive delete, prune or compaction at a
     // time, and no new writes while it runs.
     app.manage(crate::activity::Activity::default());
@@ -883,13 +883,13 @@ fn open_database(ctx: &mut Ctx<'_>) -> Result<(), String> {
     Ok(())
 }
 
-/// Crash recovery: a `running` row in a fresh process is an orphan
-/// from a previous one. Flip it to `interrupted` (resumable) before any
-/// command can observe it.
-fn sweep_runs(ctx: &mut Ctx<'_>) -> Result<(), String> {
-    let swept = runs::sweep_orphaned_runs(&*opened(ctx.db.as_ref())?.rw()?)?;
+/// Crash recovery: a dataset `running` in a fresh process lost its worker
+/// with the previous one. Mark it `stopped` before any command can observe
+/// it.
+fn sweep_classifications(ctx: &mut Ctx<'_>) -> Result<(), String> {
+    let swept = classify::sweep_interrupted(&*opened(ctx.db.as_ref())?.rw()?)?;
     if swept > 0 {
-        log::info!("startup: swept {swept} orphaned running run(s) to interrupted");
+        log::info!("startup: marked {swept} interrupted classification(s) as stopped");
     }
     Ok(())
 }

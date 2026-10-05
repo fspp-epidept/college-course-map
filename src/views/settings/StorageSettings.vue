@@ -11,8 +11,8 @@ import {
 import ResetAppData from "./ResetAppData.vue";
 
 // Settings → Storage (#200, #201): what the app keeps on disk, and the
-// actions that give space back. Deleting a dataset or run happens on that
-// dataset or run; this page is for everything else.
+// actions that give space back. Deleting a dataset happens on that
+// dataset; this page is for everything else.
 const { data: status, isPending, isError, error } = useStorageStatus();
 
 const openError = ref<string | null>(null);
@@ -85,7 +85,7 @@ function fmtDate(iso: string | null): string {
         <h2 class="text-xl font-semibold text-(--ui-text-highlighted)">Storage</h2>
         <p class="mt-1 text-sm text-(--ui-text-muted)">
           What the app keeps on this computer, and how to get space back. To delete a
-          dataset or a run, open it and use its Delete button.
+          dataset, open it and use its Delete button.
         </p>
       </div>
       <UButton size="xs" variant="outline" class="shrink-0" @click="openDataFolder">
@@ -115,7 +115,7 @@ function fmtDate(iso: string | null): string {
           <div class="flex-1 min-w-0">
             <div class="text-(--ui-text) font-medium">Database</div>
             <div class="text-xs text-(--ui-text-muted)">
-              Datasets, runs and cached classifications.
+              Datasets and cached classifications.
               <template v-if="canCompact">
                 {{ formatBytes(status.database.reclaimableBytes) }} of it is free space that
                 compacting returns to the disk.
@@ -352,7 +352,7 @@ function fmtDate(iso: string | null): string {
           <p class="text-(--ui-text-muted)">
             The app writes a fresh copy of the database that holds only what is in use,
             then relaunches to put it in place. Nothing is deleted. On a large database
-            the copy can take a minute; imports and runs can't start until the app has
+            the copy can take a minute; imports and classifications can't start until the app has
             relaunched.
           </p>
           <p v-if="compact.error.value" class="text-(--ui-color-error-500)">

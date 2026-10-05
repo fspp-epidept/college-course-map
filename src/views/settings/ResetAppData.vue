@@ -14,7 +14,7 @@ const reset = useMutation({
     const result = await commands.requestReset(!resetSettings.value);
     if (result.status === "error") throw new Error(result.error);
     // Only once the marker is written: workspace selections point at
-    // datasets and runs that are about to go.
+    // datasets that are about to go.
     localStorage.clear();
     await commands.relaunchApp();
   },
@@ -27,16 +27,16 @@ const reset = useMutation({
       Reset App Data…
     </UButton>
     <span class="text-xs text-(--ui-text-muted)">
-      Deletes all datasets, runs, cached results, downloaded models and runtime packs.
+      Deletes all datasets, cached results, downloaded models and runtime packs.
     </span>
   </div>
   <UModal v-model:open="confirmOpen" title="Reset app data">
     <template #body>
       <div class="flex flex-col gap-3 text-sm">
         <p class="text-(--ui-text-muted)">
-          The app relaunches and starts as on first run. All datasets, runs and
-          cached classifications are deleted, along with downloaded models and
-          runtime packs. A run in progress is stopped. This cannot be undone.
+          The app relaunches and starts as on first run. All datasets and cached
+          classifications are deleted, along with downloaded models and runtime
+          packs. A classification in progress is stopped. This cannot be undone.
         </p>
         <UCheckbox
           v-model="resetSettings"

@@ -1,33 +1,19 @@
 <script setup lang="ts">
-import { computed, watch } from "vue";
-import type { DatasetSummary, RunSummary } from "../../bindings";
+import { watch } from "vue";
+import type { ClassifyProgress, DatasetSummary } from "../../bindings";
+import { progressDone, progressTotal } from "../../composables/useClassify";
 import { useDatasets } from "../../composables/useDatasets";
-import { useRuns } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
 
 const workspace = useWorkspace();
 const { data: datasets, isPending, isError, error } = useDatasets();
 
-// Each dataset's run to report in its row (#247): the one running, else its
-// newest. This list is the only cross-dataset view of what is classifying.
-const { data: runs } = useRuns();
-const runByDataset = computed(() => {
-  const shown = new Map<string, RunSummary>();
-  for (const run of runs.value ?? []) {
-    const seen = shown.get(run.datasetId);
-    if (
-      !seen ||
-      run.state === "running" ||
-      (seen.state !== "running" && run.createdAt > seen.createdAt)
-    ) {
-      shown.set(run.datasetId, run);
-    }
-  }
-  return shown;
-});
-function classifyingPct(run: RunSummary): string {
-  if (!run.rowsTotal || run.rowsProcessed === null) return "";
-  return ` ${Math.floor((run.rowsProcessed / run.rowsTotal) * 100)}%`;
+// This list is the only cross-dataset view of what is classifying, so each
+// row carries its dataset's classification state.
+function classifyingPct(progress: ClassifyProgress | null): string {
+  const total = progress ? progressTotal(progress) : 0;
+  if (!progress || total === 0) return "";
+  return ` ${Math.floor((progressDone(progress) / total) * 100)}%`;
 }
 
 function open(dataset: DatasetSummary): void {
@@ -102,16 +88,22 @@ watch(
             delete incomplete
           </span>
           <span
-            v-else-if="runByDataset.get(dataset.id)?.state === 'running'"
+            v-else-if="dataset.classification.state === 'running'"
             class="text-(--ui-color-info-500) animate-pulse text-[10px] uppercase tracking-wide"
           >
             classifying
           </span>
           <span
-            v-else-if="runByDataset.get(dataset.id)?.state === 'interrupted'"
+            v-else-if="dataset.classification.state === 'stopped'"
             class="text-(--ui-color-warning-500) text-[10px] uppercase tracking-wide"
           >
-            paused
+            stopped
+          </span>
+          <span
+            v-else-if="dataset.classification.state === 'failed'"
+            class="text-(--ui-color-error-500) text-[10px] uppercase tracking-wide whitespace-nowrap"
+          >
+            classify failed
           </span>
         </span>
         <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
@@ -122,8 +114,8 @@ watch(
           <template v-else-if="dataset.importState === 'delete_incomplete'">
             Select to finish deleting
           </template>
-          <template v-else-if="runByDataset.get(dataset.id)?.state === 'running'">
-            Classifying…{{ classifyingPct(runByDataset.get(dataset.id)!) }}
+          <template v-else-if="dataset.classification.state === 'running'">
+            Classifying…{{ classifyingPct(dataset.classification.progress) }}
           </template>
           <template v-else>
             {{ dataset.rowCount.toLocaleString() }}

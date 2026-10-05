@@ -166,7 +166,7 @@ tasks:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example seed_demo
 
   db:clear-data:
-    desc: Wipe user data (datasets / courses / runs / results) but keep the models table populated
+    desc: Wipe user data (datasets / courses / results) but keep the models table populated
     cmds:
       - cargo run --quiet --manifest-path src-tauri/Cargo.toml --example clear_user_data
 
@@ -213,7 +213,7 @@ tasks:
       - cargo run --release --manifest-path src-tauri/Cargo.toml --example check_parity -- {{.CLI_ARGS}}
 
   check:resume:
-    desc: "SIGKILL a run mid-flight against a scratch DB, sweep, resume, verify no dup/missing/recomputed results (needs the two-digit model on disk)"
+    desc: "SIGKILL a classification mid-flight against a scratch DB, sweep, classify again, verify no dup/missing/recomputed results (needs the two-digit model on disk)"
     cmds:
       # Release for realistic inference speed; the child must still be
       # mid-run when the kill threshold hits. See examples/check_resume.rs.

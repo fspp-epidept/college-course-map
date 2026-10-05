@@ -2,6 +2,9 @@
 // pass as `Progress::none()`.
 mod activity;
 pub mod boot;
+// Public for the resume verification harness (examples/check_resume.rs),
+// which drives the real ClassifyPipeline against a scratch database.
+pub mod classify;
 mod config;
 mod courses;
 mod datasets;
@@ -18,9 +21,6 @@ mod paths;
 mod preflight;
 mod profile;
 mod reset;
-// Public for the resume verification harness (examples/check_resume.rs,
-// EPI-39), which drives the real RunPipeline against a scratch database.
-pub mod runs;
 // Public for the dev pack fetcher (examples/runtime_install.rs, EPI-73).
 pub mod runtime;
 pub mod seed;
@@ -41,6 +41,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             boot::boot_state,
+            classify::classify_dataset,
+            classify::stop_classification,
             config::list_themes,
             config::read_theme,
             config::read_settings,
@@ -67,12 +69,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             runtime::relaunch_app,
             runtime::remove_runtime,
             runtime::runtime_status,
-            runs::delete_run,
-            runs::get_latest_run,
-            runs::list_runs,
-            runs::pause_run,
-            runs::resume_run,
-            runs::start_run,
             storage::compact_database,
             storage::open_data_dir,
             storage::storage_clear,

@@ -22,12 +22,6 @@ function fmt(n: number | undefined): string {
   return n.toLocaleString();
 }
 
-const cacheHitLabel = computed(() => {
-  const rate = metrics.value?.cacheHitRate;
-  if (rate === null || rate === undefined) return "—";
-  return `${Math.round(rate * 100)}%`;
-});
-
 const cards = computed(() => [
   {
     label: "Datasets",
@@ -37,21 +31,9 @@ const cards = computed(() => [
       : "Import a CSV to get started.",
   },
   {
-    label: "Runs",
-    value: fmt(metrics.value?.runs),
-    hint: metrics.value?.runs
-      ? `${fmt(metrics.value.completedRuns)} completed`
-      : "No classification runs yet.",
-  },
-  {
     label: "Classifications",
     value: fmt(metrics.value?.classifications),
     hint: "Cached by (model, content hash).",
-  },
-  {
-    label: "Cache hit rate",
-    value: cacheHitLabel.value,
-    hint: "Across all runs to date.",
   },
 ]);
 </script>
@@ -94,7 +76,7 @@ const cards = computed(() => [
       Failed to load metrics: {{ error?.message }}
     </p>
 
-    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <div class="grid gap-4 sm:grid-cols-2">
       <div
         v-for="card in cards"
         :key="card.label"

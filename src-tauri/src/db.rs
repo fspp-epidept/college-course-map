@@ -5,8 +5,8 @@
 //! cloned from it ([`Connection::try_clone`]) for list/dashboard reads. The
 //! clone matters: a *separate* read-only instance (`open_with_flags`) is a
 //! point-in-time snapshot frozen at open and never observes the RW instance's
-//! later commits — so polling reads (`list_datasets`, `get_latest_run`) would show an
-//! import or run stuck at zero forever. Connections cloned from one instance
+//! later commits — so polling reads (`list_datasets`) would show an
+//! import stuck at zero forever. Connections cloned from one instance
 //! share `DuckDB`'s MVCC, so reads see committed writes immediately. The read
 //! handle is therefore not access-mode read-only; it's only handed to read
 //! commands by convention (`ro()` is `pub(crate)`), and the cached clone keeps
@@ -67,7 +67,6 @@ const COPY_ORDER: &[&str] = &[
     "datasets",
     "courses",
     "models",
-    "runs",
     "inference_results",
     "ccm_taxonomy",
 ];
@@ -106,6 +105,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
     (
         8,
         include_str!("../migrations/0008_cache_without_run_fk.sql"),
+    ),
+    (
+        9,
+        include_str!("../migrations/0009_classification_state.sql"),
     ),
 ];
 
@@ -989,12 +992,11 @@ mod tests {
     const DUCKDB_VERSION: &str = "v1.5.3";
 
     /// Tables a migration must carry rows across.
-    const USER_TABLES: [&str; 6] = [
+    const USER_TABLES: [&str; 5] = [
         "source_files",
         "datasets",
         "courses",
         "models",
-        "runs",
         "inference_results",
     ];
 
@@ -1337,14 +1339,12 @@ mod tests {
         Ok(())
     }
 
-    /// 0008 on a populated database (the v7 fixture: cached results whose
-    /// `computed_by_run` references a run): the run can now be deleted and
-    /// its results stay, the cache keeps its primary key and its foreign key
-    /// to `models`, a `models` row nothing references can still be deleted
-    /// (the `RENAME` hazard the migration avoids), and the secondary indexes
-    /// are gone.
+    /// 0008 on a populated database (the v7 fixture), opened at head: the
+    /// cache keeps its primary key and its foreign key to `models`, a
+    /// `models` row nothing references can still be deleted (the `RENAME`
+    /// hazard the migration avoids), and the secondary indexes are gone.
     #[test]
-    fn cache_rebuild_frees_runs_and_drops_secondary_indexes() -> Result<(), String> {
+    fn cache_rebuild_keeps_keys_and_drops_secondary_indexes() -> Result<(), String> {
         let fixture = fixtures()?
             .into_iter()
             .find(|path| path.to_string_lossy().contains("schema-v7_"))
@@ -1358,20 +1358,10 @@ mod tests {
             conn.query_row(sql, [], |r| r.get(0))
                 .map_err(|e| format!("{sql}: {e}"))
         };
-
-        let results = count("SELECT COUNT(*) FROM inference_results")?;
-        assert!(results > 0, "fixture has no cached results");
-        assert_eq!(
-            count(
-                "SELECT COUNT(*) FROM inference_results ir
-                 JOIN runs r ON r.id = ir.computed_by_run"
-            )?,
-            results,
-            "fixture results don't reference a run"
+        assert!(
+            count("SELECT COUNT(*) FROM inference_results")? > 0,
+            "fixture has no cached results"
         );
-        conn.execute_batch("DELETE FROM runs")
-            .map_err(|e| format!("delete runs: {e}"))?;
-        assert_eq!(count("SELECT COUNT(*) FROM inference_results")?, results);
 
         let duplicate = conn.execute_batch(
             "INSERT INTO inference_results (model_id, content_hash, classification, computed_at)
@@ -1401,8 +1391,97 @@ mod tests {
         Ok(())
     }
 
+    /// 0009 on the v8 fixture plus runs in every state: each dataset takes
+    /// its latest run's state, error, execution provider and time; `runs`
+    /// and `computed_by_run` are gone; and after a reopen a dataset and an
+    /// unreferenced `models` row can still be deleted (nothing points at the
+    /// dropped table).
+    #[test]
+    fn runs_become_dataset_classification_state() -> Result<(), String> {
+        let fixture = fixtures()?
+            .into_iter()
+            .find(|path| path.to_string_lossy().contains("schema-v8_"))
+            .ok_or("no v8 fixture")?;
+        let root = scratch("classify-state")?;
+        let path = root.join("app.duckdb");
+        unpack(&fixture, &path)?;
+        raw(&path)?
+            .execute_batch(
+                "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
+                 VALUES ('running', 'r', 'file', now(), 0, 'ready'),
+                        ('paused', 'p', 'file', now(), 0, 'ready'),
+                        ('failed', 'f', 'file', now(), 0, 'ready'),
+                        ('never', 'n', 'file', now(), 0, 'ready');
+                 INSERT INTO runs (id, dataset_id, state, model_ids, created_at, last_progress_at,
+                                   error_message, execution_provider)
+                 VALUES ('r1', 'running', 'running', '[]', '2026-01-01', '2026-01-02', NULL, 'cuda'),
+                        ('p0', 'paused', 'failed', '[]', '2026-01-01', NULL, 'old', 'cpu'),
+                        ('p1', 'paused', 'interrupted', '[]', '2026-01-03', NULL, NULL, NULL),
+                        ('f1', 'failed', 'failed', '[]', '2026-01-01', NULL, 'boom', 'cpu');",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let db = AppDb::open_at(path.clone(), "test", &Progress::none())?;
+        {
+            let conn = db.rw()?;
+            // state|error|ep|updated day, `-` for NULL.
+            let state = |id: &str| -> Result<String, String> {
+                conn.query_row(
+                    "SELECT concat_ws('|', classify_state, COALESCE(classify_error, '-'),
+                                     COALESCE(classify_ep, '-'),
+                                     COALESCE(strftime(classify_updated_at, '%Y-%m-%d'), '-'))
+                     FROM datasets WHERE id = ?",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(|e| format!("{id}: {e}"))
+            };
+            assert_eq!(state("running")?, "stopped|-|cuda|2026-01-02");
+            // Every column comes from the latest run, even where it is NULL.
+            assert_eq!(state("paused")?, "stopped|-|-|2026-01-03");
+            assert_eq!(state("failed")?, "failed|boom|cpu|2026-01-01");
+            assert_eq!(state("never")?, "idle|-|-|-");
+            let leftovers: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name = 'runs'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(leftovers, 0, "runs table remains");
+            let column: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM duckdb_columns()
+                     WHERE table_name = 'inference_results' AND column_name = 'computed_by_run'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(column, 0, "computed_by_run remains");
+        }
+        db.checkpoint()?;
+        drop(db);
+
+        let db = AppDb::open_at(path, "test", &Progress::none())?;
+        let conn = db.rw()?;
+        let dataset: String = conn
+            .query_row("SELECT dataset_id FROM courses LIMIT 1", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM courses WHERE dataset_id = ?", [&dataset])
+            .map_err(|e| format!("delete courses: {e}"))?;
+        conn.execute("DELETE FROM datasets WHERE id = ?", [&dataset])
+            .map_err(|e| format!("delete dataset: {e}"))?;
+        conn.execute_batch(
+            "INSERT INTO models (id, hf_repo, hf_revision, model_type, precision)
+             VALUES (-1, 'r', 'v', '2', 'f32');
+             DELETE FROM models WHERE id = -1;",
+        )
+        .map_err(|e| format!("delete an unreferenced models row: {e}"))?;
+        Ok(())
+    }
+
     /// The head fixture, unpacked and opened: a seeded database (datasets,
-    /// courses, a run, cached results) at the current schema.
+    /// courses, cached results) at the current schema.
     fn seeded(name: &str) -> Result<(PathBuf, AppDb), String> {
         let fixture = fixtures()?
             .into_iter()

@@ -52,8 +52,9 @@ pub fn batch_size(_ep: EpKind) -> usize {
 pub struct LoadedModel {
     pub digit_level: u8,
     /// The highest-priority execution provider that registered successfully
-    /// for this session (EPI-73); `Cpu` when none did. Recorded on runs rows
-    /// and surfaced in Settings.
+    /// for this session (EPI-73); `Cpu` when none did. Recorded on the
+    /// dataset a job classifies (`datasets.classify_ep`) and surfaced in
+    /// Settings.
     pub resolved_ep: EpKind,
     /// The session needs `&mut self` to run; wrap so we can hold it behind an
     /// `Arc` shared from the inference registry.
@@ -738,8 +739,8 @@ impl ModelStore {
     }
 
     /// Empty the store so the next load rebuilds sessions (EPI-73: an EP
-    /// priority reorder re-registers providers). A run in flight keeps its
-    /// `Arc` clone and finishes on the old sessions — new runs get the new
+    /// priority reorder re-registers providers). A job in flight keeps its
+    /// `Arc` clone and finishes on the old sessions — new jobs get the new
     /// registry.
     pub(crate) fn clear(&self) -> Result<(), String> {
         let mut guard = self

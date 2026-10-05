@@ -3,13 +3,12 @@ import { useDeleteDataset } from "../../composables/useDatasets";
 import { useWorkspace } from "../../stores/workspace";
 
 // Confirm for deleting a dataset (#199). `incomplete` is a dataset whose
-// earlier delete was cut off: its courses and runs are already gone, so the
+// earlier delete was cut off: its courses are already gone, so the
 // dialog only finishes the job.
 const props = defineProps<{
   datasetId: string;
   title: string;
   courseCount: number;
-  runCount: number;
   incomplete: boolean;
 }>();
 const open = defineModel<boolean>("open", { required: true });
@@ -33,15 +32,13 @@ function onDelete(): void {
       <div class="flex flex-col gap-3 text-sm">
         <p v-if="incomplete" class="text-(--ui-text-muted)">
           Deleting <span class="text-(--ui-text)">{{ title }}</span> was interrupted. Its
-          courses and runs are already gone; this removes what is left of it.
+          courses are already gone; this removes what is left of it.
         </p>
         <template v-else>
           <p class="text-(--ui-text-muted)">
             This deletes <span class="text-(--ui-text)">{{ title }}</span> from the app:
             <span class="text-(--ui-text) tabular-nums">{{ courseCount.toLocaleString() }}</span>
-            {{ courseCount === 1 ? "course" : "courses" }} and
-            <span class="text-(--ui-text) tabular-nums">{{ runCount.toLocaleString() }}</span>
-            {{ runCount === 1 ? "run" : "runs" }}. This cannot be undone.
+            {{ courseCount === 1 ? "course" : "courses" }}. This cannot be undone.
           </p>
           <p class="text-(--ui-text-muted)">
             The original CSV file is not touched. Classifications already computed are

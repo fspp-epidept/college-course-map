@@ -1,16 +1,16 @@
 //! `cargo run --release --example check_resume` — EPI-39: kill a
-//! classification run mid-flight with SIGKILL, restart, sweep, resume, and
-//! verify the invariants that make resume safe:
+//! classification mid-flight with SIGKILL, restart, sweep, classify again,
+//! and verify the invariants that make resume safe:
 //!
-//! 1. after the crash the row is still `running`; `sweep_orphaned_runs`
-//!    flips it to `interrupted` (the startup path, EPI-38)
-//! 2. resume completes the run with **no duplicate** `(model_id,
-//!    content_hash)` and **no missing** rows
+//! 1. after the crash the dataset is still `running`; `sweep_interrupted`
+//!    marks it `stopped` (the startup path)
+//! 2. classifying again finishes with **no duplicate** `(model_id,
+//!    content_hash)` and **no missing** rows, and leaves the dataset `idle`
 //! 3. nothing already computed is recomputed (first-leg rows keep their
 //!    first-leg `computed_at` stamp)
 //!
-//! The child process runs the *real* `RunPipeline` (same batching, same
-//! flush transactions) against a scratch database; the parent SIGKILLs it
+//! The child process runs the *real* `ClassifyPipeline` (same batching, same
+//! flushes) against a scratch database; the parent SIGKILLs it
 //! once progress passes a threshold, then resumes in-process. Requires the
 //! two-digit model on disk (same gating as `check_parity`), so this is a
 //! `task check:resume` target, not part of `task check`.
@@ -18,33 +18,30 @@
 use std::{
     io::{BufRead, BufReader},
     process::{Command, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 use anyhow::{Context, bail};
 use chrono::Utc;
 use course_classifier_lib::{
     boot::Progress,
+    classify::{ClassifyModel, ClassifyPipeline, Job, Outcome, sweep_interrupted},
     db::AppDb,
     format::{CourseInput, format_input},
     inference::{self, LoadedModel},
     manifest,
-    runs::{RunModel, RunPipeline, sweep_orphaned_runs},
     runtime::{self, EpKind},
 };
 use duckdb::params;
 
-/// Kill the child once `rows_processed` reaches this — the first flushed
+/// Kill the child once its progress reaches this — the first flushed
 /// super-chunk (EPI-89), so SIGKILL lands mid-second-super-chunk. Derived
 /// from the real flush cadence instead of drifting.
 #[expect(
     clippy::cast_possible_wrap,
     reason = "FLUSH_SIZE is a small constant, far below i64::MAX"
 )]
-const KILL_AFTER_ROWS: i64 = course_classifier_lib::runs::FLUSH_SIZE as i64;
+const KILL_AFTER_ROWS: i64 = course_classifier_lib::classify::FLUSH_SIZE as i64;
 /// Synthetic dataset size. Must exceed the flush cadence by enough that the
 /// child is still mid-run after its first flush on any realistic CPU (EPI-89:
 /// progress is only visible per super-chunk, so the kill can't land before
@@ -63,11 +60,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// Child mode: run the real pipeline against the scratch DB, printing
-/// `PROGRESS <rows_processed>` lines the parent watches for its kill signal.
-/// This process is meant to die by SIGKILL — nothing here finalizes early.
+/// `PROGRESS <done>` lines the parent watches for its kill signal. This
+/// process is meant to die by SIGKILL — nothing here finalizes early.
 fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     let db_path = args.next().context("child: missing db path")?;
-    let run_id = args.next().context("child: missing run id")?;
     let model_id: i64 = args
         .next()
         .context("child: missing model id")?
@@ -77,40 +73,21 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     let db =
         AppDb::open_at(db_path.into(), "dev", &Progress::none()).map_err(anyhow::Error::msg)?;
     let model = load_active_model()?;
-    let pipeline = RunPipeline {
-        dataset_id: DATASET_ID.to_owned(),
-        run_id: run_id.clone(),
-        models: vec![RunModel {
-            model_id,
-            digit_level: DIGIT_LEVEL,
-        }],
-        computed_at: Utc::now().to_rfc3339(),
-        cancel: Arc::new(AtomicBool::new(false)),
-    };
+    let pipeline = pipeline(model_id);
     println!("CHILD READY");
 
-    let done = AtomicBool::new(false);
     std::thread::scope(|scope| -> anyhow::Result<()> {
         let worker = scope.spawn(|| {
             let outcome = pipeline.execute(&db, &[&model]);
-            pipeline.finalize(&db, outcome);
+            pipeline.finalize(&db, outcome, || {});
         });
-        // Progress reporter: reads the run row through the RO clone while the
-        // worker writes, mirroring what the app's polling UI does.
-        while !done.load(Ordering::Relaxed) && !worker.is_finished() {
+        // Progress reporter: snapshots the job while the worker writes,
+        // which is what `list_datasets` hands the polling UI.
+        while !worker.is_finished() {
             std::thread::sleep(std::time::Duration::from_millis(150));
-            let conn = db.rw().map_err(anyhow::Error::msg)?;
-            let processed: Option<i64> = conn
-                .query_row(
-                    "SELECT rows_processed FROM runs WHERE id = ?",
-                    params![run_id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .context("child: read progress")?;
-            drop(conn);
-            println!("PROGRESS {}", processed.unwrap_or(0));
+            let done: i64 = pipeline.job.snapshot().levels.iter().map(|l| l.done).sum();
+            println!("PROGRESS {done}");
         }
-        done.store(true, Ordering::Relaxed);
         worker
             .join()
             .map_err(|_| anyhow::anyhow!("child worker panicked"))?;
@@ -120,6 +97,19 @@ fn child_main(args: &mut impl Iterator<Item = String>) -> anyhow::Result<()> {
     // child exit as a test failure (the kill threshold was never hit).
     println!("CHILD COMPLETED");
     Ok(())
+}
+
+/// A job classifying the dataset with the two-digit model.
+fn pipeline(model_id: i64) -> ClassifyPipeline {
+    ClassifyPipeline {
+        dataset_id: DATASET_ID.to_owned(),
+        models: vec![ClassifyModel {
+            model_id,
+            digit_level: DIGIT_LEVEL,
+        }],
+        computed_at: Utc::now().to_rfc3339(),
+        job: Arc::new(Job::new(&[DIGIT_LEVEL], ROWS)),
+    }
 }
 
 #[expect(
@@ -134,8 +124,7 @@ fn parent_main() -> anyhow::Result<()> {
         .context("scratch path not utf-8")?
         .to_owned();
 
-    // --- Seed: dataset, courses, model rows, and a `running` run row ---
-    let run_id = uuid::Uuid::new_v4().to_string();
+    // --- Seed: a `running` dataset, its courses, and the model rows ---
     let model_id = {
         let db = AppDb::open_at(db_path.clone(), "dev", &Progress::none())
             .map_err(anyhow::Error::msg)?;
@@ -149,9 +138,10 @@ fn parent_main() -> anyhow::Result<()> {
 
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
-             VALUES (?, 'check-resume', 'manual', ?, ?, 'ready')",
-            params![DATASET_ID, now, ROWS],
+            "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state,
+                                   classify_state, classify_ep, classify_updated_at)
+             VALUES (?, 'check-resume', 'manual', ?, ?, 'ready', 'running', 'cpu', ?)",
+            params![DATASET_ID, now, ROWS, now],
         )
         .context("insert dataset")?;
 
@@ -182,24 +172,6 @@ fn parent_main() -> anyhow::Result<()> {
                 .context("insert course")?;
         }
 
-        conn.execute(
-            "INSERT INTO runs
-                (id, dataset_id, description, state, model_ids,
-                 rows_total, rows_processed, unique_inputs_total, unique_inputs_done,
-                 cache_hits, created_at, started_at, last_progress_at, execution_provider)
-             VALUES (?, ?, 'check-resume run', 'running', ?, ?, 0, ?, 0, 0, ?, ?, ?, 'cpu')",
-            params![
-                run_id,
-                DATASET_ID,
-                serde_json::to_string(&[model_id])?,
-                ROWS,
-                ROWS,
-                now,
-                now,
-                now,
-            ],
-        )
-        .context("insert run")?;
         model_id
         // db drops here: the child must be the only process holding the file.
     };
@@ -208,7 +180,7 @@ fn parent_main() -> anyhow::Result<()> {
     eprintln!("spawning child; will SIGKILL after {KILL_AFTER_ROWS} rows…");
     let exe = std::env::current_exe().context("current_exe")?;
     let mut child = Command::new(exe)
-        .args(["--child", &db_path_str, &run_id, &model_id.to_string()])
+        .args(["--child", &db_path_str, &model_id.to_string()])
         .stdout(Stdio::piped())
         .spawn()
         .context("spawn child")?;
@@ -239,19 +211,13 @@ fn parent_main() -> anyhow::Result<()> {
     let db = AppDb::open_at(db_path, "dev", &Progress::none()).map_err(anyhow::Error::msg)?;
     let conn = db.rw().map_err(anyhow::Error::msg)?;
 
-    let state: String = conn
-        .query_row(
-            "SELECT state FROM runs WHERE id = ?",
-            params![run_id],
-            |r| r.get(0),
-        )
-        .context("read post-crash state")?;
+    let state = classify_state(&conn)?;
     if state != "running" {
-        bail!("expected orphaned 'running' row after SIGKILL, found '{state}'");
+        bail!("expected an orphaned 'running' dataset after SIGKILL, found '{state}'");
     }
-    let swept = sweep_orphaned_runs(&conn).map_err(anyhow::Error::msg)?;
-    if swept != 1 {
-        bail!("sweep_orphaned_runs swept {swept} rows, expected 1");
+    let swept = sweep_interrupted(&conn).map_err(anyhow::Error::msg)?;
+    if swept != 1 || classify_state(&conn)? != "stopped" {
+        bail!("sweep_interrupted swept {swept} datasets, expected 1 now 'stopped'");
     }
 
     let pre_crash: i64 = conn
@@ -274,45 +240,24 @@ fn parent_main() -> anyhow::Result<()> {
         )
         .context("read leg-1 stamp (should be exactly one distinct value)")?;
 
-    // --- Leg 2: resume in-process (what resume_run does) ---
+    // --- Leg 2: classify again in-process (what classify_dataset does) ---
     conn.execute(
-        "UPDATE runs SET state = 'running', resume_count = resume_count + 1,
-                error_message = NULL, last_progress_at = ?
-         WHERE id = ?",
-        params![Utc::now().to_rfc3339(), run_id],
+        "UPDATE datasets SET classify_state = 'running' WHERE id = ?",
+        params![DATASET_ID],
     )
-    .context("mark resuming")?;
+    .context("mark classifying")?;
     drop(conn);
 
     let model = load_active_model()?;
-    let pipeline = RunPipeline {
-        dataset_id: DATASET_ID.to_owned(),
-        run_id: run_id.clone(),
-        models: vec![RunModel {
-            model_id,
-            digit_level: DIGIT_LEVEL,
-        }],
-        computed_at: Utc::now().to_rfc3339(),
-        cancel: Arc::new(AtomicBool::new(false)),
-    };
+    let pipeline = pipeline(model_id);
     let outcome = pipeline.execute(&db, &[&model]);
-    pipeline.finalize(&db, outcome);
+    let finished = matches!(outcome, Ok(Outcome::Done));
+    pipeline.finalize(&db, outcome, || {});
+    let progress: i64 = pipeline.job.snapshot().levels.iter().map(|l| l.done).sum();
 
     // --- Verify ---
     let conn = db.rw().map_err(anyhow::Error::msg)?;
-    let (state, rows_processed, resume_count): (String, i64, i64) = conn
-        .query_row(
-            "SELECT state, rows_processed, resume_count FROM runs WHERE id = ?",
-            params![run_id],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, i64>(2)?,
-                ))
-            },
-        )
-        .context("read final run row")?;
+    let state = classify_state(&conn)?;
     let (total, distinct): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*), COUNT(DISTINCT content_hash)
@@ -332,16 +277,11 @@ fn parent_main() -> anyhow::Result<()> {
     drop(conn);
 
     let mut failures = Vec::new();
-    if state != "completed" {
-        failures.push(format!("final state = {state}, expected completed"));
+    if !finished || state != "idle" {
+        failures.push(format!("final state = {state}, expected idle after Done"));
     }
-    if rows_processed != ROWS {
-        failures.push(format!(
-            "rows_processed = {rows_processed}, expected {ROWS}"
-        ));
-    }
-    if resume_count != 1 {
-        failures.push(format!("resume_count = {resume_count}, expected 1"));
+    if progress != ROWS {
+        failures.push(format!("progress = {progress}, expected {ROWS}"));
     }
     if total != ROWS {
         failures.push(format!(
@@ -399,4 +339,13 @@ fn load_active_model() -> anyhow::Result<LoadedModel> {
         &[EpKind::Cpu],
         0,
     )
+}
+
+fn classify_state(conn: &duckdb::Connection) -> anyhow::Result<String> {
+    conn.query_row(
+        "SELECT classify_state FROM datasets WHERE id = ?",
+        params![DATASET_ID],
+        |r| r.get(0),
+    )
+    .context("read classify_state")
 }

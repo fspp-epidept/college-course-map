@@ -2,8 +2,8 @@
 import { onMounted } from "vue";
 import { commands } from "../../bindings";
 import { useBoot } from "../../composables/useBoot";
+import { useClassifyLifecycleRefresh } from "../../composables/useClassify";
 import { useNativeMenu } from "../../composables/useNativeMenu";
-import { useRunLifecycleRefresh } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
 import ImportCsvDialog from "../ImportCsvDialog.vue";
 import ActivityBar from "./ActivityBar.vue";
@@ -18,9 +18,9 @@ import ResizeHandle from "./ResizeHandle.vue";
 
 const workspace = useWorkspace();
 
-// Global run heartbeat: refreshes courses/coverage/datasets/metrics when any
-// run finishes, even if the tab that started it is no longer mounted (EPI-68).
-useRunLifecycleRefresh();
+// Refreshes courses/coverage/metrics when any classification ends, even if
+// that dataset's page isn't mounted.
+useClassifyLifecycleRefresh();
 
 // Every macOS native menu item routes through here (docs/keybinds.md).
 useNativeMenu();

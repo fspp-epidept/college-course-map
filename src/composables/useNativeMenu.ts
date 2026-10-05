@@ -3,7 +3,8 @@ import { events, type MenuAction } from "../bindings";
 import type { ActivityId } from "../config/activities";
 import type { SettingsSectionId } from "../config/settingsSections";
 import { useWorkspace } from "../stores/workspace";
-import { usePauseRun, useRuns } from "./useRuns";
+import { useStopClassification } from "./useClassify";
+import { useDatasets } from "./useDatasets";
 
 /**
  * One handler per menu command, each a direct call to the action the in-app
@@ -15,8 +16,8 @@ import { usePauseRun, useRuns } from "./useRuns";
 export function useMenuActions(): Record<MenuAction, () => void> {
   const workspace = useWorkspace();
   const toast = useToast();
-  const { data: runs } = useRuns();
-  const pauseRun = usePauseRun();
+  const { data: datasets } = useDatasets();
+  const stopClassification = useStopClassification();
 
   // Same steps as CommandPalette's jumpToActivity / jumpToSettingsSection.
   function show(activity: ActivityId, section?: SettingsSectionId): void {
@@ -42,15 +43,15 @@ export function useMenuActions(): Record<MenuAction, () => void> {
     import_csv: () => workspace.openImportDialog(),
     export_results: () => datasetAction("export"),
     start_classification: () => datasetAction("classify"),
-    // DatasetDetail's Pause button, aimed at the one running run
-    // (only one may be active app-wide).
-    pause_run: () => {
-      const active = runs.value?.find((run) => run.state === "running");
+    // DatasetDetail's Stop button, aimed at the one dataset classifying
+    // (only one may be at a time, app-wide).
+    stop_classification: () => {
+      const active = datasets.value?.find((d) => d.classification.state === "running");
       if (!active) {
-        toast.add({ title: "No run is in progress", color: "neutral" });
+        toast.add({ title: "Nothing is classifying", color: "neutral" });
         return;
       }
-      pauseRun.mutate(active.id);
+      stopClassification.mutate(active.id);
     },
     toggle_sidebar: () => workspace.toggleSidebar(),
     toggle_command_palette: () => workspace.toggleCommandPalette(),
