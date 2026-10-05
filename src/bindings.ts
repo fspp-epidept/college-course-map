@@ -121,8 +121,10 @@ async modelIdForDigitLevel(digitLevel: number) : Promise<Result<number | null, s
  * model and input, not by dataset, and are reused if the same courses are
  * imported again.
  * 
- * Refused while the dataset is importing or classifying, while
- * another dataset was derived from it, or while other maintenance runs.
+ * Refused while the dataset is importing or classifying, while a derived
+ * dataset is still being built from it, or while other maintenance runs.
+ * A finished derived dataset is a copy and doesn't hold its sources
+ * (#254): its `dataset_sources` link just names a dataset that is gone.
  * Slow on a large dataset (seconds per million courses), so it runs on the
  * blocking pool. Deleting a dataset that is already gone is not an error,
  * and deleting one left `delete_incomplete` finishes the job.
@@ -558,11 +560,11 @@ export type ColorRamps = { primary?: ColorRamp | null; secondary?: ColorRamp | n
  */
 export type ColorScheme = "light" | "dark"
 /**
- * Indexes of the mapped columns in the CSV's header order. Persisted to
- * `source_files.column_mapping` so export can reconstruct the original row
- * layout (mapped cells live in the structured `courses` columns, everything
- * else in `extra_columns`). Indexes, not header names: CSVs may repeat a
- * header name, and indexes stay unambiguous.
+ * Indexes of the mapped columns in the CSV's header order. Persisted in
+ * `datasets.layout` (`layout.rs`) so export can reconstruct the original
+ * row layout (mapped cells live in the structured `courses` columns,
+ * everything else in `extra_columns`). Indexes, not header names: CSVs may
+ * repeat a header name, and indexes stay unambiguous.
  */
 export type ColumnMap = { subject: number; catalog: number; title: number }
 export type ColumnStats = { header: string; empty: number; distinct: number; 

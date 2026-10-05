@@ -13,6 +13,7 @@ mod export;
 pub mod format;
 mod import;
 pub mod inference;
+mod layout;
 mod logging;
 pub mod manifest;
 mod metrics;
