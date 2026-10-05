@@ -631,8 +631,13 @@ fn publish(boot: &Boot, ctx: Ctx<'_>) -> Result<(), String> {
 /// How long [`shutdown`] waits for the step runner to stop.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
-/// The app's `RunEvent::Exit` body: stop startup, wait for it (bounded), then
-/// checkpoint if a database is open. Tauri leaves `run` via `process::exit`,
+/// How long [`shutdown`] waits for the threads inside ONNX Runtime to leave:
+/// one session build or one batch, since the gate stops the next one.
+const ORT_WAIT: Duration = Duration::from_secs(10);
+
+/// The app's `RunEvent::Exit` body: stop startup, wait for it (bounded),
+/// close ONNX Runtime and wait for the threads inside it (bounded, #231),
+/// then checkpoint if a database is open. Tauri leaves `run` via `process::exit`,
 /// so managed state is never dropped and `DuckDB` never gets its close-time
 /// checkpoint; doing it here means a clean exit leaves no WAL for
 /// the next launch to replay. Best effort: an in-flight run's flush holds
@@ -649,6 +654,13 @@ pub(crate) fn shutdown(app: &AppHandle) {
             log::warn!("exit: startup still running after {SHUTDOWN_WAIT:?}");
         }
     }
+    // After the step runner, so `init_ort` on the boot thread never meets a
+    // closed gate. `exit()` must not start while a thread is inside ORT.
+    let started = Instant::now();
+    match inference::close_ort(ORT_WAIT) {
+        0 => log::info!("exit: ONNX Runtime idle ({:?})", started.elapsed()),
+        inside => log::warn!("exit: {inside} thread(s) still in ONNX Runtime after {ORT_WAIT:?}"),
+    }
     if let Ok(services) = boot.ready() {
         match services.db.checkpoint() {
             Ok(()) => log::info!("exit: database checkpointed"),
@@ -663,7 +675,9 @@ fn install_signals(ctx: &mut Ctx<'_>) -> Result<(), String> {
 }
 
 /// How long [`lock_instance`] waits for another process to let go: longer
-/// than [`SHUTDOWN_WAIT`] and the exit hang of #231.
+/// than the longer of [`SHUTDOWN_WAIT`] and [`ORT_WAIT`], which don't add
+/// up (nothing enters ONNX Runtime until the step runner is done, bar the
+/// runner's own runtime load).
 const LOCK_WAIT: Duration = Duration::from_secs(15);
 const LOCK_RETRY: Duration = Duration::from_millis(100);
 const LOCK_BUSY: &str =
