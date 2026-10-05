@@ -89,7 +89,7 @@ decision (2026-09-30: none are applied).
 ## Checks the app runs
 
 During import the app profiles every row and reports findings. Findings
-inform; they never block an import or a classification run.
+inform; they never block an import or a classification.
 
 | Finding | Warns when | Why it matters |
 | --- | --- | --- |

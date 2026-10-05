@@ -2,16 +2,17 @@
 //! a time — a dataset delete, a cache prune, or a database compaction — and
 //! while one runs, nothing else starts writing.
 //!
-//! Imports and runs are not tracked here. Their own state is the truth:
-//! `datasets.import_state = 'importing'` (startup fails any orphaned one, so
-//! in a running process it means a live worker) and `runs.state = 'running'`
-//! with the [`RunRegistry`](crate::runs::RunRegistry).
+//! Imports and classifications are not tracked here. Their own state is the
+//! truth: `datasets.import_state = 'importing'` (startup fails any orphaned
+//! one, so in a running process it means a live worker) and
+//! `datasets.classify_state = 'running'` with the
+//! [`ClassifyRegistry`](crate::classify::ClassifyRegistry).
 //!
-//! Protocol, so an import or run can't start in the gap before maintenance
-//! does (or the reverse):
+//! Protocol, so an import or classification can't start in the gap before
+//! maintenance does (or the reverse):
 //! - Maintenance checks for live work and calls [`Activity::begin`] while
 //!   holding the read-write connection.
-//! - Writers (`import_csv`, `start_run`, `resume_run`, `delete_run`) call
+//! - Writers (`import_csv`, `classify_dataset`) call
 //!   [`Activity::ensure_idle`] twice: before taking the read-write
 //!   connection, so they fail at once instead of queueing behind a long
 //!   operation on the main thread, and again while holding it, which is the
@@ -38,7 +39,7 @@ impl Maintenance {
     }
 }
 
-/// Managed as Tauri state from startup, beside `RunRegistry`.
+/// Managed as Tauri state from startup, beside `ClassifyRegistry`.
 #[derive(Default)]
 pub(crate) struct Activity {
     slot: Mutex<Option<Maintenance>>,

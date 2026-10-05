@@ -1,4 +1,4 @@
-//! Native application menu (App / File / Edit / Run / View / Window).
+//! Native application menu (App / File / Edit / Classify / View / Window).
 //!
 //! Every custom item is a [`MenuAction`]. A click emits one typed
 //! [`MenuActionTriggered`] event, and the frontend's `useNativeMenu` composable
@@ -27,7 +27,7 @@ pub(crate) enum MenuAction {
     ImportCsv,
     ExportResults,
     StartClassification,
-    PauseRun,
+    StopClassification,
     ToggleSidebar,
     ToggleCommandPalette,
 }
@@ -55,7 +55,10 @@ const FILE_ACTIONS: &[MenuAction] = &[MenuAction::ImportCsv, MenuAction::ExportR
     not(any(target_os = "macos", test)),
     expect(dead_code, reason = "native menu is macOS-only")
 )]
-const RUN_ACTIONS: &[MenuAction] = &[MenuAction::StartClassification, MenuAction::PauseRun];
+const CLASSIFY_ACTIONS: &[MenuAction] = &[
+    MenuAction::StartClassification,
+    MenuAction::StopClassification,
+];
 #[cfg_attr(
     not(any(target_os = "macos", test)),
     expect(dead_code, reason = "native menu is macOS-only")
@@ -76,7 +79,7 @@ impl MenuAction {
             Self::ImportCsv => "import_csv",
             Self::ExportResults => "export_results",
             Self::StartClassification => "start_classification",
-            Self::PauseRun => "pause_run",
+            Self::StopClassification => "stop_classification",
             Self::ToggleSidebar => "toggle_sidebar",
             Self::ToggleCommandPalette => "toggle_command_palette",
         }
@@ -92,7 +95,7 @@ impl MenuAction {
             Self::ImportCsv => "Import CSV…",
             Self::ExportResults => "Export Results…",
             Self::StartClassification => "Start Classification",
-            Self::PauseRun => "Pause Run",
+            Self::StopClassification => "Stop Classification",
             Self::ToggleSidebar => "Toggle Sidebar",
             Self::ToggleCommandPalette => "Show Command Palette",
         }
@@ -105,7 +108,7 @@ impl MenuAction {
             Self::ImportCsv => Some("CmdOrCtrl+O"),
             Self::ExportResults => Some("CmdOrCtrl+E"),
             Self::StartClassification => Some("CmdOrCtrl+R"),
-            Self::PauseRun => Some("CmdOrCtrl+."),
+            Self::StopClassification => Some("CmdOrCtrl+."),
             Self::ToggleSidebar => Some("CmdOrCtrl+B"),
             Self::ToggleCommandPalette => Some("CmdOrCtrl+K"),
         }
@@ -119,7 +122,7 @@ impl MenuAction {
             Self::ImportCsv
                 | Self::ExportResults
                 | Self::StartClassification
-                | Self::PauseRun
+                | Self::StopClassification
                 | Self::ToggleCommandPalette
         )
     }
@@ -188,7 +191,7 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .select_all()
         .build()?;
 
-    let run = submenu(app, "Run", RUN_ACTIONS)?.build()?;
+    let classify = submenu(app, "Classify", CLASSIFY_ACTIONS)?.build()?;
 
     let view = submenu(app, "View", VIEW_ACTIONS)?;
     // Devtools toggle is a development-only affordance; omit it from release builds.
@@ -208,7 +211,7 @@ pub(crate) fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build()?;
 
     MenuBuilder::new(app)
-        .items(&[&app_menu, &file, &edit, &run, &view, &window])
+        .items(&[&app_menu, &file, &edit, &classify, &view, &window])
         .build()
 }
 
@@ -223,7 +226,7 @@ pub(crate) fn enable_boot_items<R: Runtime>(app: &AppHandle<R>) {
             return;
         };
         let submenus = menu.items().unwrap_or_default();
-        for action in [APP_ACTIONS, FILE_ACTIONS, RUN_ACTIONS, VIEW_ACTIONS].concat() {
+        for action in [APP_ACTIONS, FILE_ACTIONS, CLASSIFY_ACTIONS, VIEW_ACTIONS].concat() {
             if !action.needs_boot() {
                 continue;
             }
@@ -270,7 +273,7 @@ pub(crate) fn handle_event<R: Runtime>(app: &AppHandle<R>, event: &tauri::menu::
 
 #[cfg(test)]
 mod tests {
-    use super::{APP_ACTIONS, FILE_ACTIONS, MenuAction, RUN_ACTIONS, VIEW_ACTIONS};
+    use super::{APP_ACTIONS, CLASSIFY_ACTIONS, FILE_ACTIONS, MenuAction, VIEW_ACTIONS};
     use specta::{Generics, Type, TypeCollection, datatype::DataType};
 
     /// Every `MenuAction` variant (as specta reports it, i.e. exactly the
@@ -291,7 +294,7 @@ mod tests {
         variants.sort();
 
         let mut placed = Vec::new();
-        for action in [APP_ACTIONS, FILE_ACTIONS, RUN_ACTIONS, VIEW_ACTIONS].concat() {
+        for action in [APP_ACTIONS, FILE_ACTIONS, CLASSIFY_ACTIONS, VIEW_ACTIONS].concat() {
             let name = serde_json::from_value::<String>(serde_json::to_value(action)?)?;
             assert_eq!(action.id(), name);
             placed.push(name);

@@ -150,8 +150,9 @@ pub(crate) fn import_csv(
 
         conn.execute(
             "INSERT INTO datasets
-                (id, title, source_kind, source_file_id, imported_at, row_count, import_state)
-             VALUES (?, ?, 'file', ?, ?, 0, 'importing')",
+                (id, title, source_kind, source_file_id, imported_at, row_count, import_state,
+                 classify_state)
+             VALUES (?, ?, 'file', ?, ?, 0, 'importing', 'idle')",
             params![dataset_id, &display_name, source_file_id, &now],
         )
         .map_err(|e| format!("insert datasets: {e}"))?;

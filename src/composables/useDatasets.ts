@@ -5,15 +5,17 @@ import { type DatasetSummary, type InputProfile, commands } from "../bindings";
 /**
  * Read the dataset list via the Rust `list_datasets` IPC command. First reactive
  * consumer of TanStack Query in this app — pattern to copy for further list
- * queries (`useRuns`, `useModels`, etc.).
+ * queries (`useModels`, etc.).
  *
  * Cache invalidation: import flows that mutate `datasets` should call
  * `queryClient.invalidateQueries({ queryKey: ["datasets"] })` after success.
  *
  * Polling: while any dataset is `importing`, refetch every second so the
  * row-count column tick is visible without a manual refresh; likewise while
- * one is `deleting`, so every surface sees it go. Stops once every dataset is
- * at rest (`ready` / `failed` / `delete_incomplete`).
+ * one is `deleting`, so every surface sees it go. While one is classifying,
+ * every 500 ms: its live progress rides on this list, and the sidebar, the
+ * dataset page and the menu all read it from here. Stops once every dataset
+ * is at rest.
  */
 export function useDatasets() {
   return useQuery({
@@ -26,6 +28,7 @@ export function useDatasets() {
     refetchInterval: (query) => {
       const data = query.state.data as DatasetSummary[] | undefined;
       if (!data) return false;
+      if (data.some((d) => d.classification.state === "running")) return 500;
       // 1 s keeps the progress meter live without piling IPC calls against a
       // DB that the Appender is hammering with bulk writes.
       return data.some((d) => d.importState === "importing" || d.importState === "deleting")
@@ -54,7 +57,7 @@ export function useInputProfile(datasetId: MaybeRefOrGetter<string>) {
 }
 
 /**
- * Delete a dataset with its courses and runs (#199). Slow on a large dataset;
+ * Delete a dataset with its courses (#199). Slow on a large dataset;
  * the datasets list reports it as `deleting` meanwhile. Cached
  * classifications are not touched. Per-dataset queries are removed, not
  * refetched: there is nothing left to fetch.
@@ -75,7 +78,6 @@ export function useDeleteDataset() {
         queryClient.removeQueries({ queryKey: [key, datasetId] });
       }
       queryClient.invalidateQueries({ queryKey: ["datasets"] });
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["metrics"] });
       queryClient.invalidateQueries({ queryKey: ["storage"] });
     },

@@ -7,7 +7,7 @@
 //!
 //! Deliberately not handled:
 //! - `SIGKILL` and `SIGSTOP` can't be caught. Recovery on the next open (WAL
-//!   replay, orphaned-run sweep) covers a kill.
+//!   replay, interrupted-classification sweep) covers a kill.
 //! - Fault signals (`SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`, `SIGABRT`,
 //!   `SIGTRAP`, `SIGSYS`) mean process state can't be trusted to write the
 //!   database; the same recovery covers them.

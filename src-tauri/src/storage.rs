@@ -25,9 +25,9 @@ use tauri::{AppHandle, Manager as _, State};
 use crate::{
     activity::{Activity, Maintenance},
     boot::{self, Boot, Services},
+    classify::ClassifyRegistry,
     db,
     manifest::ModelCatalog,
-    runs::RunRegistry,
 };
 
 #[derive(Type, Serialize, Debug)]
@@ -234,10 +234,10 @@ fn reclaimable_bytes(conn: &duckdb::Connection) -> Result<u64, String> {
     Ok(u64::try_from(bytes).unwrap_or(0))
 }
 
-/// `Err` with the reason while an import or a run is working. Call with the
-/// read-write connection held when the answer gates a claim of the
+/// `Err` with the reason while an import or a classification is working.
+/// Call with the read-write connection held when the answer gates a claim of the
 /// maintenance slot (activity.rs).
-fn ensure_no_live_work(conn: &duckdb::Connection, runs: &RunRegistry) -> Result<(), String> {
+fn ensure_no_live_work(conn: &duckdb::Connection, jobs: &ClassifyRegistry) -> Result<(), String> {
     let importing: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM datasets WHERE import_state = 'importing'",
@@ -248,7 +248,7 @@ fn ensure_no_live_work(conn: &duckdb::Connection, runs: &RunRegistry) -> Result<
     if importing > 0 {
         return Err("An import is running. Wait for it to finish.".to_owned());
     }
-    crate::runs::ensure_no_active_run(conn, runs)
+    crate::classify::ensure_none_active(conn, jobs)
 }
 
 /// What the app keeps on disk. Off the main thread: it walks the model and
@@ -269,7 +269,7 @@ fn status(app: &AppHandle) -> Result<StorageStatus, String> {
         let conn = db.ro()?;
         let busy = activity
             .ensure_idle()
-            .and_then(|()| ensure_no_live_work(&conn, &app.state::<RunRegistry>()))
+            .and_then(|()| ensure_no_live_work(&conn, &app.state::<ClassifyRegistry>()))
             .err();
         (
             cache_usage(&conn, &active_model_ids(catalog))?,
@@ -311,8 +311,8 @@ fn status(app: &AppHandle) -> Result<StorageStatus, String> {
 
 /// Remove the cached classifications in `scope` and return how many went
 /// ([`StorageStatus::cache`] says beforehand how many that is). Refused
-/// while an import or run is working or other maintenance runs; the space
-/// comes back when the database is next compacted.
+/// while an import or classification is working or other maintenance
+/// runs; the space comes back when the database is next compacted.
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn storage_prune(app: AppHandle, scope: PruneScope) -> Result<i64, String> {
@@ -321,7 +321,7 @@ pub(crate) async fn storage_prune(app: AppHandle, scope: PruneScope) -> Result<i
         prune(
             db,
             &app.state::<Activity>(),
-            &app.state::<RunRegistry>(),
+            &app.state::<ClassifyRegistry>(),
             scope,
             &active_model_ids(catalog),
         )
@@ -333,12 +333,12 @@ pub(crate) async fn storage_prune(app: AppHandle, scope: PruneScope) -> Result<i
 fn prune(
     db: &db::AppDb,
     activity: &Activity,
-    runs: &RunRegistry,
+    jobs: &ClassifyRegistry,
     scope: PruneScope,
     active: &[i64],
 ) -> Result<i64, String> {
     let conn = db.rw()?;
-    ensure_no_live_work(&conn, runs)?;
+    ensure_no_live_work(&conn, jobs)?;
     let _guard = activity.begin(Maintenance::PruningCache)?;
     let removed = conn
         .execute(
@@ -358,8 +358,8 @@ fn prune(
 
 /// Compact the database (#201): write a fresh copy holding only the live
 /// rows, then relaunch; the next start puts the copy in place of the old
-/// file before opening it (`db.rs`). Refused while an import or run is
-/// working or other maintenance runs. From the moment the copy starts until
+/// file before opening it (`db.rs`). Refused while an import or classification
+/// is working or other maintenance runs. From the moment the copy starts until
 /// the app exits nothing may write, so the maintenance slot is never given
 /// back on success. Closing the app during the copy just abandons it.
 #[tauri::command]
@@ -370,7 +370,7 @@ pub(crate) async fn compact_database(app: AppHandle) -> Result<(), String> {
         let activity = app.state::<Activity>();
         let guard = {
             let rw = db.rw()?;
-            ensure_no_live_work(&rw, &app.state::<RunRegistry>())?;
+            ensure_no_live_work(&rw, &app.state::<ClassifyRegistry>())?;
             activity.begin(Maintenance::Compacting)?
         };
         // The copy gets its own connection: holding the read-write one for
@@ -437,8 +437,8 @@ mod tests {
     use crate::{
         activity::{Activity, Maintenance},
         boot::Progress,
+        classify::ClassifyRegistry,
         db::AppDb,
-        runs::RunRegistry,
     };
 
     /// Model 1 is superseded, model 2 active. Hash `kept` is in a dataset,
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn prune_removes_exactly_its_bucket() -> Result<(), String> {
         let db = seeded("prune")?;
-        let (activity, runs, active) = (Activity::default(), RunRegistry::default(), [2_i64]);
+        let (activity, jobs, active) = (Activity::default(), ClassifyRegistry::default(), [2_i64]);
 
         let usage = cache_usage(&*db.rw()?, &active)?;
         assert_eq!(
@@ -490,12 +490,12 @@ mod tests {
         );
 
         assert_eq!(
-            prune(&db, &activity, &runs, PruneScope::SupersededModels, &active)?,
+            prune(&db, &activity, &jobs, PruneScope::SupersededModels, &active)?,
             2
         );
         assert_eq!(left(&db)?, [(2, "gone".to_owned()), (2, "kept".to_owned())]);
         assert_eq!(
-            prune(&db, &activity, &runs, PruneScope::Unreferenced, &active)?,
+            prune(&db, &activity, &jobs, PruneScope::Unreferenced, &active)?,
             1
         );
         assert_eq!(left(&db)?, [(2, "kept".to_owned())]);
@@ -503,21 +503,21 @@ mod tests {
 
         // No active model: nothing is superseded, rather than everything.
         assert_eq!(
-            prune(&db, &activity, &runs, PruneScope::SupersededModels, &[])?,
+            prune(&db, &activity, &jobs, PruneScope::SupersededModels, &[])?,
             0
         );
         assert_eq!(left(&db)?.len(), 1);
         Ok(())
     }
 
-    /// Pruning is refused while an import or a run is working, or while
+    /// Pruning is refused while an import or a classification is working, or while
     /// other maintenance holds the slot.
     #[test]
     fn prune_is_refused_during_other_work() -> Result<(), String> {
         let db = seeded("prune-refused")?;
-        let (activity, runs, active) = (Activity::default(), RunRegistry::default(), [2_i64]);
+        let (activity, jobs, active) = (Activity::default(), ClassifyRegistry::default(), [2_i64]);
         let refused = |why: &str| -> Result<(), String> {
-            let err = prune(&db, &activity, &runs, PruneScope::Unreferenced, &active)
+            let err = prune(&db, &activity, &jobs, PruneScope::Unreferenced, &active)
                 .err()
                 .ok_or("pruned")?;
             assert!(err.contains(why), "{err}");

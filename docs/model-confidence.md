@@ -52,7 +52,7 @@ logits are the only signal, and everything below is derived from them.
 | Tokenization | `tokenizers` crate (HF `tokenizer.json`), truncation at 512 tokens, right padding | i64 ids |
 | Forward pass | ONNX Runtime via `ort` v2.0.0-rc.12, graph exported by `optimum-cli export onnx --task text-classification` from the annamp PyTorch checkpoints | f32 |
 | Softmax | `inference.rs::softmax_at` (Rust, formula above) | f32 in, f32 out |
-| Persistence | `runs.rs::flush_batch` → DuckDB `inference_results.probability` / `.logit_argmax` | stored as f64 (REAL columns), widened from f32 |
+| Persistence | `classify.rs::flush_batch` → DuckDB `inference_results.probability` / `.logit_argmax` | stored as f64 (REAL columns), widened from f32 |
 
 The softmax is computed **in this app, not inside the ONNX graph** — the
 exported graph ends at the logits, exactly like the Python reference

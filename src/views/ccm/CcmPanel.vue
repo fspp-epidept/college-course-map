@@ -4,7 +4,7 @@ import { commands } from "../../bindings";
 import { useWorkspace } from "../../stores/workspace";
 import CcmDetail from "./CcmDetail.vue";
 
-// Master/detail like Datasets/Runs: the sidebar owns selection, `:key` gives
+// Master/detail like Datasets: the sidebar owns selection, `:key` gives
 // each code a fresh detail instance.
 const workspace = useWorkspace();
 const code = computed(() => workspace.selectedCcmCode);

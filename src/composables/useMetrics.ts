@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/vue-query";
 import { type AppMetrics, commands } from "../bindings";
 
 /**
- * Landing-screen aggregates. Mutations that change a row count (import_csv,
- * start_run, dataset delete) should invalidate `["metrics"]` after success.
+ * Landing-screen aggregates. Anything that changes a row count (an import,
+ * a classification ending, a dataset delete) should invalidate `["metrics"]`.
  */
 export function useMetrics() {
   return useQuery({

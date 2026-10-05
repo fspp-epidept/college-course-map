@@ -7,8 +7,7 @@ import { useWorkspace } from "../../stores/workspace";
 const workspace = useWorkspace();
 
 // Every dataset is a jump target: the palette reaches any of them, not only
-// the one selected. Runs are reached through their dataset (#247). The query
-// shares its cache with the sidebar.
+// the one selected. The query shares its cache with the sidebar.
 const { data: datasets } = useDatasets();
 
 // Bind UDashboardSearch's open state to the workspace store so other surfaces

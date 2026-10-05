@@ -40,8 +40,8 @@ For each keyboard shortcut you want, walk this checklist:
 | Import CSV | `CmdOrCtrl+O` | File |
 | Export Results | `CmdOrCtrl+E` | File |
 | Cut/Copy/Paste/SelectAll | (predefined) | Edit |
-| Start Classification | `CmdOrCtrl+R` | Run |
-| Pause Run | `CmdOrCtrl+.` | Run |
+| Start Classification | `CmdOrCtrl+R` | Classify |
+| Stop Classification | `CmdOrCtrl+.` | Classify |
 | Toggle Sidebar | `CmdOrCtrl+B` | View |
 | Toggle Command Palette | `CmdOrCtrl+K` | View |
 | Toggle Devtools | `CmdOrCtrl+Shift+I` | View (dev only) |
@@ -84,7 +84,7 @@ MenuActionTriggered { action }.emit(app)
 
 The frontend side is `src/composables/useNativeMenu.ts`:
 
-- `useMenuActions()` returns a `Record<MenuAction, () => void>`. Each handler calls the action the in-app UI already uses (workspace store actions, the shared `usePauseRun` mutation, the import dialog mounted in `Workbench.vue`). Classify and Export are component-local to `DatasetDetail`, so their handlers set `workspace.pendingDatasetAction`; `DatasetDetail` consumes it and runs exactly what its button would, or toasts the same blocker that disables the button.
+- `useMenuActions()` returns a `Record<MenuAction, () => void>`. Each handler calls the action the in-app UI already uses (workspace store actions, the shared `useStopClassification` mutation, the import dialog mounted in `Workbench.vue`). Classify and Export are component-local to `DatasetDetail`, so their handlers set `workspace.pendingDatasetAction`; `DatasetDetail` consumes it and runs exactly what its button would, or toasts the same blocker that disables the button.
 - `useNativeMenu()` listens for `MenuActionTriggered` and dispatches through that table. `Workbench.vue` calls it once. The workbench mounts only once startup is ready (#224), so until then no menu action runs; the macOS items that need the database are also built disabled and enabled on ready, so they show greyed out.
 - The Windows/Linux custom titlebar menu (#104) should dispatch through `useMenuActions()` too.
 

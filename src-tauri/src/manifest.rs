@@ -64,8 +64,8 @@ impl ModelCatalog {
             .find(|m| m.digit_level == digit_level)
     }
 
-    /// Digit levels the manifest defines, ascending — the set an all-models
-    /// run covers (EPI-96).
+    /// Digit levels the manifest defines, ascending — the set a classification
+    /// covers (EPI-96).
     #[must_use]
     pub fn levels(&self) -> Vec<u8> {
         let mut levels: Vec<u8> = self.manifest.model.iter().map(|m| m.digit_level).collect();

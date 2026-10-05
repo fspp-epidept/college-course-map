@@ -1,11 +1,11 @@
 //! Demo data seeding. Called by `cargo run --example seed_demo`, wrapped as
-//! `task seed:demo`. Idempotent in the destructive sense: every run truncates
-//! the dataset/run/result tables and reinserts the same fixtures, so the dev
+//! `task seed:demo`. Idempotent in the destructive sense: every call truncates
+//! the dataset/result tables and reinserts the same fixtures, so the dev
 //! loop is `task db:reset` (delete file) or `task seed:demo` (refresh data) —
 //! whichever you prefer.
 //!
-//! No CSV ingest yet; the rows here are hand-fabricated so the Datasets / Runs
-//! activity tabs render something during Phase 3 UI work.
+//! The rows here are hand-fabricated so the Datasets activity renders
+//! something without a CSV import.
 
 use blake3::Hasher;
 use chrono::Utc;
@@ -29,8 +29,9 @@ const FIXTURES: &[(&str, &str, &str)] = &[
 ];
 
 /// Insert a representative dataset: two source files, two file-backed datasets,
-/// 12 courses, three CCM models, one completed run, and 12 inference results
-/// (one per course, for the 6-digit model).
+/// 12 courses, three CCM models, and 6 inference results (one per distinct
+/// course, for the 6-digit model). The first dataset reads as classified on
+/// CPU.
 pub fn run(db: &AppDb) -> Result<(), String> {
     let conn = db.rw()?;
     let now = Utc::now().to_rfc3339();
@@ -50,8 +51,7 @@ fn seed_inner(conn: &duckdb::Connection, now: &str) -> Result<(), String> {
     let (ds1, ds2) = seed_datasets(conn, now, sf1, sf2)?;
     let content_hashes = seed_courses(conn, &ds1, &ds2)?;
     let model_six = seed_models(conn)?;
-    let run_id = seed_run(conn, &ds1, model_six, now)?;
-    seed_results(conn, model_six, &content_hashes, &run_id, now)
+    seed_results(conn, model_six, &content_hashes, now)
 }
 
 /// FK-safe truncation. Explicit per-table because `DELETE FROM` doesn't cascade
@@ -59,7 +59,6 @@ fn seed_inner(conn: &duckdb::Connection, now: &str) -> Result<(), String> {
 fn truncate_all(conn: &duckdb::Connection) -> Result<(), String> {
     for table in [
         "inference_results",
-        "runs",
         "courses",
         "datasets",
         "models",
@@ -117,15 +116,16 @@ fn seed_datasets(
     let ds2 = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO datasets
-            (id, title, source_kind, source_file_id, imported_at, row_count)
-         VALUES (?, ?, 'file', ?, ?, ?)",
-        params![ds1, "Fall 2025 transcripts", sf1, now, 6_i64],
+            (id, title, source_kind, source_file_id, imported_at, row_count,
+             classify_state, classify_ep, classify_updated_at)
+         VALUES (?, ?, 'file', ?, ?, ?, 'idle', 'cpu', ?)",
+        params![ds1, "Fall 2025 transcripts", sf1, now, 6_i64, now],
     )
     .map_err(|e| format!("insert datasets (ds1): {e}"))?;
     conn.execute(
         "INSERT INTO datasets
-            (id, title, source_kind, source_file_id, imported_at, row_count)
-         VALUES (?, ?, 'file', ?, ?, ?)",
+            (id, title, source_kind, source_file_id, imported_at, row_count, classify_state)
+         VALUES (?, ?, 'file', ?, ?, ?, 'idle')",
         params![ds2, "Spring 2026 transcripts", sf2, now, 6_i64],
     )
     .map_err(|e| format!("insert datasets (ds2): {e}"))?;
@@ -157,49 +157,12 @@ fn seed_courses(conn: &duckdb::Connection, ds1: &str, ds2: &str) -> Result<Vec<S
 
 /// Seed the models table from the embedded manifest — the same rows the app
 /// resolves at startup, so demo results reference real pinned models instead
-/// of placeholders. Returns the 6-digit model id, which the demo run targets.
+/// of placeholders. Returns the 6-digit model id, which the demo results use.
 fn seed_models(conn: &duckdb::Connection) -> Result<i64, String> {
     let catalog = crate::manifest::resolve_model_rows(conn, crate::manifest::load()?)?;
     catalog
         .model_id(6)
         .ok_or_else(|| "manifest has no 6-digit model".to_owned())
-}
-
-fn seed_run(
-    conn: &duckdb::Connection,
-    ds1: &str,
-    model_six: i64,
-    now: &str,
-) -> Result<String, String> {
-    let run_id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO runs
-            (id, dataset_id, description, state, model_ids,
-             rows_total, rows_processed,
-             unique_inputs_total, unique_inputs_done, cache_hits,
-             created_at, started_at, completed_at, execution_provider)
-         VALUES (?, ?, ?, 'completed', ?,
-                 ?, ?,
-                 ?, ?, ?,
-                 ?, ?, ?, ?)",
-        params![
-            run_id,
-            ds1,
-            "Demo run: Fall 2025 transcripts × 6-digit",
-            serde_json::to_string(&[model_six]).map_err(|e| e.to_string())?,
-            6_i64,
-            6_i64,
-            6_i64,
-            6_i64,
-            0_i64,
-            now,
-            now,
-            now,
-            "cpu",
-        ],
-    )
-    .map_err(|e| format!("insert runs: {e}"))?;
-    Ok(run_id)
 }
 
 /// One result per unique `content_hash`, 6-digit model. Codes are placeholders —
@@ -209,11 +172,10 @@ fn seed_results(
     conn: &duckdb::Connection,
     model_six: i64,
     hashes: &[String],
-    run_id: &str,
     now: &str,
 ) -> Result<(), String> {
     // Canonical zero-padded codes (match ccm_taxonomy) so demo rows exercise
-    // the taxonomy join like real runs do.
+    // the taxonomy join like real results do.
     let demo_codes = [
         "27.0101", "27.0102", "23.0101", "11.0701", "11.0798", "26.0101",
     ];
@@ -222,9 +184,9 @@ fn seed_results(
         conn.execute(
             "INSERT INTO inference_results
                 (model_id, content_hash, classification, probability,
-                 logit_argmax, computed_at, computed_by_run)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-            params![model_six, hash, code, 0.94_f64, 7.8_f64, now, run_id],
+                 logit_argmax, computed_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![model_six, hash, code, 0.94_f64, 7.8_f64, now],
         )
         .map_err(|e| format!("insert inference_results: {e}"))?;
     }

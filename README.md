@@ -6,7 +6,7 @@ A native desktop app that bulk-classifies college courses against College Course
 
 - Classifies courses at the 2-, 4-, and 6-digit CCM levels using [annamp's open-weight classifiers](https://huggingface.co/collections/annamp/classifying-courses-at-scale), exported to ONNX (Open Neural Network Exchange); ModernBERT is the app-active model family
 - Runs inference locally through swappable ONNX Runtime packs: CPU in every build, CUDA and TensorRT packs downloadable in-app on Windows and Linux, CoreML included on macOS
-- Handles ~2M-row datasets with resumable runs and a results cache keyed by `(model, content hash)`, so nothing re-pays for inference already done
+- Handles ~2M-row datasets with stoppable, resumable classification and a results cache keyed by `(model, content hash)`, so nothing re-pays for inference already done
 - Stores everything in DuckDB: streaming CSV ingest, paginated result queries, exports written straight to disk
 
 Pre-1.0. The core loop is complete: import a CSV, map columns, classify locally, browse and export results.
@@ -26,7 +26,7 @@ Download the installer for your platform from the [latest release](https://githu
 
 1. **Download the models.** Open the **Models** activity in the left activity bar and click **Download Models**. The three classifiers (about 2 GB total) download once from Hugging Face, are hash-verified, and load automatically. Everything after this step is fully offline.
 2. **Import a CSV.** Open the **Datasets** activity and click **Import CSV**. Pick your file, then map which columns hold the subject code, catalog number, and course title; recognized headers map automatically. No file handy? Use [`samples/sample_courses.csv`](samples/sample_courses.csv) from this repo, a 49,537-row real-shaped input whose headers auto-map.
-3. **Classify.** Select the dataset and click **Classify**. One run classifies at all three digit levels, with live progress. Long runs are interruptible and resumable, and results are cached by course content, so nothing is ever classified twice.
+3. **Classify.** Select the dataset and click **Classify**. It classifies at all three digit levels, with live progress. You can stop it and click **Classify** again later to pick up where it left off; results are cached by course content, so nothing is ever classified twice.
 4. **Export.** In the dataset view, click **Export CSV** and choose a destination. Options: include all digit levels in one file, include the top-5 candidate codes with probabilities per level, or collapse to one row per unique course. Exports include your original input columns, so the file drops back into your existing workflow.
 
 ## GPU acceleration
@@ -38,7 +38,7 @@ On Windows or Linux with an NVIDIA GPU, open **Settings → Compute**:
 1. Click **Download** on the CUDA (or TensorRT) backend. Each backend is a single download that bundles everything it needs
 2. Click **Make Active**, then **Relaunch**
 
-The active provider is shown at the top of the Compute page, and every run records which provider it used.
+The active provider is shown at the top of the Compute page, and each dataset's page shows which provider classified it.
 
 If a GPU backend fails on your machine (old driver, provider fails to load), the Compute page shows a warning and the app falls back safely. To disable GPU inference, make the **CPU** backend active again and relaunch. The **Provider priority** list under Advanced reorders execution providers within the active backend; changing it only requires a model reload, not a relaunch.
 
@@ -64,7 +64,7 @@ Once you're happy with the update, delete the backup under **Settings → Storag
 
 ## Freeing disk space
 
-To delete a dataset, open it and click **Delete Dataset…**. That removes its courses and runs. To delete one run's record, use the trash button on that run, on the dataset's page. Cached classifications stay, so importing the same courses again needs no new inference.
+To delete a dataset, open it and click **Delete Dataset…**. That removes its courses. Cached classifications stay, so importing the same courses again needs no new inference.
 
 **Settings → Storage** lists what the app keeps on disk and gives space back:
 

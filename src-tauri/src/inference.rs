@@ -4,7 +4,7 @@
 //!
 //! One [`LoadedModel`] per digit level. Models hold their own session +
 //! tokenizer + id->label table; they are not Send-shared at this stage because
-//! the spike run pipeline drives them synchronously from the IPC thread.
+//! the classify worker drives them from one blocking thread.
 
 use std::{
     collections::HashMap,
@@ -30,12 +30,12 @@ use tokenizers::{
 const MAX_SEQ_LEN: usize = 512;
 
 /// Per-EP inference batch size (EPI-82): how many inputs go through one
-/// `session.run` call. Besides the ONNX call, this is also the run worker's
+/// `session.run` call. Besides the ONNX call, this is also the classify worker's
 /// progress/flush/cancel granularity.
 ///
 /// Measured 2026-07-28/29 on the validation panel (RTX 4070 SUPER, ONNX
 /// Runtime 1.24.2 cuda13 pack, two-digit model, `task check:throughput`).
-/// These constants assume the run worker's length-bucketing (EPI-82: inputs
+/// These constants assume the classify worker's length-bucketing (EPI-82: inputs
 /// sorted by length within a super-chunk, so `BatchLongest` pads almost
 /// nothing): bucketed batch 128 is the optimum on *both* CUDA (4,514 unique
 /// rows/s; 64 ≈ −3%, 256 ≈ −18%) and CPU (166 rows/s; +16% over the old
@@ -52,8 +52,9 @@ pub fn batch_size(_ep: EpKind) -> usize {
 pub struct LoadedModel {
     pub digit_level: u8,
     /// The highest-priority execution provider that registered successfully
-    /// for this session (EPI-73); `Cpu` when none did. Recorded on runs rows
-    /// and surfaced in Settings.
+    /// for this session (EPI-73); `Cpu` when none did. Recorded on the
+    /// dataset a job classifies (`datasets.classify_ep`) and surfaced in
+    /// Settings.
     pub resolved_ep: EpKind,
     /// The session needs `&mut self` to run; wrap so we can hold it behind an
     /// `Arc` shared from the inference registry.
@@ -144,9 +145,9 @@ static FAILED_EPS: FailedEps = FailedEps::new();
 /// ([`load_model`]), running one ([`classify_batch`]) and releasing one
 /// ([`OrtSession`]'s drop). `boot::shutdown` calls [`close_ort`] before the
 /// process exits; after that a thread that reaches ORT parks until the
-/// process ends instead of entering. Parking, not an error: a run stopped
-/// there is left `running` and swept to `interrupted` on the next launch, as
-/// for any exit, and a three-model load stops between models.
+/// process ends instead of entering. Parking, not an error: a classification
+/// stopped there is left `running` and swept to `stopped` on the next launch,
+/// as for any exit, and a three-model load stops between models.
 struct OrtGate {
     state: Mutex<GateState>,
     drained: std::sync::Condvar,
@@ -349,7 +350,7 @@ pub fn load_model(
     // BatchLongest = pad to the longest sequence in each batch. For a single
     // input (the `classify` path and the parity fixture), the "batch" has one
     // entry so this is a no-op — outputs stay byte-identical to the un-padded
-    // path. For real batches (the run worker), this gives encode_batch uniform
+    // path. For real batches (the classify worker), this gives encode_batch uniform
     // [n, max_len] shapes ready to flatten into a tensor.
     tokenizer.with_padding(Some(PaddingParams {
         strategy: PaddingStrategy::BatchLongest,
@@ -393,7 +394,7 @@ pub fn load_model(
 }
 
 /// Run one input through the model. Thin wrapper over [`classify_batch`] so
-/// the parity fixture exercises the same code path as the batched run worker.
+/// the parity fixture exercises the same code path as the batched classify worker.
 pub fn classify(model: &LoadedModel, input: &str) -> anyhow::Result<Classification> {
     classify_batch(model, &[input])?
         .into_iter()
@@ -707,7 +708,7 @@ pub fn load_all_models(
 /// downloaded yet), so commands can no longer assume models exist — they take
 /// this store and error with "models not loaded" when empty. Loading happens
 /// off the startup path (`models::autoload_if_present` / the `load_models`
-/// command); the registry goes behind an `Arc` so a run worker holds its
+/// command); the registry goes behind an `Arc` so a classify worker holds its
 /// clone for the whole run regardless of later store changes.
 #[derive(Debug, Default)]
 pub struct ModelStore {
@@ -738,8 +739,8 @@ impl ModelStore {
     }
 
     /// Empty the store so the next load rebuilds sessions (EPI-73: an EP
-    /// priority reorder re-registers providers). A run in flight keeps its
-    /// `Arc` clone and finishes on the old sessions — new runs get the new
+    /// priority reorder re-registers providers). A job in flight keeps its
+    /// `Arc` clone and finishes on the old sessions — new jobs get the new
     /// registry.
     pub(crate) fn clear(&self) -> Result<(), String> {
         let mut guard = self
