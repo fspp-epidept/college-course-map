@@ -9,6 +9,7 @@ mod config;
 mod courses;
 mod datasets;
 pub mod db;
+mod derive;
 mod export;
 mod filter;
 pub mod format;
@@ -55,6 +56,10 @@ fn specta_builder() -> Builder<tauri::Wry> {
             datasets::delete_dataset,
             datasets::get_input_profile,
             datasets::list_datasets,
+            derive::create_derived_dataset,
+            derive::derived_columns,
+            derive::get_derivation,
+            derive::preview_derivation,
             export::export_results,
             filter::column_values,
             filter::dataset_columns,

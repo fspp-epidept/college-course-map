@@ -5,6 +5,7 @@ import { useBoot } from "../../composables/useBoot";
 import { useClassifyLifecycleRefresh } from "../../composables/useClassify";
 import { useNativeMenu } from "../../composables/useNativeMenu";
 import { useWorkspace } from "../../stores/workspace";
+import DeriveDatasetDialog from "../../views/datasets/DeriveDatasetDialog.vue";
 import ImportCsvDialog from "../ImportCsvDialog.vue";
 import ActivityBar from "./ActivityBar.vue";
 import CommandPalette from "./CommandPalette.vue";
@@ -88,4 +89,5 @@ if (import.meta.env.TAURI_ENV_PLATFORM !== "macos") {
 
   <!-- Mounted here so the File menu can open it from any activity. -->
   <ImportCsvDialog v-model:open="workspace.importDialogOpen" />
+  <DeriveDatasetDialog v-model:open="workspace.deriveDialogOpen" />
 </template>
