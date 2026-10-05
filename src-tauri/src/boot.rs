@@ -8,7 +8,8 @@
 //! 2. [`plugin`]: manages [`Boot`], then runs [`PRE_LOGGER`], the steps that
 //!    must precede the log plugin. They run on the main thread with no window
 //!    and nothing logged, so they stay fast; the one wait is the instance
-//!    lock, while a previous process finishes exiting.
+//!    lock, while a previous process finishes exiting. A failure here is
+//!    held for [`start`], which turns it `Failed` (#208).
 //! 3. The log plugin, then opener and dialog.
 //! 4. `setup()` → [`start`]: the always-managed state and macOS decorations,
 //!    then [`STEPS`] in order on the `boot` thread, so the window paints
@@ -30,6 +31,7 @@
 //!   on the boot path; post main-thread work with `run_on_main_thread`.
 
 use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -191,6 +193,9 @@ pub(crate) struct BootState {
     pub detail: Option<String>,
     pub done: u64,
     pub total: u64,
+    /// The previous session ended without going through [`shutdown`]: a
+    /// crash, a kill or a power loss (#208). Read from `session.lock`.
+    pub unclean_exit: bool,
 }
 
 /// Emitted on every boot state change, progress throttled to
@@ -250,6 +255,9 @@ pub(crate) struct Boot {
     /// Notices from [`PRE_LOGGER`], held until [`start`] can log them and
     /// hand them on with its own.
     pre_logger_notices: Mutex<Vec<String>>,
+    /// A [`PRE_LOGGER`] step's error, held until [`start`] can turn it
+    /// `Failed`: there is no window to show it in yet (#208).
+    pre_logger_error: Mutex<Option<StepError>>,
     /// Whether the step runner is done, for [`shutdown`] to wait on.
     finished: Mutex<bool>,
     finished_cv: Condvar,
@@ -513,9 +521,12 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             app.manage(Boot::default());
             let boot = app.state::<Boot>();
             let mut ctx = Ctx::new(app, &boot);
-            run_steps(PRE_LOGGER, &mut ctx).map_err(|e| e.to_string())?;
+            let result = run_steps(PRE_LOGGER, &mut ctx);
             if let Ok(mut notices) = boot.pre_logger_notices.lock() {
                 *notices = ctx.notices;
+            }
+            if let (Err(e), Ok(mut slot)) = (result, boot.pre_logger_error.lock()) {
+                *slot = Some(e);
             }
             Ok(())
         })
@@ -523,8 +534,11 @@ pub(crate) fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 /// The `setup()` half of startup: manage the always-on state, then spawn
-/// [`run`] and return, so the window paints while the steps run.
+/// [`run`] and return, so the window paints while the steps run. A
+/// [`PRE_LOGGER`] failure turns the boot state `Failed` here instead, and no
+/// step runs.
 pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
+    log::info!("{}", banner(app));
     let boot = app.state::<Boot>();
     // Models load lazily: the store starts empty and a
     // background thread fills it when the manifest files are already on
@@ -553,6 +567,23 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), String> {
     boot.app
         .set(app.clone())
         .map_err(|_| "startup ran twice".to_owned())?;
+    let pre_logger_error = boot
+        .pre_logger_error
+        .lock()
+        .map_err(|_| "pre-logger error poisoned".to_owned())?
+        .take();
+    if let Some(e) = pre_logger_error {
+        let finished = Finished(&boot);
+        let notices = boot
+            .pre_logger_notices
+            .lock()
+            .map(|mut notices| std::mem::take(&mut *notices))
+            .unwrap_or_default();
+        log::error!("startup failed before the log opened: {e}");
+        boot.fail(e.message, notices);
+        drop(finished);
+        return Ok(());
+    }
     let app = app.clone();
     thread::Builder::new()
         .name("boot".to_owned())
@@ -573,6 +604,15 @@ fn run(app: &AppHandle) {
     }
     for notice in &ctx.notices {
         log::warn!("startup: {notice}");
+    }
+    if boot
+        .state
+        .lock()
+        .is_ok_and(|tracked| tracked.state.unclean_exit)
+    {
+        log::warn!(
+            "startup: the previous session did not exit cleanly (crash, kill or power loss)"
+        );
     }
     let result = run_steps(STEPS, &mut ctx);
     if ctx.progress.cancelled() {
@@ -667,6 +707,35 @@ pub(crate) fn shutdown(app: &AppHandle) {
             Err(e) => log::warn!("exit: checkpoint skipped: {e}"),
         }
     }
+    // Last: the next launch reads an empty lock file as a clean exit.
+    if let Some(file) = boot.instance_lock.get()
+        && let Err(e) = file.set_len(0)
+    {
+        log::warn!("exit: clean-exit marker not written: {e}");
+    }
+}
+
+/// The first log line: what a bug report needs to start from (#208).
+fn banner(app: &AppHandle) -> String {
+    let flavor = if cfg!(feature = "airgap") {
+        "airgap"
+    } else {
+        "connected"
+    };
+    let duckdb = duckdb::Connection::open_in_memory()
+        .and_then(|conn| conn.version())
+        .unwrap_or_else(|e| format!("unknown ({e})"));
+    let ort = runtime::load_manifest().map_or_else(
+        |e| format!("unknown ({e})"),
+        |manifest| manifest.ort_version,
+    );
+    format!(
+        "{} {} ({flavor}) on {} {}, DuckDB {duckdb}, ONNX Runtime {ort}",
+        app.package_info().name,
+        app.package_info().version,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
 }
 
 #[cfg(unix)]
@@ -686,18 +755,40 @@ const LOCK_BUSY: &str =
 /// The instance lock's file name, beside the database.
 pub(crate) const INSTANCE_LOCK: &str = "session.lock";
 
-/// Take `session.lock` beside the database and keep it on [`Boot`].
+/// Take `session.lock` beside the database and keep it on [`Boot`]. The
+/// file also says whether the previous session exited cleanly (#208): it
+/// holds this process's id while it runs, and [`shutdown`] empties it.
 fn acquire_instance_lock(ctx: &mut Ctx<'_>) -> Result<(), String> {
     let db_path = db::db_path()?;
     let dir = db_path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", db_path.display()))?;
-    let file = lock_instance(&dir.join(INSTANCE_LOCK), LOCK_WAIT)?;
-    ctx.app
-        .state::<Boot>()
-        .instance_lock
+    let path = dir.join(INSTANCE_LOCK);
+    let file = lock_instance(&path, LOCK_WAIT)?;
+    let boot = ctx.app.state::<Boot>();
+    match mark_running(&file) {
+        Ok(unclean) => boot.update(false, |state| state.unclean_exit = unclean),
+        // Diagnostics only: startup goes on without the marker.
+        Err(e) => ctx.notices.push(format!(
+            "Could not record this session in {}: {e}",
+            path.display()
+        )),
+    }
+    boot.instance_lock
         .set(file)
         .map_err(|_| "instance lock taken twice".to_owned())
+}
+
+/// Whether the locked `file` says the last session ended without
+/// [`shutdown`] (it isn't empty), then write this process's id into it.
+fn mark_running(mut file: &File) -> std::io::Result<bool> {
+    let mut previous = String::new();
+    file.read_to_string(&mut previous)?;
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    writeln!(file, "{}", std::process::id())?;
+    file.sync_all()?;
+    Ok(!previous.trim().is_empty())
 }
 
 /// Open `path` (created, with its directory, if missing) and take an
@@ -861,7 +952,7 @@ fn load_runtime(ctx: &mut Ctx<'_>) -> Result<(), String> {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{LOCK_BUSY, lock_instance};
+    use super::{LOCK_BUSY, lock_instance, mark_running};
 
     /// A second handle can't take the lock while the first holds it, gives
     /// up with the busy message after its bound, and gets it once the
@@ -882,6 +973,27 @@ mod tests {
         let retaken = lock_instance(&path, Duration::ZERO);
         assert!(retaken.is_ok());
         drop(retaken);
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+    }
+
+    /// A fresh or emptied lock file reads as a clean exit; one a session
+    /// left its id in reads as unclean (#208).
+    #[test]
+    fn mark_running_reports_a_session_that_never_shut_down() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("ccm-mark-test-{}", std::process::id()));
+        let path = dir.join("session.lock");
+        let file = lock_instance(&path, Duration::ZERO)?;
+        assert!(!mark_running(&file).map_err(|e| e.to_string())?);
+        drop(file);
+
+        let file = lock_instance(&path, Duration::ZERO)?;
+        assert!(mark_running(&file).map_err(|e| e.to_string())?);
+        file.set_len(0).map_err(|e| e.to_string())?;
+        drop(file);
+
+        let file = lock_instance(&path, Duration::ZERO)?;
+        assert!(!mark_running(&file).map_err(|e| e.to_string())?);
+        drop(file);
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
     }
 }

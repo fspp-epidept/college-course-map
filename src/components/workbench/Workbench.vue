@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { onMounted } from "vue";
+import { commands } from "../../bindings";
+import { useBoot } from "../../composables/useBoot";
 import { useNativeMenu } from "../../composables/useNativeMenu";
 import { useRunLifecycleRefresh } from "../../composables/useRuns";
 import { useWorkspace } from "../../stores/workspace";
@@ -21,6 +24,36 @@ useRunLifecycleRefresh();
 
 // Every macOS native menu item routes through here (docs/keybinds.md).
 useNativeMenu();
+
+// The previous session ended without a clean exit (#208): say so once,
+// pointing at the log, which still holds that session's last lines.
+const boot = useBoot();
+const toast = useToast();
+onMounted(() => {
+  if (!boot.state.value?.uncleanExit) return;
+  toast.add({
+    title: "The app closed unexpectedly last time",
+    description: "The log file has the details.",
+    color: "warning",
+    duration: 0,
+    actions: [
+      {
+        label: "Open Logs Folder",
+        icon: "i-lucide-folder-open",
+        onClick: async () => {
+          const result = await commands.openLogsDir();
+          if (result.status === "error") {
+            toast.add({
+              title: "Couldn't open the logs folder",
+              description: result.error,
+              color: "error",
+            });
+          }
+        },
+      },
+    ],
+  });
+});
 
 // Cmd/Ctrl-B sidebar toggle. On macOS the native menu accelerator owns the
 // keypress (Layer 2 — see docs/keybinds.md) and arrives via useNativeMenu, so

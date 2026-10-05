@@ -509,7 +509,12 @@ export type BootState = { seq: number; status: BootStatus; phase: Phase | null;
 /**
  * What the current step is doing, in the user's words.
  */
-detail: string | null; done: number; total: number }
+detail: string | null; done: number; total: number; 
+/**
+ * The previous session ended without going through [`shutdown`]: a
+ * crash, a kill or a power loss (#208). Read from `session.lock`.
+ */
+uncleanExit: boolean }
 /**
  * Emitted on every boot state change, progress throttled to
  * [`REPORT_INTERVAL`].
