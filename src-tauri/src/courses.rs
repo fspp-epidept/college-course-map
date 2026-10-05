@@ -1,6 +1,6 @@
 //! Paginated courses listing for the dataset detail view. Each row is joined
 //! left against `inference_results` for an optional model so the same query
-//! powers both the unclassified preview and the post-run results browser.
+//! powers both the unclassified preview and the results browser.
 
 use serde::{Deserialize, Serialize};
 use specta::Type;

@@ -108,7 +108,7 @@ fn pipeline(model_id: i64) -> ClassifyPipeline {
             digit_level: DIGIT_LEVEL,
         }],
         computed_at: Utc::now().to_rfc3339(),
-        job: Arc::new(Job::new(&[DIGIT_LEVEL], ROWS)),
+        job: Arc::new(Job::default()),
     }
 }
 

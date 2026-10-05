@@ -15,7 +15,7 @@
 //!
 //! Measures the model side only — CSV parse + dedupe are reported separately
 //! and the DB flush is deliberately excluded (EPI-82 ranked it second-order,
-//! and it is identical across EPs). Dedupe mirrors the run pipeline: unique
+//! and it is identical across EPs). Dedupe mirrors the classify pipeline: unique
 //! formatted inputs classify once; the effective rows/sec line counts the
 //! duplicate rows that would ride the cache for free.
 
@@ -86,7 +86,7 @@ fn rate(rows: usize, elapsed: std::time::Duration) -> f64 {
     rows as f64 / elapsed.as_secs_f64().max(f64::EPSILON)
 }
 
-/// CSV parse + run-pipeline-style dedupe: `(rows_read, unique inputs)`.
+/// CSV parse + classify-pipeline-style dedupe: `(rows_read, unique inputs)`.
 fn read_inputs(args: &Args) -> anyhow::Result<(usize, Vec<String>)> {
     let mut reader = csv::Reader::from_path(&args.csv)
         .map_err(|e| anyhow::anyhow!("open {}: {e}", args.csv.display()))?;

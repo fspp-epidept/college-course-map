@@ -103,7 +103,7 @@ watch(
             v-else-if="dataset.classification.state === 'failed'"
             class="text-(--ui-color-error-500) text-[10px] uppercase tracking-wide whitespace-nowrap"
           >
-            classify failed
+            failed
           </span>
         </span>
         <span class="text-xs text-(--ui-text-dimmed) tabular-nums">

@@ -229,13 +229,13 @@ const heading = computed(() => {
 });
 
 // While a job is writing results for the level being viewed, keep the
-// visible table page fresh. Other levels' columns can't change, so don't
-// refetch them.
+// visible table page fresh. Watching that level's own counter (not the
+// running level) catches its last window too. Other levels' columns can't
+// change, so don't refetch them.
 watch(
-  () => (progress.value ? progressDone(progress.value) : null),
+  () => progress.value?.levels.find((l) => l.digitLevel === viewLevel.value)?.done ?? null,
   (next, prev) => {
-    if (next === null || next === prev) return;
-    if (runningLevel.value === viewLevel.value) {
+    if (next !== null && prev !== null && next !== prev) {
       queryClient.invalidateQueries({ queryKey: ["courses", currentDatasetId.value] });
     }
   },
@@ -626,7 +626,7 @@ watch(
              it, with per-model coverage as the status. Confirm panel takes
              its place while a decision is pending. -->
         <div
-          v-else-if="classification"
+          v-else-if="classification && dataset?.importState === 'ready'"
           key="classification-card"
           class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-2"
         >

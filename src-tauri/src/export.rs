@@ -290,7 +290,7 @@ fn export_sql(
 
     // The `c` alias is either the courses table itself or, in unique mode,
     // a grouped subquery collapsing duplicates to their first occurrence
-    // (same arg_min representative-row pattern as the run pipeline's
+    // (same arg_min representative-row pattern as the classify pipeline's
     // materialize_misses). Either way the join surface is identical:
     // `c.content_hash` plus the assembled-input columns.
     let (source, filter, order) = match row_mode {

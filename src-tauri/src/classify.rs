@@ -121,34 +121,15 @@ pub struct LevelProgress {
 }
 
 /// One classification in flight. The worker writes progress at each flush;
-/// readers take a snapshot.
-#[derive(Debug)]
+/// readers take a snapshot. No progress rows until the worker has measured
+/// what is already cached, so a resumed job never reads zero.
+#[derive(Debug, Default)]
 pub struct Job {
     cancel: AtomicBool,
     levels: Mutex<Vec<LevelProgress>>,
 }
 
 impl Job {
-    /// A job over `levels`, each with `total` courses and nothing counted
-    /// yet; the worker fills in what is already cached before its first
-    /// window.
-    #[must_use]
-    pub fn new(levels: &[u8], total: i64) -> Self {
-        Self {
-            cancel: AtomicBool::new(false),
-            levels: Mutex::new(
-                levels
-                    .iter()
-                    .map(|&digit_level| LevelProgress {
-                        digit_level,
-                        done: 0,
-                        total,
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
     /// Poisoning is benign: the progress rows are always consistent.
     fn lock(&self) -> MutexGuard<'_, Vec<LevelProgress>> {
         self.levels.lock().unwrap_or_else(PoisonError::into_inner)
@@ -160,6 +141,10 @@ impl Job {
 
     fn stopping(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn set_levels(&self, levels: Vec<LevelProgress>) {
+        *self.lock() = levels;
     }
 
     fn set_done(&self, index: usize, done: u64) {
@@ -193,7 +178,7 @@ impl ClassifyRegistry {
     }
 
     /// Refused when the dataset already has a job.
-    fn register(&self, dataset_id: &str, job: &Arc<Job>) -> Result<(), String> {
+    pub(crate) fn register(&self, dataset_id: &str, job: &Arc<Job>) -> Result<(), String> {
         let mut jobs = self.lock();
         if jobs.contains_key(dataset_id) {
             return Err("This dataset is already classifying.".to_owned());
@@ -211,14 +196,14 @@ impl ClassifyRegistry {
     }
 
     /// Remove `job`, and only `job`: never a later job on the same dataset.
-    fn remove(&self, dataset_id: &str, job: &Arc<Job>) {
+    pub(crate) fn remove(&self, dataset_id: &str, job: &Arc<Job>) {
         let mut jobs = self.lock();
         if jobs.get(dataset_id).is_some_and(|j| Arc::ptr_eq(j, job)) {
             jobs.remove(dataset_id);
         }
     }
 
-    fn is_active(&self, dataset_id: &str) -> bool {
+    pub(crate) fn is_active(&self, dataset_id: &str) -> bool {
         self.lock().contains_key(dataset_id)
     }
 
@@ -334,7 +319,8 @@ pub(crate) fn classify_dataset(
             return Err(match state.as_deref() {
                 Some("deleting") => "This dataset is being deleted.",
                 Some("importing") => "This dataset is still importing.",
-                _ => "This dataset's import failed.",
+                Some("failed") => "This dataset's import failed.",
+                _ => "This dataset isn't ready to classify.",
             }
             .to_owned());
         }
@@ -359,8 +345,7 @@ pub(crate) fn classify_dataset(
     // released, so a stop request arriving right after this returns finds
     // the job, and the worker's finalize (which takes the same connection)
     // can't interleave.
-    let levels: Vec<u8> = models.iter().map(|m| m.digit_level).collect();
-    let job = Arc::new(Job::new(&levels, course_count));
+    let job = Arc::new(Job::default());
     jobs.register(&dataset_id, &job)?;
     let now = Utc::now().to_rfc3339();
     if let Err(e) = conn.execute(
@@ -565,9 +550,18 @@ impl ClassifyPipeline {
         }
         // Publish what is already cached before the first window computes,
         // so a resumed job never reads zero.
-        for (index, plan) in plans.iter().enumerate() {
-            self.job.set_done(index, plan.covered(course_count, 0));
-        }
+        let total = i64::try_from(course_count).unwrap_or(i64::MAX);
+        self.job.set_levels(
+            self.models
+                .iter()
+                .zip(&plans)
+                .map(|(model, plan)| LevelProgress {
+                    digit_level: model.digit_level,
+                    done: i64::try_from(plan.covered(course_count, 0)).unwrap_or(i64::MAX),
+                    total,
+                })
+                .collect(),
+        );
 
         let mut last_checkpoint = std::time::Instant::now();
         for (index, (model_ref, model)) in self.models.iter().zip(loaded).enumerate() {
@@ -716,7 +710,7 @@ impl ClassifyPipeline {
     fn materialize_misses(&self, db: &AppDb, model_id: i64) -> Result<(), String> {
         let conn = db.rw()?;
         conn.execute(
-            "CREATE OR REPLACE TEMP TABLE run_misses AS
+            "CREATE OR REPLACE TEMP TABLE classify_misses AS
              SELECT c.content_hash,
                     arg_min(c.subject_code, c.row_index) AS subject_code,
                     arg_min(c.catalog_number, c.row_index) AS catalog_number,
@@ -738,7 +732,7 @@ impl ClassifyPipeline {
     /// `materialize_misses` replaces it anyway.
     fn drop_misses(&self, db: &AppDb) {
         if let Ok(conn) = db.rw()
-            && let Err(e) = conn.execute_batch("DROP TABLE IF EXISTS run_misses")
+            && let Err(e) = conn.execute_batch("DROP TABLE IF EXISTS classify_misses")
         {
             log::warn!("classify {}: drop misses temp table: {e}", self.dataset_id);
         }
@@ -831,7 +825,7 @@ fn next_miss_window(db: &AppDb, cursor: &str) -> Result<Vec<SelectedCourse>, Str
     let mut stmt = conn
         .prepare(
             "SELECT content_hash, subject_code, catalog_number, course_title
-             FROM run_misses WHERE content_hash > ? ORDER BY content_hash LIMIT ?",
+             FROM classify_misses WHERE content_hash > ? ORDER BY content_hash LIMIT ?",
         )
         .map_err(|e| format!("prepare miss window: {e}"))?;
     stmt.query_map(
@@ -880,19 +874,19 @@ mod tests {
     #[test]
     fn registry_holds_one_job_per_dataset() -> Result<(), String> {
         let registry = ClassifyRegistry::default();
-        let first = Arc::new(Job::new(&[2, 4], 10));
+        let first = Arc::new(Job::default());
         registry.register("a", &first)?;
-        assert!(
-            registry
-                .register("a", &Arc::new(Job::new(&[2], 1)))
-                .is_err()
-        );
+        assert!(registry.register("a", &Arc::new(Job::default())).is_err());
         assert!(registry.stop("a"));
         assert!(!registry.stop("b"));
-        assert!(registry.progress("a").is_some_and(|p| p.stopping));
+        assert!(
+            registry
+                .progress("a")
+                .is_some_and(|p| p.stopping && p.levels.is_empty())
+        );
 
         registry.remove("a", &first);
-        let second = Arc::new(Job::new(&[2], 1));
+        let second = Arc::new(Job::default());
         registry.register("a", &second)?;
         registry.remove("a", &first);
         assert!(
@@ -920,7 +914,7 @@ mod tests {
         let conn = seeded()?;
         let registry = ClassifyRegistry::default();
         ensure_none_active(&conn, &registry)?;
-        registry.register("a", &Arc::new(Job::new(&[2], 1)))?;
+        registry.register("a", &Arc::new(Job::default()))?;
         let err = ensure_none_active(&conn, &registry)
             .err()
             .ok_or("an active job was not reported")?;

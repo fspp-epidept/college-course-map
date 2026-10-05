@@ -160,7 +160,12 @@ pub(crate) fn get_input_profile(
 pub(crate) async fn delete_dataset(app: AppHandle, dataset_id: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let db = &boot::services(&app)?.db;
-        delete(db, &app.state::<Activity>(), &dataset_id)
+        delete(
+            db,
+            &app.state::<Activity>(),
+            &app.state::<ClassifyRegistry>(),
+            &dataset_id,
+        )
     })
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?
@@ -171,8 +176,13 @@ pub(crate) async fn delete_dataset(app: AppHandle, dataset_id: String) -> Result
 /// deletes), so it is three steps, children first: no orphaned course can
 /// exist at any point, and a crash between steps leaves a dataset marked
 /// `deleting` that the next call finishes.
-fn delete(db: &AppDb, activity: &Activity, dataset_id: &str) -> Result<(), String> {
-    let Some(_guard) = claim(db, activity, dataset_id)? else {
+fn delete(
+    db: &AppDb,
+    activity: &Activity,
+    jobs: &ClassifyRegistry,
+    dataset_id: &str,
+) -> Result<(), String> {
+    let Some(_guard) = claim(db, activity, jobs, dataset_id)? else {
         return Ok(());
     };
     delete_children(db, dataset_id)?;
@@ -187,6 +197,7 @@ fn delete(db: &AppDb, activity: &Activity, dataset_id: &str) -> Result<(), Strin
 fn claim<'a>(
     db: &AppDb,
     activity: &'a Activity,
+    jobs: &ClassifyRegistry,
     dataset_id: &str,
 ) -> Result<Option<crate::activity::MaintenanceGuard<'a>>, String> {
     let conn = db.rw()?;
@@ -207,14 +218,9 @@ fn claim<'a>(
                 .to_owned(),
         );
     }
-    let running: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM datasets WHERE id = ? AND classify_state = 'running'",
-            [dataset_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| format!("check classification of dataset {dataset_id}: {e}"))?;
-    if running > 0 {
+    // The registry is the truth of a job executing: `classify_dataset`
+    // registers under this same read-write connection.
+    if jobs.is_active(dataset_id) {
         return Err("This dataset is classifying. Stop it before deleting the dataset.".to_owned());
     }
     let dependent: Option<String> = conn
@@ -280,13 +286,13 @@ fn delete_row(db: &AppDb, dataset_id: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use super::{DELETE_INCOMPLETE, claim, delete, delete_children, list};
     use crate::{
         activity::{Activity, Maintenance},
         boot::Progress,
-        classify::ClassifyRegistry,
+        classify::{ClassifyRegistry, Job},
         db::AppDb,
     };
 
@@ -329,21 +335,21 @@ mod tests {
     #[test]
     fn delete_removes_one_dataset_and_keeps_the_cache() -> Result<(), String> {
         let db = seeded("delete")?;
-        let activity = Activity::default();
+        let (activity, jobs) = (Activity::default(), ClassifyRegistry::default());
 
-        delete(&db, &activity, "a")?;
+        delete(&db, &activity, &jobs, "a")?;
         activity.ensure_idle()?;
         assert_eq!(count(&db, "SELECT COUNT(*) FROM datasets")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM courses")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM source_files")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM inference_results")?, 1);
 
-        delete(&db, &activity, "b")?;
+        delete(&db, &activity, &jobs, "b")?;
         assert_eq!(count(&db, "SELECT COUNT(*) FROM datasets")?, 0);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM source_files")?, 0);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM inference_results")?, 1);
         // Already gone: not an error.
-        delete(&db, &activity, "b")
+        delete(&db, &activity, &jobs, "b")
     }
 
     /// A dataset that is importing, is classifying, has a dataset
@@ -352,9 +358,9 @@ mod tests {
     #[test]
     fn delete_is_refused_while_the_dataset_is_in_use() -> Result<(), String> {
         let db = seeded("refused")?;
-        let activity = Activity::default();
+        let (activity, jobs) = (Activity::default(), ClassifyRegistry::default());
         let refused = |why: &str| -> Result<(), String> {
-            let err = delete(&db, &activity, "a").err().ok_or("deleted")?;
+            let err = delete(&db, &activity, &jobs, "a").err().ok_or("deleted")?;
             assert!(err.contains(why), "{err}");
             assert_eq!(count(&db, "SELECT COUNT(*) FROM courses")?, 3);
             Ok(())
@@ -367,9 +373,10 @@ mod tests {
         refused("still importing")?;
         set("UPDATE datasets SET import_state = 'ready' WHERE id = 'a'")?;
 
-        set("UPDATE datasets SET classify_state = 'running' WHERE id = 'a'")?;
+        let job = Arc::new(Job::default());
+        jobs.register("a", &job)?;
         refused("is classifying")?;
-        set("UPDATE datasets SET classify_state = 'idle' WHERE id = 'a'")?;
+        jobs.remove("a", &job);
 
         // Inserted, not an UPDATE of `b`: `DuckDB` rewrites a row whose
         // indexed column changes, which the courses referencing `b` forbid.
@@ -383,7 +390,7 @@ mod tests {
         refused("busy deleting a dataset")?;
         drop(other);
 
-        delete(&db, &activity, "a")
+        delete(&db, &activity, &jobs, "a")
     }
 
     /// A delete cut off after its children went leaves the dataset
@@ -393,16 +400,16 @@ mod tests {
     #[test]
     fn interrupted_delete_is_reported_and_can_be_finished() -> Result<(), String> {
         let db = seeded("interrupted")?;
-        let activity = Activity::default();
+        let (activity, jobs) = (Activity::default(), ClassifyRegistry::default());
         let state_of_a = || -> Result<String, String> {
-            list(&*db.rw()?, &activity, &ClassifyRegistry::default())?
+            list(&*db.rw()?, &activity, &jobs)?
                 .into_iter()
                 .find(|d| d.id == "a")
                 .map(|d| d.import_state)
                 .ok_or_else(|| "dataset a missing".to_owned())
         };
 
-        let guard = claim(&db, &activity, "a")?.ok_or("dataset a missing")?;
+        let guard = claim(&db, &activity, &jobs, "a")?.ok_or("dataset a missing")?;
         delete_children(&db, "a")?;
         assert_eq!(state_of_a()?, "deleting");
         // The process dies here: the slot is gone, the row is not.
@@ -410,7 +417,7 @@ mod tests {
         assert_eq!(state_of_a()?, DELETE_INCOMPLETE);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM datasets")?, 2);
 
-        delete(&db, &activity, "a")?;
+        delete(&db, &activity, &jobs, "a")?;
         assert_eq!(count(&db, "SELECT COUNT(*) FROM datasets")?, 1);
         assert_eq!(count(&db, "SELECT COUNT(*) FROM courses")?, 1);
         Ok(())
