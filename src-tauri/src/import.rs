@@ -28,9 +28,10 @@ use crate::{
     boot::{self, Boot},
     db::AppDb,
     format::{CourseInput, content_hash},
+    layout::Layout,
     preflight::{
-        ColumnMap, MAX_COLUMNS, TextEncoding, check_mapping, mapped_cells, open_csv,
-        spreadsheet_row, stat_source, truncate,
+        ColumnMap, MAX_COLUMNS, TextEncoding, mapped_cells, open_csv, spreadsheet_row, stat_source,
+        truncate,
     },
     profile::{InputProfile, InputProfiler},
 };
@@ -112,18 +113,13 @@ pub(crate) fn import_csv(
         ));
     }
     let mapping = req.mapping;
-    check_mapping(mapping, headers.len())?;
+    // The header order + mapping are the dataset's row layout, which export
+    // reads to emit a column-identical copy of the input with the ccm_*
+    // columns appended. Checks the mapping against the header too.
+    let layout = Layout::new(headers, mapping)?.to_json()?;
 
     let now = Utc::now().to_rfc3339();
     let dataset_id = Uuid::new_v4().to_string();
-
-    // Persist the header order + mapping for round-trip export (EPI-79):
-    // together they let export_results emit a column-identical copy of the
-    // input with the ccm_* columns appended.
-    let headers_json =
-        serde_json::to_string(&headers).map_err(|e| format!("serialize headers: {e}"))?;
-    let mapping_json =
-        serde_json::to_string(&mapping).map_err(|e| format!("serialize mapping: {e}"))?;
 
     let source_file_id: i64 = {
         let conn = db.rw()?;
@@ -131,17 +127,14 @@ pub(crate) fn import_csv(
         let source_file_id: i64 = conn
             .query_row(
                 "INSERT INTO source_files
-                    (path, display_name, imported_at, imported_hash, size_bytes,
-                     original_headers, column_mapping, encoding)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                    (path, display_name, imported_at, imported_hash, size_bytes, encoding)
+                 VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
                 params![
                     path_str,
                     &display_name,
                     &now,
                     &imported_hash,
                     i64::try_from(size_bytes).unwrap_or(i64::MAX),
-                    &headers_json,
-                    &mapping_json,
                     req.encoding.label(),
                 ],
                 |row| row.get(0),
@@ -151,9 +144,9 @@ pub(crate) fn import_csv(
         conn.execute(
             "INSERT INTO datasets
                 (id, title, source_kind, source_file_id, imported_at, row_count, import_state,
-                 classify_state)
-             VALUES (?, ?, 'file', ?, ?, 0, 'importing', 'idle')",
-            params![dataset_id, &display_name, source_file_id, &now],
+                 classify_state, layout)
+             VALUES (?, ?, 'file', ?, ?, 0, 'importing', 'idle', ?)",
+            params![dataset_id, &display_name, source_file_id, &now, &layout],
         )
         .map_err(|e| format!("insert datasets: {e}"))?;
         source_file_id

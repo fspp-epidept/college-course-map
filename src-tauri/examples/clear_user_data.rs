@@ -10,7 +10,13 @@ fn main() -> anyhow::Result<()> {
     let conn = Connection::open(&path)?;
 
     // Order matters: child tables first (FKs).
-    for table in ["inference_results", "courses", "datasets", "source_files"] {
+    for table in [
+        "inference_results",
+        "courses",
+        "dataset_sources",
+        "datasets",
+        "source_files",
+    ] {
         conn.execute_batch(&format!("DELETE FROM {table}"))?;
     }
 

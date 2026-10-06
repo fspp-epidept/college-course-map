@@ -198,11 +198,11 @@ const TITLE_ALIASES: &[&str] = &[
     "course_name",
 ];
 
-/// Indexes of the mapped columns in the CSV's header order. Persisted to
-/// `source_files.column_mapping` so export can reconstruct the original row
-/// layout (mapped cells live in the structured `courses` columns, everything
-/// else in `extra_columns`). Indexes, not header names: CSVs may repeat a
-/// header name, and indexes stay unambiguous.
+/// Indexes of the mapped columns in the CSV's header order. Persisted in
+/// `datasets.layout` (`layout.rs`) so export can reconstruct the original
+/// row layout (mapped cells live in the structured `courses` columns,
+/// everything else in `extra_columns`). Indexes, not header names: CSVs may
+/// repeat a header name, and indexes stay unambiguous.
 #[derive(Type, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ColumnMap {
     pub subject: usize,

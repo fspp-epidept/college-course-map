@@ -65,6 +65,7 @@ const COPY_ORDER: &[&str] = &[
     "app_meta",
     "source_files",
     "datasets",
+    "dataset_sources",
     "courses",
     "models",
     "inference_results",
@@ -110,6 +111,7 @@ const MIGRATIONS: &[(u32, &str)] = &[
         9,
         include_str!("../migrations/0009_classification_state.sql"),
     ),
+    (10, include_str!("../migrations/0010_derived_datasets.sql")),
 ];
 
 /// Owned read-write and read-only connections plus the resolved on-disk path.
@@ -1031,7 +1033,17 @@ mod tests {
             .map(|entry| entry.path())
             .filter(|path| path.to_string_lossy().ends_with(".duckdb.gz"))
             .collect();
-        found.sort();
+        // By schema number, not by name: "schema-v10" sorts before
+        // "schema-v4" as text.
+        let schema = |path: &Path| -> u32 {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("schema-v"))
+                .and_then(|rest| rest.split('_').next())
+                .and_then(|version| version.parse().ok())
+                .unwrap_or(0)
+        };
+        found.sort_by_key(|path| (schema(path), path.clone()));
         Ok(found)
     }
 
@@ -1480,6 +1492,80 @@ mod tests {
         Ok(())
     }
 
+    /// 0010 on the v9 fixture: a dataset whose source file stored its header
+    /// row gets that layout, one whose file didn't stays NULL, and after a
+    /// reopen a source can be deleted while a derived dataset still links
+    /// to it.
+    #[test]
+    fn layout_moves_to_the_dataset() -> Result<(), String> {
+        let fixture = fixtures()?
+            .into_iter()
+            .find(|path| path.to_string_lossy().contains("schema-v9_"))
+            .ok_or("no v9 fixture")?;
+        let root = scratch("layout")?;
+        let path = root.join("app.duckdb");
+        unpack(&fixture, &path)?;
+        raw(&path)?
+            .execute_batch(
+                "INSERT INTO source_files
+                    (id, path, display_name, imported_at, imported_hash, original_headers,
+                     column_mapping)
+                 VALUES (-1, 'a.csv', 'a', now(), 'h',
+                         '[\"SUBJ\",\"NUM\",\"TITLE\",\"SCHOOL\"]',
+                         '{\"subject\":0,\"catalog\":1,\"title\":2}'),
+                        (-2, 'old.csv', 'old', now(), 'h2', NULL, NULL);
+                 INSERT INTO datasets
+                    (id, title, source_kind, source_file_id, imported_at, row_count, import_state)
+                 VALUES ('with', 'w', 'file', -1, now(), 0, 'ready'),
+                        ('without', 'o', 'file', -2, now(), 0, 'ready');",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let db = AppDb::open_at(path.clone(), "test", &Progress::none())?;
+        {
+            let conn = db.rw()?;
+            let layout: Option<String> = conn
+                .query_row(
+                    "SELECT layout::VARCHAR FROM datasets WHERE id = 'with'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                layout.as_deref(),
+                Some(
+                    "{\"headers\":[\"SUBJ\",\"NUM\",\"TITLE\",\"SCHOOL\"],\"mapping\":{\"subject\":0,\"catalog\":1,\"title\":2}}"
+                )
+            );
+            let none: Option<String> = conn
+                .query_row(
+                    "SELECT layout::VARCHAR FROM datasets WHERE id = 'without'",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(none, None);
+            conn.execute_batch(
+                "INSERT INTO datasets (id, title, source_kind, imported_at, row_count, import_state)
+                 VALUES ('derived', 'd', 'derived', now(), 0, 'ready');
+                 INSERT INTO dataset_sources VALUES ('derived', 0, 'with', 'w');",
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        db.checkpoint()?;
+        drop(db);
+
+        let db = AppDb::open_at(path, "test", &Progress::none())?;
+        let conn = db.rw()?;
+        conn.execute_batch("DELETE FROM datasets WHERE id = 'with'")
+            .map_err(|e| format!("delete a linked source: {e}"))?;
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM dataset_sources", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        assert_eq!(links, 1);
+        Ok(())
+    }
+
     /// The head fixture, unpacked and opened: a seeded database (datasets,
     /// courses, cached results) at the current schema.
     fn seeded(name: &str) -> Result<(PathBuf, AppDb), String> {
@@ -1553,7 +1639,9 @@ mod tests {
                  INSERT INTO datasets
                     (id, title, source_kind, parent_dataset_id, supersedes_id, imported_at,
                      row_count, import_state)
-                 VALUES ('0-grandchild', 'g', 'derived', '1-child', '1-child', now(), 0, 'ready');",
+                 VALUES ('0-grandchild', 'g', 'derived', '1-child', '1-child', now(), 0, 'ready');
+                 INSERT INTO dataset_sources
+                 SELECT '0-grandchild', 0, min(id), 'first' FROM datasets;",
             )
             .map_err(|e| e.to_string())?;
             all_row_counts(&conn)?
@@ -1823,6 +1911,13 @@ mod tests {
         // 0007: the import worker's input profile, NULL for older datasets.
         conn.prepare("SELECT input_profile FROM datasets")
             .map_err(|e| e.to_string())?;
+
+        // 0010: derived datasets' source links and every dataset's layout.
+        conn.prepare(
+            "SELECT s.position, s.source_dataset_id, s.source_title, d.layout, d.dedupe_columns
+             FROM dataset_sources s JOIN datasets d ON d.id = s.dataset_id",
+        )
+        .map_err(|e| e.to_string())?;
 
         // Re-running is a no-op: schema_version gates both SQL and data hook.
         migrate(&conn, &Progress::none())?;

@@ -150,8 +150,10 @@ pub(crate) fn get_input_profile(
 /// model and input, not by dataset, and are reused if the same courses are
 /// imported again.
 ///
-/// Refused while the dataset is importing or classifying, while
-/// another dataset was derived from it, or while other maintenance runs.
+/// Refused while the dataset is importing or classifying, while a derived
+/// dataset is still being built from it, or while other maintenance runs.
+/// A finished derived dataset is a copy and doesn't hold its sources
+/// (#254): its `dataset_sources` link just names a dataset that is gone.
 /// Slow on a large dataset (seconds per million courses), so it runs on the
 /// blocking pool. Deleting a dataset that is already gone is not an error,
 /// and deleting one left `delete_incomplete` finishes the job.
@@ -223,17 +225,24 @@ fn claim<'a>(
     if jobs.is_active(dataset_id) {
         return Err("This dataset is classifying. Stop it before deleting the dataset.".to_owned());
     }
-    let dependent: Option<String> = conn
+    // A derivation in flight reads its sources outside this connection's
+    // hold on the write lock (between its own row insert and its copy), so
+    // a source can't go while one names it and is still `importing`.
+    let building: Option<String> = conn
         .query_row(
-            "SELECT title FROM datasets WHERE parent_dataset_id = ? OR supersedes_id = ? LIMIT 1",
-            [dataset_id, dataset_id],
+            "SELECT d.title
+             FROM dataset_sources s
+             JOIN datasets d ON d.id = s.dataset_id
+             WHERE s.source_dataset_id = ? AND d.import_state = 'importing'
+             LIMIT 1",
+            [dataset_id],
             |row| row.get(0),
         )
         .optional()
-        .map_err(|e| format!("check datasets derived from {dataset_id}: {e}"))?;
-    if let Some(title) = dependent {
+        .map_err(|e| format!("check datasets being built from {dataset_id}: {e}"))?;
+    if let Some(title) = building {
         return Err(format!(
-            "\u{201c}{title}\u{201d} was created from this dataset. Delete it first."
+            "\u{201c}{title}\u{201d} is being created from this dataset. Wait for it to finish."
         ));
     }
     let guard = activity.begin(Maintenance::DeletingDataset(dataset_id.to_owned()))?;
@@ -245,12 +254,18 @@ fn claim<'a>(
     Ok(Some(guard))
 }
 
-/// Step 2: the dataset's courses.
+/// Step 2: the dataset's courses and, for a derived dataset, its source
+/// links.
 fn delete_children(db: &AppDb, dataset_id: &str) -> Result<(), String> {
-    let courses = db
-        .rw()?
+    let conn = db.rw()?;
+    let courses = conn
         .execute("DELETE FROM courses WHERE dataset_id = ?", [dataset_id])
         .map_err(|e| format!("delete courses of dataset {dataset_id}: {e}"))?;
+    conn.execute(
+        "DELETE FROM dataset_sources WHERE dataset_id = ?",
+        [dataset_id],
+    )
+    .map_err(|e| format!("delete source links of dataset {dataset_id}: {e}"))?;
     log::info!("dataset {dataset_id}: deleted {courses} course(s)");
     Ok(())
 }
@@ -352,9 +367,11 @@ mod tests {
         delete(&db, &activity, &jobs, "b")
     }
 
-    /// A dataset that is importing, is classifying, has a dataset
-    /// derived from it, or is asked for while other maintenance runs is
-    /// refused, and nothing is deleted.
+    /// A dataset that is importing, is classifying, is a source of a
+    /// derived dataset still being built, or is asked for while other
+    /// maintenance runs is refused, and nothing is deleted. Once the derived
+    /// dataset is built, its source can go and the link stays; deleting the
+    /// derived dataset removes its links.
     #[test]
     fn delete_is_refused_while_the_dataset_is_in_use() -> Result<(), String> {
         let db = seeded("refused")?;
@@ -378,19 +395,22 @@ mod tests {
         refused("is classifying")?;
         jobs.remove("a", &job);
 
-        // Inserted, not an UPDATE of `b`: `DuckDB` rewrites a row whose
-        // indexed column changes, which the courses referencing `b` forbid.
         set("INSERT INTO datasets
-                (id, title, source_kind, parent_dataset_id, imported_at, row_count, import_state)
-             VALUES ('c', 'C', 'derived', 'a', now(), 0, 'ready')")?;
-        refused("created from this dataset")?;
-        set("DELETE FROM datasets WHERE id = 'c'")?;
+                (id, title, source_kind, imported_at, row_count, import_state)
+             VALUES ('c', 'C', 'derived', now(), 0, 'importing');
+             INSERT INTO dataset_sources VALUES ('c', 0, 'a', 'A')")?;
+        refused("is being created from this dataset")?;
+        set("UPDATE datasets SET import_state = 'ready' WHERE id = 'c'")?;
 
         let other = activity.begin(Maintenance::DeletingDataset("b".to_owned()))?;
         refused("busy deleting a dataset")?;
         drop(other);
 
-        delete(&db, &activity, &jobs, "a")
+        delete(&db, &activity, &jobs, "a")?;
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM dataset_sources")?, 1);
+        delete(&db, &activity, &jobs, "c")?;
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM dataset_sources")?, 0);
+        Ok(())
     }
 
     /// A delete cut off after its children went leaves the dataset

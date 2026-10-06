@@ -15,9 +15,11 @@
 //! `ccm{2|4|6}digit_code`, `ccm…_prob`, `ccm…_title`, and (when requested)
 //! the numbered rank 1–5 candidate columns, where rank 1 duplicates the top-1
 //! columns. The 4-digit set has no title columns: the CCM publishes no
-//! 4-digit titles (EPI-112). Datasets imported before migration 0004 (and
-//! derived/seeded datasets) have no stored header layout and keep the legacy
-//! fixed-column shape. The unique-rows mode collapses to one row per distinct classified
+//! 4-digit titles (EPI-112). The source half of the row follows the
+//! dataset's stored layout (`layout.rs`), so a derived dataset exports with
+//! the columns its creator chose; datasets imported before migration 0004
+//! have no stored layout and keep the legacy fixed-column shape. The
+//! unique-rows mode collapses to one row per distinct classified
 //! input; per-row fields (school, year, extras) are ambiguous for a merged
 //! row, so it emits only the assembled-input columns.
 
@@ -25,10 +27,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri_plugin_dialog::DialogExt as _;
 
-use crate::{
-    boot,
-    preflight::{ColumnMap, check_mapping},
-};
+use crate::{boot, layout::Layout, preflight::ColumnMap};
 
 /// Row granularity of the export (EPI-78).
 #[derive(Type, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +91,7 @@ enum RowLayout {
         headers: Vec<String>,
         mapping: ColumnMap,
     },
-    /// Pre-0004 imports and derived/seeded datasets: no stored header layout,
-    /// keep the fixed allowlist shape.
+    /// Pre-0004 imports: no stored layout, keep the fixed allowlist shape.
     Legacy,
     /// Unique-rows mode (EPI-78): only the assembled-input columns — per-row
     /// fields are ambiguous once duplicates collapse.
@@ -334,9 +332,9 @@ fn export_sql(
 }
 
 /// Resolve the export's models (id + digit level), row layout, and
-/// default-filename inputs. The layout comes from the dataset's source file
-/// when it stored the original header order (post-0004 imports); unique mode
-/// forces the assembled-input layout regardless.
+/// default-filename inputs. The layout is the dataset's stored one
+/// (`layout.rs`; NULL only for pre-0004 imports); unique mode forces the
+/// assembled-input layout regardless.
 fn resolve_export_inputs(
     conn: &duckdb::Connection,
     req: &ExportRequest,
@@ -375,29 +373,20 @@ fn resolve_export_inputs(
         return Err("export models must have distinct digit levels".to_owned());
     }
 
-    let (title, headers_json, mapping_json): (String, Option<String>, Option<String>) = conn
+    let title: String = conn
         .query_row(
-            "SELECT d.title, sf.original_headers, sf.column_mapping
-             FROM datasets d
-             LEFT JOIN source_files sf ON sf.id = d.source_file_id
-             WHERE d.id = ?",
+            "SELECT title FROM datasets WHERE id = ?",
             [&req.dataset_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| row.get(0),
         )
         .map_err(|e| format!("dataset lookup: {e}"))?;
 
-    let layout = match (req.row_mode, headers_json, mapping_json) {
-        (RowMode::Unique, ..) => RowLayout::UniqueInputs,
-        (RowMode::All, Some(headers_json), Some(mapping_json)) => {
-            let headers: Vec<String> = serde_json::from_str(&headers_json)
-                .map_err(|e| format!("parse stored original_headers: {e}"))?;
-            let mapping: ColumnMap = serde_json::from_str(&mapping_json)
-                .map_err(|e| format!("parse stored column_mapping: {e}"))?;
-            check_mapping(mapping, headers.len())
-                .map_err(|e| format!("stored column_mapping: {e}"))?;
+    let layout = match (req.row_mode, Layout::read(conn, &req.dataset_id)?) {
+        (RowMode::Unique, _) => RowLayout::UniqueInputs,
+        (RowMode::All, Some(Layout { headers, mapping })) => {
             RowLayout::Original { headers, mapping }
         }
-        (RowMode::All, ..) => RowLayout::Legacy,
+        (RowMode::All, None) => RowLayout::Legacy,
     };
     Ok((title, models, layout))
 }

@@ -15,6 +15,8 @@ use uuid::Uuid;
 use crate::{
     db::AppDb,
     format::{CourseInput, format_input},
+    layout::Layout,
+    preflight::ColumnMap,
 };
 
 /// Hardcoded fixture courses. Three pairs across two source files; identical
@@ -60,6 +62,7 @@ fn truncate_all(conn: &duckdb::Connection) -> Result<(), String> {
     for table in [
         "inference_results",
         "courses",
+        "dataset_sources",
         "datasets",
         "models",
         "source_files",
@@ -114,19 +117,34 @@ fn seed_datasets(
 ) -> Result<(String, String), String> {
     let ds1 = Uuid::new_v4().to_string();
     let ds2 = Uuid::new_v4().to_string();
+    // The fixture rows have only the three mapped columns.
+    let layout = Layout::new(
+        vec![
+            "subject_code".to_owned(),
+            "catalog_number".to_owned(),
+            "course_title".to_owned(),
+        ],
+        ColumnMap {
+            subject: 0,
+            catalog: 1,
+            title: 2,
+        },
+    )?
+    .to_json()?;
     conn.execute(
         "INSERT INTO datasets
             (id, title, source_kind, source_file_id, imported_at, row_count,
-             classify_state, classify_ep, classify_updated_at)
-         VALUES (?, ?, 'file', ?, ?, ?, 'idle', 'cpu', ?)",
-        params![ds1, "Fall 2025 transcripts", sf1, now, 6_i64, now],
+             classify_state, classify_ep, classify_updated_at, layout)
+         VALUES (?, ?, 'file', ?, ?, ?, 'idle', 'cpu', ?, ?)",
+        params![ds1, "Fall 2025 transcripts", sf1, now, 6_i64, now, &layout],
     )
     .map_err(|e| format!("insert datasets (ds1): {e}"))?;
     conn.execute(
         "INSERT INTO datasets
-            (id, title, source_kind, source_file_id, imported_at, row_count, classify_state)
-         VALUES (?, ?, 'file', ?, ?, ?, 'idle')",
-        params![ds2, "Spring 2026 transcripts", sf2, now, 6_i64],
+            (id, title, source_kind, source_file_id, imported_at, row_count, classify_state,
+             layout)
+         VALUES (?, ?, 'file', ?, ?, ?, 'idle', ?)",
+        params![ds2, "Spring 2026 transcripts", sf2, now, 6_i64, &layout],
     )
     .map_err(|e| format!("insert datasets (ds2): {e}"))?;
     Ok((ds1, ds2))
