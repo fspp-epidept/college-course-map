@@ -27,6 +27,42 @@ export function completeRows(spec: FilterSpec): FilterSpec {
   };
 }
 
+export const OP_LABELS: Record<FilterOp, string> = {
+  is: "is any of",
+  isNot: "is none of",
+  contains: "contains",
+  notContains: "doesn't contain",
+  startsWith: "starts with",
+  isEmpty: "is empty",
+  isNotEmpty: "is not empty",
+};
+
+/** The standard fields' labels; a column field reads as its name. */
+export function fieldLabel(field: FilterField): string {
+  switch (field.kind) {
+    case "subject":
+      return "Subject code";
+    case "catalog":
+      return "Catalog number";
+    case "title":
+      return "Course title";
+    case "sourceDataset":
+      return "Source dataset";
+    case "ccm":
+      return `CCM ${field.digitLevel}-digit code`;
+    case "column":
+      return field.name;
+  }
+}
+
+/** One line per row, for showing a stored filter as text. */
+export function describeFilter(spec: FilterSpec): string[] {
+  return spec.rows.map((row) => {
+    const values = opTakesValues(row.op) ? ` ${row.values.join(", ")}` : "";
+    return `${fieldLabel(row.field)} ${OP_LABELS[row.op]}${values}`;
+  });
+}
+
 /** A stable string for a field, for select models and query keys. */
 export function fieldKey(field: FilterField): string {
   switch (field.kind) {

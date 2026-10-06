@@ -160,6 +160,56 @@ async listDatasets() : Promise<Result<DatasetSummary[], string>> {
 }
 },
 /**
+ * Start building a derived dataset. Like `import_csv`, returns as soon as
+ * the dataset row exists, in `importing` state, and a worker copies the
+ * rows; the datasets list shows it fill. A failure marks it `failed` with
+ * the reason; a process death leaves `importing`, which the startup sweep
+ * turns into `failed` like any import.
+ */
+async createDerivedDataset(req: DeriveRequest) : Promise<Result<DerivedStarted, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_derived_dataset", { req }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The default columns for a set of sources (section "Columns" of the
+ * dialog). Read-only.
+ */
+async derivedColumns(sources: string[]) : Promise<Result<DerivedColumns, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("derived_columns", { sources }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * How a derived dataset was built; `None` for a dataset that isn't one.
+ */
+async getDerivation(datasetId: string) : Promise<Result<Derivation | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_derivation", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * What a request would build. `title` and `dedupe_columns` are checked
+ * but the counts and rows are before duplicates are removed. Read-only.
+ */
+async previewDerivation(req: DeriveRequest) : Promise<Result<DerivePreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("preview_derivation", { req }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Export a dataset's courses (joined with the requested models' cached
  * classifications + taxonomy titles) to a CSV the user picks via the native
  * save dialog. Returns `None` when the user cancels the dialog.
@@ -589,6 +639,22 @@ export type ColorScheme = "light" | "dark"
  * repeat a header name, and indexes stay unambiguous.
  */
 export type ColumnMap = { subject: number; catalog: number; title: number }
+/**
+ * One source column feeding an output column.
+ */
+export type ColumnOrigin = { 
+/**
+ * Source dataset id.
+ */
+source: string; 
+/**
+ * Position in that source's layout.
+ */
+position: number; 
+/**
+ * That position's header, for display; the position is what counts.
+ */
+header: string }
 export type ColumnStats = { header: string; empty: number; distinct: number; 
 /**
  * True when [`DISTINCT_CAP`] was hit: `distinct` is a lower bound and
@@ -673,6 +739,34 @@ rowCount: number;
  * the stored `deleting` plus the maintenance gate, never stored.
  */
 importState: string; importError: string | null; classification: Classification }
+/**
+ * How a derived dataset was built, for its page.
+ */
+export type Derivation = { sources: SourceLink[]; filter: FilterSpec; dedupeColumns: string[] | null }
+/**
+ * What a request would build: the match counts and the first rows under
+ * the new dataset's headers, before duplicates are removed.
+ */
+export type DerivePreview = { matched: number; bySource: SourceCount[]; headers: string[]; rows: ((string | null)[])[] }
+export type DeriveRequest = { title: string; 
+/**
+ * One or more ready datasets with a stored layout, in order; that order
+ * is the row order of the result.
+ */
+sources: string[]; filter: FilterSpec; mappedNames: MappedNames; 
+/**
+ * The kept extra columns, in order.
+ */
+columns: OutputColumn[]; 
+/**
+ * Output column names that define a duplicate; `None` keeps every row.
+ */
+dedupeColumns: string[] | null }
+/**
+ * Default columns for a set of sources, as the dialog first shows them.
+ */
+export type DerivedColumns = { mapped: MappedNames; columns: OutputColumn[] }
+export type DerivedStarted = { datasetId: string }
 export type DirUsage = { path: string; bytes: number }
 /**
  * Last-known download position for one digit level, kept server-side so a
@@ -849,6 +943,10 @@ cursor: number | null; limit: number;
 filter: FilterSpec | null }
 export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title: ColumnStats }
 /**
+ * Names of the three mapped columns in the new dataset.
+ */
+export type MappedNames = { subject: string; catalog: string; title: string }
+/**
  * A frontend-handled menu command. The serde name is the native menu item id.
  */
 export type MenuAction = "about" | "preferences" | "import_csv" | "export_results" | "start_classification" | "stop_classification" | "toggle_sidebar" | "toggle_command_palette"
@@ -891,6 +989,14 @@ download: DownloadSnapshot | null }
  * frontend responds by refetching `models_status`.
  */
 export type ModelsStateChanged = Record<string, never>
+/**
+ * One column of the new dataset.
+ */
+export type OutputColumn = { name: string; 
+/**
+ * At most one per source; a source not listed reads the column empty.
+ */
+from: ColumnOrigin[] }
 /**
  * The startup phases, in order. The boot screen titles each one, so a
  * phase names only work that is really happening: `UpgradingSchema` is
@@ -1035,6 +1141,16 @@ export type SkippedRow = { row: number;
  * Headers of the required columns that were empty.
  */
 missing: string[] }
+export type SourceCount = { source: string; matched: number }
+export type SourceLink = { id: string; 
+/**
+ * The source's title when the dataset was built.
+ */
+title: string; 
+/**
+ * Whether the source still exists.
+ */
+exists: boolean }
 export type StorageStatus = { 
 /**
  * The data folder everything below lives in (except the `CoreML` cache).

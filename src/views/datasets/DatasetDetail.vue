@@ -8,7 +8,8 @@ import InputSamples from "../../components/InputSamples.vue";
 import { INPUT_FINDINGS } from "../../config/inputFindings";
 import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useDatasets, useInputProfile } from "../../composables/useDatasets";
-import { completeRows, useDatasetColumns } from "../../composables/useFilter";
+import { useDerivation } from "../../composables/useDerive";
+import { completeRows, describeFilter, useDatasetColumns } from "../../composables/useFilter";
 import {
   progressDone,
   progressTotal,
@@ -262,6 +263,21 @@ const activeFilter = computed(() => completeRows(filter.value));
 const isFiltered = computed(() => activeFilter.value.rows.length > 0);
 const { data: datasetColumns } = useDatasetColumns(currentDatasetId);
 
+// --- Derived datasets (#254) ---
+const isDerived = computed(() => dataset.value?.sourceKind === "derived");
+const { data: derivation } = useDerivation(currentDatasetId, isDerived);
+const derivationFilter = computed(() =>
+  derivation.value ? describeFilter(derivation.value.filter) : [],
+);
+// Why Save as Dataset can't open right now (null = it can); see classifyBlocker.
+// A dataset with no stored layout is refused by the dialog, which says so.
+const saveBlocker = computed<string | null>(() => {
+  if (beingDeleted.value) return "This dataset is being deleted.";
+  if (isImporting.value) return "The import is still running.";
+  if (importFailed.value) return "The import failed.";
+  return null;
+});
+
 // Reset pagination whenever the user switches digit level (the joined column
 // changes underneath them) or the filter changes (the row set does).
 watch([viewLevel, () => JSON.stringify(activeFilter.value)], () => {
@@ -477,7 +493,17 @@ watch(
     </div>
 
     <div
-      v-if="isImporting"
+      v-if="isImporting && isDerived"
+      class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-1"
+    >
+      <span class="text-(--ui-text) font-medium">Building this dataset…</span>
+      <span class="text-(--ui-text-dimmed) text-xs">
+        Copying the matching rows from the source datasets. A few seconds per
+        million rows; the page fills in when it is done.
+      </span>
+    </div>
+    <div
+      v-else-if="isImporting"
       class="rounded-lg border border-(--ui-border) bg-(--ui-bg-elevated) px-4 py-3 text-sm flex flex-col gap-1"
     >
       <span class="text-(--ui-text) font-medium">Importing rows in the background…</span>
@@ -487,6 +513,34 @@ watch(
       <span class="text-(--ui-text-dimmed) text-xs">
         Classify is disabled until the import finishes. The row count and
         the table below update every half second.
+      </span>
+    </div>
+
+    <!-- Created from: how a derived dataset was built. Read-only; the
+         dataset is a copy and nothing re-runs when its sources change. -->
+    <div
+      v-if="isDerived && derivation && !isImporting"
+      class="rounded-lg border border-(--ui-border) px-4 py-3 text-sm flex flex-col gap-1"
+    >
+      <span class="text-(--ui-text) font-medium">Created from</span>
+      <ul class="text-(--ui-text-muted)">
+        <li v-for="source in derivation.sources" :key="source.id">
+          {{ source.title }}
+          <span v-if="!source.exists" class="text-(--ui-text-dimmed)">(deleted)</span>
+        </li>
+      </ul>
+      <template v-if="derivationFilter.length > 0">
+        <span class="text-(--ui-text) mt-1">Filter</span>
+        <ul class="text-(--ui-text-muted)">
+          <li v-for="(line, i) in derivationFilter" :key="i">{{ line }}</li>
+        </ul>
+      </template>
+      <span v-else class="text-(--ui-text-dimmed)">No filter: every row of the sources.</span>
+      <span class="text-(--ui-text-muted)">
+        <template v-if="derivation.dedupeColumns">
+          Duplicates removed by: {{ derivation.dedupeColumns.join(", ") }}
+        </template>
+        <template v-else>All rows kept.</template>
       </span>
     </div>
 
@@ -743,6 +797,16 @@ watch(
             </template>
             <template v-else-if="isFiltered">No courses match</template>
           </span>
+          <UButton
+            variant="outline"
+            color="neutral"
+            icon="i-lucide-copy-plus"
+            size="xs"
+            :disabled="saveBlocker !== null"
+            @click="workspace.openDeriveDialog([currentDatasetId], activeFilter)"
+          >
+            Save as Dataset
+          </UButton>
           <UButton
             variant="outline"
             color="neutral"

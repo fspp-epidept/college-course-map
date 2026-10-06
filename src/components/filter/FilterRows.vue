@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { DatasetColumn, FilterField, FilterOp, FilterRow, FilterSpec } from "../../bindings";
-import { fieldKey, opTakesValues, parseFieldKey } from "../../composables/useFilter";
+import { OP_LABELS, fieldKey, opTakesValues, parseFieldKey } from "../../composables/useFilter";
 import FilterValues from "./FilterValues.vue";
 
 // The flat filter editor (#254): rows AND'd, values within a row OR'd. Pure
@@ -45,15 +45,6 @@ const fieldItems = computed<FieldItem[][]>(() => {
   return columns.length > 0 ? [standard, columns] : [standard];
 });
 
-const OP_LABELS: Record<FilterOp, string> = {
-  is: "is any of",
-  isNot: "is none of",
-  contains: "contains",
-  notContains: "doesn't contain",
-  startsWith: "starts with",
-  isEmpty: "is empty",
-  isNotEmpty: "is not empty",
-};
 function opsFor(field: FilterField): { value: FilterOp; label: string }[] {
   const ops: FilterOp[] =
     field.kind === "sourceDataset"

@@ -1,5 +1,6 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { ref } from "vue";
+import type { FilterSpec } from "../bindings";
 import type { ActivityId } from "../config/activities";
 import type { SettingsSectionId } from "../config/settingsSections";
 
@@ -44,6 +45,15 @@ export const useWorkspace = defineStore(
     // Datasets sidebar button open the same root-mounted ImportCsvDialog.
     const importDialogOpen = ref(false);
 
+    // Derive dialog (#254): open state plus what it opens with. Save as
+    // Dataset seeds it with the page's dataset and current filter; New from
+    // Datasets opens it empty. Root-mounted like the import dialog.
+    const deriveDialogOpen = ref(false);
+    const deriveSeed = ref<{ sources: string[]; filter: FilterSpec }>({
+      sources: [],
+      filter: { rows: [] },
+    });
+
     // A Classify/Export request from the menu for the selected dataset.
     // DatasetDetail consumes it and runs the same function its button does.
     const pendingDatasetAction = ref<"classify" | "export" | null>(null);
@@ -87,6 +97,11 @@ export const useWorkspace = defineStore(
       importDialogOpen.value = true;
     }
 
+    function openDeriveDialog(sources: string[], filter: FilterSpec): void {
+      deriveSeed.value = { sources, filter };
+      deriveDialogOpen.value = true;
+    }
+
     function requestDatasetAction(action: "classify" | "export"): void {
       pendingDatasetAction.value = action;
     }
@@ -99,6 +114,8 @@ export const useWorkspace = defineStore(
       sidebarWidthRem,
       commandPaletteOpen,
       importDialogOpen,
+      deriveDialogOpen,
+      deriveSeed,
       pendingDatasetAction,
       activeSettingsSection,
       setActiveActivity,
@@ -109,6 +126,7 @@ export const useWorkspace = defineStore(
       setSidebarWidth,
       toggleCommandPalette,
       openImportDialog,
+      openDeriveDialog,
       requestDatasetAction,
     };
   },

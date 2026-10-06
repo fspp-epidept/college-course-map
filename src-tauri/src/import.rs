@@ -326,58 +326,69 @@ impl ImportTask {
     }
 
     fn mark_ready(&self, db: &AppDb, imported: u64, profile: &InputProfile) {
-        // Serialize before taking the lock: `mark_failed` takes it too.
-        let profile_json = match serde_json::to_string(profile) {
-            Ok(json) => json,
-            Err(e) => {
-                self.mark_failed(db, &format!("serialize input profile: {e}"));
-                return;
-            }
-        };
-        let conn = match db.rw() {
-            Ok(conn) => conn,
-            Err(e) => {
-                log::error!("import {}: {e} at mark_ready", self.dataset_id);
-                return;
-            }
-        };
-        // The JSON column takes the string directly (VARCHAR -> JSON cast).
-        if let Err(e) = conn.execute(
-            "UPDATE datasets
-                SET row_count = ?, import_state = 'ready', import_error = NULL,
-                    input_profile = ?
-              WHERE id = ?",
-            params![
-                i64::try_from(imported).unwrap_or(i64::MAX),
-                &profile_json,
-                &self.dataset_id,
-            ],
-        ) {
-            log::error!("import {}: mark_ready: {e}", self.dataset_id);
-        }
-        // CHECKPOINT compacts the WAL into the main file. Without this, the
-        // first read against the freshly-imported dataset pays the merge cost
-        // for every row — on a 2M-row import that shows up as a UI hang
-        // when opening the dataset tab.
-        if let Err(e) = conn.execute_batch("CHECKPOINT") {
-            log::warn!("import {}: post-import checkpoint: {e}", self.dataset_id);
-        }
+        mark_ready(db, &self.dataset_id, imported, profile);
     }
 
     fn mark_failed(&self, db: &AppDb, err: &str) {
-        let conn = match db.rw() {
-            Ok(conn) => conn,
-            Err(e) => {
-                log::error!("import {}: {e} at mark_failed", self.dataset_id);
-                return;
-            }
-        };
-        if let Err(e) = conn.execute(
-            "UPDATE datasets SET import_state = 'failed', import_error = ? WHERE id = ?",
-            params![err, &self.dataset_id],
-        ) {
-            log::error!("import {}: mark_failed: {e}", self.dataset_id);
+        mark_failed(db, &self.dataset_id, err);
+    }
+}
+
+/// A dataset's rows are all in: store the final count and the input profile,
+/// flip it to `ready`, and checkpoint. Shared by the CSV import and the
+/// derived-dataset copy (`derive.rs`).
+pub(crate) fn mark_ready(db: &AppDb, dataset_id: &str, rows: u64, profile: &InputProfile) {
+    // Serialize before taking the lock: `mark_failed` takes it too.
+    let profile_json = match serde_json::to_string(profile) {
+        Ok(json) => json,
+        Err(e) => {
+            mark_failed(db, dataset_id, &format!("serialize input profile: {e}"));
+            return;
         }
+    };
+    let conn = match db.rw() {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::error!("import {dataset_id}: {e} at mark_ready");
+            return;
+        }
+    };
+    // The JSON column takes the string directly (VARCHAR -> JSON cast).
+    if let Err(e) = conn.execute(
+        "UPDATE datasets
+            SET row_count = ?, import_state = 'ready', import_error = NULL,
+                input_profile = ?
+          WHERE id = ?",
+        params![
+            i64::try_from(rows).unwrap_or(i64::MAX),
+            &profile_json,
+            dataset_id,
+        ],
+    ) {
+        log::error!("import {dataset_id}: mark_ready: {e}");
+    }
+    // CHECKPOINT compacts the WAL into the main file. Without this, the
+    // first read against the freshly-imported dataset pays the merge cost
+    // for every row — on a 2M-row import that shows up as a UI hang
+    // when opening the dataset tab.
+    if let Err(e) = conn.execute_batch("CHECKPOINT") {
+        log::warn!("import {dataset_id}: post-import checkpoint: {e}");
+    }
+}
+
+pub(crate) fn mark_failed(db: &AppDb, dataset_id: &str, err: &str) {
+    let conn = match db.rw() {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::error!("import {dataset_id}: {e} at mark_failed");
+            return;
+        }
+    };
+    if let Err(e) = conn.execute(
+        "UPDATE datasets SET import_state = 'failed', import_error = ? WHERE id = ?",
+        params![err, dataset_id],
+    ) {
+        log::error!("import {dataset_id}: mark_failed: {e}");
     }
 }
 

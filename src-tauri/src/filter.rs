@@ -191,6 +191,36 @@ fn normalized(expr: &str) -> String {
     format!("lower(trim(COALESCE({expr}, '')))")
 }
 
+/// The cell of one extra column by position, over alias `c`. Keys are
+/// positions we stored; the quoted-key path form addresses object keys,
+/// not array positions.
+pub(crate) fn cell_sql(position: usize) -> String {
+    format!("json_extract_string(c.extra_columns, '$.\"{position}\"')")
+}
+
+/// The expression of a scope column over alias `c`, with its parameters:
+/// the cell itself for one source, else a `CASE` on `c.dataset_id` with the
+/// ids bound (a source without the column is left out and reads NULL).
+pub(crate) fn column_sql(scope: &Scope, name: &str) -> Result<(String, Vec<Value>), String> {
+    let sources = scope
+        .columns
+        .get(name)
+        .filter(|sources| !sources.is_empty())
+        .ok_or_else(|| format!("unknown column \u{201c}{name}\u{201d}"))?;
+    if let ([only], [_]) = (sources.as_slice(), scope.sources.as_slice()) {
+        return Ok((cell_sql(only.position), Vec::new()));
+    }
+    let mut sql = String::from("CASE c.dataset_id");
+    let mut params = Vec::with_capacity(sources.len());
+    for source in sources {
+        sql.push_str(" WHEN ? THEN ");
+        sql.push_str(&cell_sql(source.position));
+        params.push(Value::Text(source.dataset_id.clone()));
+    }
+    sql.push_str(" END");
+    Ok((sql, params))
+}
+
 /// The expression a text field compares, over alias `c`.
 fn field_expr(field: &FilterField, scope: &Scope) -> Result<Expr, String> {
     match field {
@@ -199,27 +229,7 @@ fn field_expr(field: &FilterField, scope: &Scope) -> Result<Expr, String> {
         FilterField::Title => Ok(Expr::fixed("c.course_title")),
         FilterField::SourceDataset => Ok(Expr::fixed("c.dataset_id")),
         FilterField::Column { name } => {
-            let sources = scope
-                .columns
-                .get(name)
-                .filter(|sources| !sources.is_empty())
-                .ok_or_else(|| format!("unknown column \u{201c}{name}\u{201d}"))?;
-            let cell = |position: usize| {
-                // Keys are positions we stored; the quoted-key path form
-                // addresses object keys, not array positions.
-                format!("json_extract_string(c.extra_columns, '$.\"{position}\"')")
-            };
-            if let ([only], [_]) = (sources.as_slice(), scope.sources.as_slice()) {
-                return Ok(Expr::fixed(&cell(only.position)));
-            }
-            let mut sql = String::from("CASE c.dataset_id");
-            let mut params = Vec::with_capacity(sources.len());
-            for source in sources {
-                sql.push_str(" WHEN ? THEN ");
-                sql.push_str(&cell(source.position));
-                params.push(Value::Text(source.dataset_id.clone()));
-            }
-            sql.push_str(" END");
+            let (sql, params) = column_sql(scope, name)?;
             Ok(Expr { sql, params })
         }
         FilterField::Ccm { .. } => Err("a CCM field is not a text expression".to_owned()),
