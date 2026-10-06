@@ -1,6 +1,6 @@
 import { type MaybeRefOrGetter, computed, toValue } from "vue";
 import { useQuery } from "@tanstack/vue-query";
-import { type CoursePage, type CoverageRow, commands } from "../bindings";
+import { type CoursePage, type CoverageRow, type FilterSpec, commands } from "../bindings";
 
 interface UseCoursesArgs {
   datasetId: MaybeRefOrGetter<string>;
@@ -11,6 +11,8 @@ interface UseCoursesArgs {
    */
   cursor: MaybeRefOrGetter<number | null>;
   pageSize: MaybeRefOrGetter<number>;
+  /** Rows to include (#254); no rows means every row. */
+  filter: MaybeRefOrGetter<FilterSpec>;
   /**
    * When false, the query is disabled — useful while a dataset is still
    * importing so we don't pile up `list_courses_with_results` IPCs against a
@@ -35,6 +37,7 @@ export function useCourses(args: UseCoursesArgs) {
           toValue(args.modelId),
           toValue(args.cursor),
           toValue(args.pageSize),
+          toValue(args.filter),
         ] as const,
     ),
     queryFn: async (): Promise<CoursePage> => {
@@ -43,6 +46,7 @@ export function useCourses(args: UseCoursesArgs) {
         modelId: toValue(args.modelId),
         cursor: toValue(args.cursor),
         limit: toValue(args.pageSize),
+        filter: toValue(args.filter),
       });
       if (result.status === "error") throw new Error(result.error);
       return result.data;

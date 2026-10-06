@@ -10,6 +10,7 @@ mod courses;
 mod datasets;
 pub mod db;
 mod export;
+mod filter;
 pub mod format;
 mod import;
 pub mod inference;
@@ -55,6 +56,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             datasets::get_input_profile,
             datasets::list_datasets,
             export::export_results,
+            filter::column_values,
+            filter::dataset_columns,
             import::import_csv,
             logging::open_logs_dir,
             metrics::list_metrics,

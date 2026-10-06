@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { useQueryClient } from "@tanstack/vue-query";
 import { computed, ref, watch } from "vue";
-import { type ClassifyState, commands } from "../../bindings";
+import { type ClassifyState, type FilterSpec, commands } from "../../bindings";
+import FilterRows from "../../components/filter/FilterRows.vue";
 import InputProfilePanel from "../../components/InputProfilePanel.vue";
 import InputSamples from "../../components/InputSamples.vue";
 import { INPUT_FINDINGS } from "../../config/inputFindings";
 import { useCourses, useCoverage, useModelIdForDigitLevel } from "../../composables/useCourses";
 import { useDatasets, useInputProfile } from "../../composables/useDatasets";
+import { completeRows, useDatasetColumns } from "../../composables/useFilter";
 import {
   progressDone,
   progressTotal,
@@ -252,9 +254,17 @@ const PAGE_SIZE = 50;
 const cursor = ref<number | null>(null);
 const cursorStack = ref<number[]>([]);
 
+// --- Filter (#254) ---
+// The editor's rows, including half-built ones; only complete rows reach
+// the query. The same spec will back Save as Dataset.
+const filter = ref<FilterSpec>({ rows: [] });
+const activeFilter = computed(() => completeRows(filter.value));
+const isFiltered = computed(() => activeFilter.value.rows.length > 0);
+const { data: datasetColumns } = useDatasetColumns(currentDatasetId);
+
 // Reset pagination whenever the user switches digit level (the joined column
-// changes underneath them).
-watch(viewLevel, () => {
+// changes underneath them) or the filter changes (the row set does).
+watch([viewLevel, () => JSON.stringify(activeFilter.value)], () => {
   cursor.value = null;
   cursorStack.value = [];
 });
@@ -270,6 +280,7 @@ const {
   modelId: computed(() => modelId.value ?? null),
   cursor,
   pageSize: PAGE_SIZE,
+  filter: activeFilter,
   // Pause this query entirely while the import is still streaming rows. The
   // page is dynamic (cursor/limit) so each query is a real read against a
   // file that's getting hammered by the Appender; skipping while
@@ -728,8 +739,9 @@ watch(
         <div class="flex items-baseline gap-3">
           <span class="text-xs text-(--ui-text-dimmed) tabular-nums">
             <template v-if="totalRows > 0">
-              {{ pageRows.length.toLocaleString() }} of {{ totalRows.toLocaleString() }}
+              {{ pageRows.length.toLocaleString() }} of {{ totalRows.toLocaleString() }}{{ isFiltered ? " matching" : "" }}
             </template>
+            <template v-else-if="isFiltered">No courses match</template>
           </span>
           <UButton
             variant="outline"
@@ -786,6 +798,12 @@ watch(
         </div>
       </div>
 
+      <FilterRows
+        v-model="filter"
+        :columns="datasetColumns ?? []"
+        :lookup-dataset-id="currentDatasetId"
+      />
+
       <p v-if="exportError" class="text-sm text-(--ui-color-error-500)">
         Export failed: {{ exportError }}
       </p>
@@ -827,7 +845,7 @@ watch(
                 class="text-(--ui-text-dimmed)"
               >
                 <td colspan="6" class="px-3 py-6 text-center">
-                  No courses in this dataset.
+                  {{ isFiltered ? "No courses match the filter." : "No courses in this dataset." }}
                 </td>
               </tr>
               <tr

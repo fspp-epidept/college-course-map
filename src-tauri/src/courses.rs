@@ -2,11 +2,16 @@
 //! left against `inference_results` for an optional model so the same query
 //! powers both the unclassified preview and the results browser.
 
+use duckdb::types::Value;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::State;
 
-use crate::boot::{Boot, Services};
+use crate::{
+    boot::{Boot, Services},
+    filter::{self, FilterSpec, Scope},
+    layout::Layout,
+};
 
 /// Hard cap on `limit`. Without this a malicious / buggy caller could ask for
 /// the whole dataset; bounding here keeps a single IPC response cheap.
@@ -26,6 +31,8 @@ pub(crate) struct ListCoursesRequest {
     /// partition; the range predicate lets the scan skip to the cursor.
     pub cursor: Option<i64>,
     pub limit: u32,
+    /// Rows to include (`filter.rs`); `None` or no rows means every row.
+    pub filter: Option<FilterSpec>,
 }
 
 #[derive(Type, Serialize, Debug)]
@@ -73,29 +80,52 @@ pub(crate) fn list_courses_with_results(
     boot: State<'_, Boot>,
 ) -> Result<CoursePage, String> {
     let limit = req.limit.clamp(1, MAX_PAGE_SIZE);
-    let conn = boot.ready()?.db.ro()?;
+    let Services { db, catalog, .. } = boot.ready()?;
+    let conn = db.ro()?;
 
-    // Use the cached `datasets.row_count` rather than a `COUNT(*)` against
-    // the courses table — for a multi-million-row dataset the scan dominates
-    // page-load time and the cached value is authoritative for file-source
-    // datasets (set by `mark_ready` after the Appender finishes). Falls back
-    // to a real count when the cached value is NULL.
-    let cached: Option<i64> = conn
-        .query_row(
+    // The filter compiles to a fragment over alias `c` with bound
+    // parameters; an empty spec compiles to nothing.
+    let filtered = req.filter.as_ref().is_some_and(|f| !f.rows.is_empty());
+    let compiled = match &req.filter {
+        Some(spec) if filtered => {
+            let layout = Layout::read(&conn, &req.dataset_id)?;
+            let scope = Scope::for_dataset(&req.dataset_id, layout.as_ref());
+            filter::compile(spec, &scope, |level| catalog.model_id(level))?
+        }
+        _ => filter::Compiled::default(),
+    };
+
+    // Unfiltered, use the cached `datasets.row_count` rather than a
+    // `COUNT(*)` against the courses table — for a multi-million-row dataset
+    // the scan dominates page-load time and the cached value is
+    // authoritative (set by `mark_ready` after the Appender finishes). Falls
+    // back to a real count when the cached value is NULL. A filter needs the
+    // real count of what it matches.
+    let cached: Option<i64> = if filtered {
+        None
+    } else {
+        conn.query_row(
             "SELECT row_count FROM datasets WHERE id = ?",
             [&req.dataset_id],
             |row| row.get(0),
         )
-        .ok();
+        .ok()
+    };
     let total: i64 = match cached {
         Some(n) if n >= 0 => n,
-        _ => conn
-            .query_row(
-                "SELECT COUNT(*) FROM courses WHERE dataset_id = ?",
-                [&req.dataset_id],
+        _ => {
+            let mut params: Vec<Value> = vec![Value::Text(req.dataset_id.clone())];
+            params.extend(compiled.params.iter().cloned());
+            conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM courses c WHERE c.dataset_id = ?{}",
+                    compiled.sql
+                ),
+                duckdb::params_from_iter(params.iter()),
                 |row| row.get(0),
             )
-            .map_err(|e| format!("count courses: {e}"))?,
+            .map_err(|e| format!("count courses: {e}"))?
+        }
     };
 
     // Step 1: page the courses table on its own via key-set cursor. The
@@ -104,36 +134,37 @@ pub(crate) fn list_courses_with_results(
     // involved (0008 dropped it): a page measured ~2 ms on 2.9M rows.
     let cursor = req.cursor.unwrap_or(0);
     let mut stmt = conn
-        .prepare(
-            "SELECT id, row_index, subject_code, catalog_number,
-                    course_title, content_hash
-             FROM courses
-             WHERE dataset_id = ? AND row_index >= ?
-             ORDER BY row_index
+        .prepare(&format!(
+            "SELECT c.id, c.row_index, c.subject_code, c.catalog_number,
+                    c.course_title, c.content_hash
+             FROM courses c
+             WHERE c.dataset_id = ? AND c.row_index >= ?{}
+             ORDER BY c.row_index
              LIMIT ?",
-        )
+            compiled.sql
+        ))
         .map_err(|e| format!("prepare list courses: {e}"))?;
 
+    let mut params: Vec<Value> = vec![Value::Text(req.dataset_id.clone()), Value::BigInt(cursor)];
+    params.extend(compiled.params);
+    params.push(Value::BigInt(i64::from(limit)));
     let rows = stmt
-        .query_map(
-            duckdb::params![req.dataset_id, cursor, i64::from(limit)],
-            |row| {
-                Ok(CourseRow {
-                    id: row.get(0)?,
-                    row_index: row.get(1)?,
-                    subject_code: row.get(2)?,
-                    catalog_number: row.get(3)?,
-                    course_title: row.get(4)?,
-                    content_hash: row.get(5)?,
-                    classification: None,
-                    probability: None,
-                    ccm_title: None,
-                    ccm_title_short: None,
-                    ccm_description: None,
-                    ccm_title_level: None,
-                })
-            },
-        )
+        .query_map(duckdb::params_from_iter(params.iter()), |row| {
+            Ok(CourseRow {
+                id: row.get(0)?,
+                row_index: row.get(1)?,
+                subject_code: row.get(2)?,
+                catalog_number: row.get(3)?,
+                course_title: row.get(4)?,
+                content_hash: row.get(5)?,
+                classification: None,
+                probability: None,
+                ccm_title: None,
+                ccm_title_short: None,
+                ccm_description: None,
+                ccm_title_level: None,
+            })
+        })
         .map_err(|e| format!("query courses: {e}"))?;
 
     let mut collected: Vec<CourseRow> = rows

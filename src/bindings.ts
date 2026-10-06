@@ -172,6 +172,28 @@ async exportResults(req: ExportRequest) : Promise<Result<ExportOutcome | null, s
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The most frequent distinct values of a field in a dataset (Excel
+ * `AutoFilter` style), trimmed, blank values left out, at most
+ * [`MAX_DISTINCT_VALUES`], those containing `search` (case-insensitive)
+ * first by count then by value. Read-only; one `GROUP BY`.
+ */
+async columnValues(req: ColumnValuesRequest) : Promise<Result<ColumnValue[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("column_values", { req }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async datasetColumns(datasetId: string) : Promise<Result<DatasetColumn[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dataset_columns", { datasetId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async importCsv(req: ImportRequest) : Promise<Result<ImportStarted, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_csv", { req }) };
@@ -573,6 +595,17 @@ export type ColumnStats = { header: string; empty: number; distinct: number;
  * `top` only reflects values seen before the cap.
  */
 distinctCapped: boolean; top: ValueCount[] }
+export type ColumnValue = { value: string; count: number; 
+/**
+ * For a CCM code, its taxonomy title (the 2-digit parent's for a
+ * 6-digit code the table lacks; none at the 4-digit level).
+ */
+label: string | null }
+/**
+ * A value picker's request: the distinct values of one field in one
+ * dataset, narrowed by a search string.
+ */
+export type ColumnValuesRequest = { datasetId: string; field: FilterField; search: string }
 export type CoursePage = { rows: CourseRow[]; total: number }
 export type CourseRow = { id: number; rowIndex: number; subjectCode: string | null; catalogNumber: string | null; courseTitle: string | null; contentHash: string; 
 /**
@@ -614,6 +647,11 @@ export type DatabaseUsage = { path: string; fileBytes: number; walBytes: number;
  * Exact: the free blocks inside the file, which a compaction returns.
  */
 reclaimableBytes: number }
+/**
+ * The columns of one dataset a filter may name: key and header spelling,
+ * in layout order. Empty for a dataset with no stored layout.
+ */
+export type DatasetColumn = { name: string; header: string }
 /**
  * One row in the Datasets activity tab. Timestamps are serialized as ISO-8601
  * strings rather than `chrono::DateTime` so we don't need a specta-chrono
@@ -686,6 +724,33 @@ lenMin: number; lenMedian: number; lenMax: number;
 topShapes: ValueCount[] }
 export type FieldShapes = { subject: FieldShape; catalog: FieldShape; title: FieldShape }
 export type FileUsage = { name: string; bytes: number; modifiedAt: string | null }
+export type FilterField = { kind: "subject" } | { kind: "catalog" } | { kind: "title" } | 
+/**
+ * A column of the scope by name (a header key for one dataset, an
+ * output column for a derivation), resolved to a position per source.
+ */
+{ kind: "column"; name: string } | 
+/**
+ * Values are source dataset ids. Only meaningful over several sources.
+ */
+{ kind: "sourceDataset" } | 
+/**
+ * The cached classification at a digit level. Matches only rows that
+ * already have a result for that level's active model.
+ */
+{ kind: "ccm"; digitLevel: number }
+export type FilterOp = "is" | "isNot" | "contains" | "notContains" | "startsWith" | "isEmpty" | "isNotEmpty"
+export type FilterRow = { field: FilterField; op: FilterOp; 
+/**
+ * OR within the row. Empty for `isEmpty` / `isNotEmpty`, at least one
+ * non-blank value otherwise.
+ */
+values: string[] }
+export type FilterSpec = { 
+/**
+ * AND of rows. An empty list matches every row.
+ */
+rows: FilterRow[] }
 export type Finding = { code: FindingCode; severity: Severity; field: Field; count: number; 
 /**
  * `count / importable`; 0.0 for dataset-level checks with no row count.
@@ -777,7 +842,11 @@ modelId: number | null;
  * `TopN` plan for `ORDER BY row_index LIMIT n OFFSET m` scans the whole
  * partition; the range predicate lets the scan skip to the cursor.
  */
-cursor: number | null; limit: number }
+cursor: number | null; limit: number; 
+/**
+ * Rows to include (`filter.rs`); `None` or no rows means every row.
+ */
+filter: FilterSpec | null }
 export type MappedColumns = { subject: ColumnStats; catalog: ColumnStats; title: ColumnStats }
 /**
  * A frontend-handled menu command. The serde name is the native menu item id.
