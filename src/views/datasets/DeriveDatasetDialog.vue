@@ -17,8 +17,8 @@ import {
 import { useWorkspace } from "../../stores/workspace";
 
 // Build a dataset from the rows of one or more datasets that match a filter
-// (#254). Top to bottom: sources, filter, preview, columns, duplicates,
-// title. Opened by Save as Dataset (seeded with a dataset and its filter)
+// (#254). Top to bottom: sources, filter, preview, columns (with the
+// duplicate key as a Compare column), title. Opened by Save as Dataset (seeded with a dataset and its filter)
 // and New from Datasets (empty) through the workspace store. The backend
 // re-checks everything; the checks here only keep Create honest.
 const open = defineModel<boolean>("open", { required: true });
@@ -52,6 +52,8 @@ const filter = ref<FilterSpec>({ rows: [] });
 interface ColumnDraft {
   key: string;
   keep: boolean;
+  /** Part of the duplicate key (the table's Compare column). */
+  compare: boolean;
   name: string;
   from: ColumnOrigin[];
 }
@@ -74,6 +76,7 @@ watch(defaults, (d) => {
     key: String(i),
     // Default: columns every source has are kept.
     keep: c.from.length === sources.value.length,
+    compare: false,
     name: c.name,
     from: c.from,
   }));
@@ -143,20 +146,26 @@ watch(outputColumns, (columns) => {
 });
 
 // --- Duplicates ---
-const dedupeMode = ref<"all" | "columns">("all");
-const dedupeColumns = ref<string[]>([]);
-// Every kept column by default, including source_dataset: rows from
-// different datasets never collapse unless the user unticks it.
-watch(
-  outputNames,
-  (names) => {
-    dedupeColumns.value = names.filter((n) => n !== "");
-  },
-  { immediate: true },
-);
-const dedupeItems = computed(() =>
-  outputNames.value.filter((n) => n !== "").map((n) => ({ label: n, value: n })),
-);
+// The duplicate key is the Compare column of the columns table: rows equal
+// in every compared column collapse to the first in dataset order. Nothing
+// compared means every row is kept. Drafts merged under one name compare
+// when any of them does.
+const mappedCompare = ref({ subject: false, catalog: false, title: false });
+const sourceCompare = ref(false);
+const dedupeColumns = computed<string[]>(() => {
+  const names: string[] = [];
+  for (const field of ["subject", "catalog", "title"] as const) {
+    if (mappedCompare.value[field]) names.push(mapped.value[field].trim());
+  }
+  const compared = new Set(
+    drafts.value.filter((d) => d.keep && d.compare).map((d) => d.name.trim().toLowerCase()),
+  );
+  for (const column of outputColumns.value) {
+    if (compared.has(column.name.toLowerCase())) names.push(column.name);
+  }
+  if (merge.value && sourceCompare.value) names.push(SOURCE_COLUMN);
+  return names.filter((n) => n !== "");
+});
 
 // --- Title ---
 const title = ref("");
@@ -185,8 +194,7 @@ const request = computed<DeriveRequest | null>(() => {
       title: mapped.value.title.trim(),
     },
     columns: outputColumns.value,
-    dedupeColumns:
-      dedupeMode.value === "columns" && dedupeColumns.value.length > 0 ? dedupeColumns.value : null,
+    dedupeColumns: dedupeColumns.value.length > 0 ? dedupeColumns.value : null,
   };
 });
 // Debounced so typing in a name or value doesn't query per keystroke.
@@ -224,6 +232,12 @@ const createDisabled = computed(
   () => request.value === null || previewError.value !== null || create.isPending.value,
 );
 
+// A click outside the dialog doesn't close it: its menus are big and a
+// miss would throw away the whole form. Escape and Cancel still do.
+function stayOpen(event: Event): void {
+  event.preventDefault();
+}
+
 // Seed from the opener each time the dialog opens; everything else resets.
 watch(open, (now) => {
   if (!now) return;
@@ -232,7 +246,8 @@ watch(open, (now) => {
     rows: workspace.deriveSeed.filter.rows.map((r) => ({ ...r, values: [...r.values] })),
   };
   title.value = "";
-  dedupeMode.value = "all";
+  mappedCompare.value = { subject: false, catalog: false, title: false };
+  sourceCompare.value = false;
   create.reset();
 });
 </script>
@@ -243,6 +258,7 @@ watch(open, (now) => {
     title="New dataset from datasets"
     description="Rows from one or more datasets that match a filter, with the columns you choose. The new dataset is a copy and does not change when its sources do."
     :ui="{ content: 'max-w-5xl' }"
+    :content="{ onInteractOutside: stayOpen }"
   >
     <template #body>
       <div class="flex flex-col gap-6 text-sm">
@@ -300,7 +316,7 @@ watch(open, (now) => {
                       .join(", ")
                   }})
                 </template>
-                <template v-if="dedupeMode === 'columns'"> before removing duplicates</template>
+                <template v-if="dedupeColumns.length > 0"> before removing duplicates</template>
               </span>
               <span v-if="previewFetching" class="text-xs text-(--ui-text-dimmed)">Updating…</span>
             </div>
@@ -356,6 +372,7 @@ watch(open, (now) => {
                 <thead class="bg-(--ui-bg-muted)">
                   <tr>
                     <th class="px-3 py-2 text-left font-medium text-(--ui-text) w-12">Keep</th>
+                    <th class="px-3 py-2 text-left font-medium text-(--ui-text) w-20">Compare</th>
                     <th class="px-3 py-2 text-left font-medium text-(--ui-text)">Name in new dataset</th>
                     <th
                       v-for="s in sourceInfo"
@@ -373,6 +390,9 @@ watch(open, (now) => {
                     class="border-t border-(--ui-border-muted)"
                   >
                     <td class="px-3 py-1.5 text-(--ui-text-dimmed)">always</td>
+                    <td class="px-3 py-1.5">
+                      <UCheckbox v-model="mappedCompare[field]" :aria-label="`Compare ${field}`" />
+                    </td>
                     <td class="px-3 py-1.5">
                       <UInput v-model="mapped[field]" size="xs" :aria-label="`Name of the ${field} column`" />
                     </td>
@@ -393,6 +413,13 @@ watch(open, (now) => {
                       <UCheckbox v-model="draft.keep" :aria-label="`Keep ${draft.name}`" />
                     </td>
                     <td class="px-3 py-1.5">
+                      <UCheckbox
+                        v-model="draft.compare"
+                        :disabled="!draft.keep"
+                        :aria-label="`Compare ${draft.name}`"
+                      />
+                    </td>
+                    <td class="px-3 py-1.5">
                       <UInput v-model="draft.name" size="xs" :disabled="!draft.keep" aria-label="Column name" />
                     </td>
                     <td
@@ -405,6 +432,9 @@ watch(open, (now) => {
                   </tr>
                   <tr v-if="merge" class="border-t border-(--ui-border-muted)">
                     <td class="px-3 py-1.5 text-(--ui-text-dimmed)">always</td>
+                    <td class="px-3 py-1.5">
+                      <UCheckbox v-model="sourceCompare" aria-label="Compare source dataset" />
+                    </td>
                     <td class="px-3 py-1.5 text-(--ui-text)"><code>source_dataset</code></td>
                     <td
                       v-for="s in sourceInfo"
@@ -418,32 +448,19 @@ watch(open, (now) => {
               </table>
             </div>
             <p v-if="columnError" class="text-(--ui-color-error-500)">{{ columnError }}</p>
+            <p class="text-xs text-(--ui-text-dimmed)">
+              <template v-if="dedupeColumns.length > 0">
+                Rows equal in {{ dedupeColumns.join(", ") }} are duplicates; the first in dataset
+                order is kept.
+              </template>
+              <template v-else>
+                Compare columns to remove duplicates: rows equal in every compared column collapse
+                to the first in dataset order. Nothing compared keeps every row.
+              </template>
+            </p>
           </section>
 
-          <!-- 5. Duplicates -->
-          <section class="flex flex-col gap-2">
-            <h3 class="font-medium text-(--ui-text)">Duplicates</h3>
-            <URadioGroup
-              v-model="dedupeMode"
-              :items="[
-                { value: 'all', label: 'Keep all rows' },
-                {
-                  value: 'columns',
-                  label: 'Remove rows that repeat in the chosen columns',
-                  description: 'The first row in dataset order is kept.',
-                },
-              ]"
-            />
-            <UCheckboxGroup
-              v-if="dedupeMode === 'columns'"
-              v-model="dedupeColumns"
-              :items="dedupeItems"
-              orientation="horizontal"
-              class="ml-6"
-            />
-          </section>
-
-          <!-- 6. Title -->
+          <!-- 5. Title -->
           <section class="flex flex-col gap-2">
             <h3 class="font-medium text-(--ui-text)">Title</h3>
             <UInput v-model="title" :placeholder="suggestedTitle" class="max-w-md" aria-label="Title" />
