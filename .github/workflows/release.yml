@@ -220,7 +220,8 @@ jobs:
       # directory into <app>.app.tar.gz, so a directory entry means "upload
       # its tarball", renamed to tauri-action's <name>_<version>_<arch>
       # release-asset scheme. tauri-action no longer writes the updater's
-      # latest.json; generate it here when the updater lands.
+      # latest.json; generate it here when the updater lands. jq on the
+      # Windows runner writes CRLF, so the \r is stripped before `read`.
       - name: Upload installers to the release
         shell: bash
         env:
@@ -238,5 +239,5 @@ jobs:
             else
               files+=("$path")
             fi
-          done < <(jq -r '.[]' <<<"$ARTIFACT_PATHS")
+          done < <(jq -r '.[]' <<<"$ARTIFACT_PATHS" | tr -d '\r')
           gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
