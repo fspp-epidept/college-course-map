@@ -36,7 +36,7 @@ specta = { version = "=2.0.0-rc.22", features = ["derive"] }
 # Exact pin (#204): a DuckDB bump is a reviewed change. It moves this pin,
 # `DUCKDB_VERSION` in db.rs and adds an upgrade fixture (`task db:fixture`) in
 # one PR. 1.10503.1 bundles DuckDB v1.5.3.
-duckdb = { version = "=1.10503.1", features = ["bundled", "serde_json"] }
+duckdb = { version = "=1.10503.1", features = ["bundled", "json", "serde_json"] }
 blake3 = "1"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

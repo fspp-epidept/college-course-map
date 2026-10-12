@@ -40,7 +40,7 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
-use duckdb::{Connection, params};
+use duckdb::{Config, Connection, params};
 
 use crate::boot::{Phase, Progress};
 
@@ -137,6 +137,14 @@ impl std::fmt::Debug for AppDb {
     }
 }
 
+/// Open the app database. `json` is compiled in (the `json` cargo feature),
+/// and extension autoloading is off, so `DuckDB` never installs or loads an
+/// extension from `~/.duckdb`: on macOS a signed app's library validation
+/// rejects those ad-hoc-signed files, and the open fails (#261).
+fn open_file(path: &Path) -> duckdb::Result<Connection> {
+    Connection::open_with_flags(path, Config::default().enable_autoload_extension(false)?)
+}
+
 impl AppDb {
     /// Resolve the on-disk path, create the parent directory, open the RW
     /// connection, apply any pending migrations, then clone a read handle off
@@ -165,7 +173,7 @@ impl AppDb {
         // First, before anything opens the file: the upgrade guard and
         // backup below must see the swapped database.
         apply_pending_compaction(&path)?;
-        let (rw, recovery_notice) = match Connection::open(&path) {
+        let (rw, recovery_notice) = match open_file(&path) {
             Ok(conn) => (conn, None),
             Err(e) if is_wal_replay_failure(&e) => {
                 let set_aside = set_aside_wal(&path, &e)?;
@@ -173,7 +181,7 @@ impl AppDb {
                     "startup: WAL replay failed ({e}); set aside as {} and reopened",
                     set_aside.display()
                 );
-                let conn = Connection::open(&path).map_err(|e| e.to_string())?;
+                let conn = open_file(&path).map_err(|e| e.to_string())?;
                 (conn, Some(recovery_notice(&set_aside)))
             }
             Err(e) if is_newer_storage(&e.to_string()) => return Err(newer_data_message(None)),
@@ -663,7 +671,7 @@ fn upgrade(
             dest.display(),
             meta.duckdb_version.as_deref().unwrap_or("unknown"),
         );
-        let conn = Connection::open(path).map_err(|e| e.to_string())?;
+        let conn = open_file(path).map_err(|e| e.to_string())?;
         (conn, Some(dest))
     } else {
         (conn, None)
@@ -982,7 +990,7 @@ mod tests {
     use super::{
         AppDb, COPY_ORDER, Meta, SET_ASIDE_WAL_MAX_AGE, back_up, backups as backup_files,
         copy_database, head_version, is_newer_storage, library_version, migrate,
-        newer_data_message, rotate_set_aside_wals, schema_version, seed_ccm_taxonomy,
+        newer_data_message, open_file, rotate_set_aside_wals, schema_version, seed_ccm_taxonomy,
         set_aside_wals, stage_compaction, suffixed, wal_path,
     };
     use crate::boot::{Boot, Phase, Progress};
@@ -1072,6 +1080,33 @@ mod tests {
     fn duckdb_version_is_the_pinned_one() -> Result<(), String> {
         let conn = duckdb::Connection::open_in_memory().map_err(|e| e.to_string())?;
         assert_eq!(library_version(&conn)?, DUCKDB_VERSION);
+        Ok(())
+    }
+
+    /// `json` is compiled in and nothing autoloads, so opening the database
+    /// never reaches for an extension under `~/.duckdb` (#261).
+    #[test]
+    fn json_is_linked_and_autoload_is_off() -> Result<(), String> {
+        let root = scratch("extensions")?;
+        let conn = open_file(&root.join("app.duckdb")).map_err(|e| e.to_string())?;
+        let (loaded, mode): (bool, String) = conn
+            .query_row(
+                "SELECT loaded, install_mode FROM duckdb_extensions() \
+                 WHERE extension_name = 'json'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        assert!(loaded);
+        assert_eq!(mode, "STATICALLY_LINKED");
+        let autoload: bool = conn
+            .query_row(
+                "SELECT current_setting('autoload_known_extensions')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        assert!(!autoload);
         Ok(())
     }
 
