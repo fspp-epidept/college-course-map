@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.6.0...course-classifier-v0.6.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* compile DuckDB's json extension in, never autoload ([#262](https://github.com/fspp-epidept/college-course-map/issues/262)) ([df80df8](https://github.com/fspp-epidept/college-course-map/commit/df80df88e02b247f65134ce60ad07c8b96a3193c))
+
 ## [0.6.0](https://github.com/fspp-epidept/college-course-map/compare/course-classifier-v0.5.0...course-classifier-v0.6.0) (2026-10-06)
 
 
